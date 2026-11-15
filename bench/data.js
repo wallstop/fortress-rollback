@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794779886800,
+  "lastUpdate": 1794787172570,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "2363992a728cdfcb14fb67f2ae3ef9a7f75be1e4",
-          "message": "perf: streamline SyncTest and harden mutation CI (#301)\n\n## Summary\n\n- refresh all four Cargo workspace lockfiles through compatible\nminor/patch releases, with `syn` advanced to 3.0.4 and MSRV-blocked\nmajors explicitly left in place\n- add a hermetic pip-vs-uv benchmark, informational quality job,\nartifact, and manual pre-commit hook for #281\n- profile and streamline `SyncTestSession::advance_frame`: prune\nchecksum history once and avoid allocating a mismatch vector on the\nconsistent hot path\n- repair mutation CI after the latest-main timeout: pin cargo-mutants\n27.1.0, use exact-head diff scope for PR/push, dynamically shard the\n4,696-mutant full corpus on Linux, exclude formal-proof-only false\nmutants, and aggregate every shard fail-closed\n- complete the #287 tool-gap audit; track the two real follow-ups\nseparately in #299 (incremental Python typing) and #300\n(standalone-workspace supply-chain coverage)\n\n## Latest-main RCA\n\nThe post-merge main audit found 18 successful workflow runs plus one\ncancelled mutation run. The old workflow serially repeated 5,668 mutants\non Linux, macOS, and Windows; included 972 Kani-only mutants invisible\nto ordinary tests; used derived per-mutant timeouts up to 1,055 seconds;\nfloated cargo-mutants; passed a list-only runtime flag; parsed the wrong\nreport path; and swallowed failures.\n\nThis PR replaces that topology with one authoritative baseline and\nbounded exact-head shards. Diff/filtered runs reject every missed or\ntimed-out mutant. Full sweeps reject every timeout and require at least\nan 80% global mutation score. Missing artifacts, incomplete shard\nindexes/counts, contradictory exit statuses, infrastructure failures,\nand cancelled dependencies all fail the summary.\n\n## Validation\n\n- `cargo fmt --all -- --check`\n- strict workspace Clippy with `tokio,json`\n- default Nextest: 2,999 passed, 71 skipped\n- hot-join Nextest: 3,257 passed, 72 skipped\n- complete Python suite: 2,083 passed\n- mutation workflow/aggregator contracts: 14 passed\n- exact local mutation diff: 25 mutants; 10 caught, 15 unviable, 0\nmissed, 0 timed out\n- full production mutation listing: 4,696; 0 Kani/proof and 0\n`proof_vec` leaks\n- `cargo deny check` and `cargo audit --deny warnings`\n- `python3 scripts/ci/agent-preflight.py --all`\n- actionlint, workspace lock freshness, rustdoc, and doctests\n- final adversarial re-review: zero remaining findings\n\nCloses #281.\nCloses #287.\nAdvances #297; the remaining P2P/spectator sweep stays open.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes rollback checksum verification in\n`SyncTestSession::advance_frame` (two-pass logic with documented\nside-effect idempotency) plus CI now gates PRs on mutation results—both\naffect determinism testing and merge policy.\n> \n> **Overview**\n> **SyncTest hot path:** `SyncTestSession::advance_frame` now prunes\nchecksum history **once** per advance (via `prune_checksum_history`)\ninstead of repeating an O(history) `BTreeMap` retain on every frame in\nthe window, and uses an **`any()` probe** so the common all-consistent\ncase avoids building a mismatch `Vec`. Mismatch reporting and rollback\nbehavior are unchanged; new regression tests lock down multi-frame\n`MismatchedChecksum` payloads and pruning bounds.\n> \n> **Mutation CI:** Replaces the cross-platform serial workflow with a\n**baseline + dynamically sharded Linux** pipeline: PR/push runs\n**`--in-diff`** on changed `*.rs`, pins **cargo-mutants 27.1.0**, uses\nper-mutant timeouts and fail-closed aggregation via\n**`aggregate_mutation_results.py`** (zero missed/timeouts on\ndiff/filtered; ≥80% score on full sweeps). **Kani-only** code is\nexcluded from mutation (`proof_vec.rs`, `exclude_re`, `mutants::skip` on\nproof modules).\n> \n> **Tooling / evidence:** Adds a hermetic **pip vs uv** benchmark\nscript, informational quality CI job, manual pre-commit hook, and\ncontract tests; updates code-review guidance on iterator `clone()` vs\ncollection clone; folds min/max lag in simulation fleet tests to avoid\nredundant iterator clones. Lockfiles refresh minor/patch deps.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nce523fc26d521a5a5db61d036516ca654f03059f. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-24T13:35:07-07:00",
-          "tree_id": "206ec0183013bf3431ff81d54e8b1fdc1a4a8c7a",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/2363992a728cdfcb14fb67f2ae3ef9a7f75be1e4"
-        },
-        "date": 1787604187841,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 38902,
-            "range": "± 122",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 31189,
-            "range": "± 120",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1091,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1243,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2764,
-            "range": "± 183",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2995,
             "range": "± 180",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1d4376798f7ec24a5a57dce76a87005897b87586",
+          "message": "ci(kani): gate PRs on a cfg(kani) compile check (#431)\n\n## Summary\n\nCloses #429, and folds in the actionable findings from three independent\naudits\n(CAP/partition correctness, hot-path performance, adversarial CI\nreview).\n\nPR #427 merged a by-reference `ProofVec` iteration that clippy, tests,\nand rustdoc all\naccept because `ProofVec<T>` is `Vec<T>` in every normal build. The\nfirst compilation of\nthe `cfg(kani)` tree was the merge-group Kani tier, so `main` went red\nafter merging.\nThe PR gate now runs a compile-only `cargo kani --only-codegen` job that\ncatches that\nclass of break before merge.\n\n## CI gate + toolchain\n\n- `.github/workflows/ci-pr.yml`\n- `changes` job runs `scripts/ci/detect-kani-changes.sh` (the single\npath-filter\n    authority). Detection failures fail closed.\n  - `kani-compile` (`needs: changes`) installs pinned Kani and runs\n    `cargo kani --only-codegen`; it is aggregated by `CI Gate`.\n  - Job timeout (40 min) covers the install retry budget plus codegen.\n- `.kani-version` + `.github/actions/setup-kani/action.yml`\n- Single version authority, exact `--version \"=<pin>\"` install, exact\nreported-version\ncheck, shared install/cache steps for the PR gate and all three deep\ntiers.\n  - Devcontainer installs the same pin.\n- Contract tests\n- Executable classifier tests against a scratch git remote (src, nested\nmember\nmanifests, both actions, `.kani-version` => true; docs => false;\nempty/unfetchable\n    base => true).\n- Compile step cannot be bypassed (`continue-on-error`, `|| true`, `;\ntrue` rejected);\n    proof-execution flags are forbidden across the whole PR workflow.\n- The pin must be absent from the composite and every workflow and must\ndrive both\n    cache keys, the install, and verification.\n\n## Correctness / CAP fixes\n\n- **Coordinated drop certificate**: `DropPrepare.participants` is now\nvalidated against\nthe exact current survivor set for every prepare, not just deferred\nones. A single peer\ncan no longer mint a survivor-quorum certificate for an uninvolved third\nslot, and\n  stale-era prepares are rejected after membership changes.\n- **Bounded peer-driven state**: the supersede/abort arms now use the\nsame\n`num_players`-bounded close history as the other three sites (was an\nunbounded deque\n  plus an O(n) replay scan per message).\n- **Spectator final inputs**: a host is tombstoned only after its\ndrained batch is\nprocessed, so a `Goodbye` decoded before the final reliable `Input` no\nlonger drops\n  that input and wedges playback on `PredictionThreshold`.\n- **Sync handshake**: outstanding `sync_random_requests` are capped at\n64 IDs while\n`Synchronizing` (retries continue; a stalled handshake's memory is\nbounded).\n\n## Performance\n\n- `UdpProtocol::last_recv_frame` now uses `BTreeMap::last_key_value` and\nthe history\nprune pops the stale prefix instead of scanning the map on every\npacket/send/poll.\n- `update_player_disconnects` early-outs when no remotes and no live\ncoordinated-drop\nstate exist. Same-run Criterion A/B (`p2p_all_local`, quick, baseline\n`no-guard`):\n  N=2 −9.1%, N=4 −3.7%, N=16 −8.3%.\n\n## Red/green evidence\n\n```text\n# cfg(kani) gate, with `for queue in &self.input_queues` restored\n$ cargo kani --only-codegen\nerror[E0277]: `&proof_vec::InlineVec<input_queue::InputQueue<T>, 7>` is not an iterator\nexit=1\n\n# spectator (deferral reverted)\nspectator_goodbye_before_final_input_preserves_the_input\n  -> last_recv_frame: left NULL, right Frame(0)\n\n# sync retry bound (cap raised)\noutstanding_sync_requests_stay_bounded -> left 1000, right 64\n\n# drop certificate (membership check removed)\ncoordinated_drop_prepare_requires_the_current_survivor_set\n  -> \"a certificate that omits the running survivor must be rejected\"\n\n# drop close history (trim removed)\ncoordinated_drop_closed_history_stays_bounded -> left 1000, right 2\n```\n\n## Verification\n\n- `cargo fmt --all` — clean.\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings` — clean.\n- `cargo tfull` — **3212 passed, 75 skipped**.\n- `cargo nextest run --workspace --features tokio,json,hot-join` —\n**3501 passed, 76 skipped**.\n- `cargo nextest run --test sessions -E 'test(peer_drop)' --features\ntokio,json` — 36 passed.\n- `cargo nextest run --test sessions -E 'test(hot_join)' --features\ntokio,json,hot-join` — 43 passed.\n- `cargo kani --only-codegen` (local 0.68 bundle, `RUSTFLAGS=--cap-lints\nallow`) — pass.\n- `python3 -m pytest scripts/tests` — 2250+ passed (new classifier\nmatrix included).\n- `actionlint`, skill validator, markdownlint, typos, changelog rule —\nclean.\n- `python3 scripts/ci/agent-preflight.py --full --auto-fix` — all checks\npassed.\n- PR #431: `Kani cfg Compile` green; full check list tracked in the PR.\n\nNo public API or wire-format change. The two `**Pre-existing:**`\nchangelog entries cover\nthe spectator ordering fix and the coordinated-drop certificate\nvalidation.",
+          "timestamp": "2026-11-15T23:47:57Z",
+          "tree_id": "9dbf2c50ef392c1c6c76adf308f87a79e59f8d9c",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/1d4376798f7ec24a5a57dce76a87005897b87586"
+        },
+        "date": 1794787171713,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 62023,
+            "range": "± 870",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31688,
+            "range": "± 220",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1656,
+            "range": "± 113",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1557,
+            "range": "± 75",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2894,
+            "range": "± 253",
             "unit": "ns/iter"
           }
         ]
