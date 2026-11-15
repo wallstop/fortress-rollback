@@ -9,7 +9,11 @@ existing oracle.
 1. **Sometimes-state coverage.** Define a small registry of rare states that must occur across a
    scheduled window, such as maximum rollback depth, floor-round consumption, nudges, sparse
    checkpoint search, and near-wrap ring use. First publish counts without gating. Add a ratchet
-   only after the baseline proves the probes are stable and non-vacuous.
+   only after the baseline proves the probes are stable and non-vacuous. **Enabled (2026-11-15):**
+   seven post-redesign windows on `main` retained organic presence for the prediction-limit,
+   floor-round, nudge, and input-ring IDs; the checked-in `RATCHET_RETAINED_IDS` set now fails the
+   nightly merge when a retained ID records zero organic hits. The sparse-earlier row remains
+   targeted-only (#402).
 2. **Violation-path coverage.** Inventory stable IDs for production `report_violation!` sites,
    aggregate exercised IDs across tests and the fleet, and report the unexercised set. Ratchet only
    against a checked-in baseline; site moves must not silently reset identity. The inventory is
