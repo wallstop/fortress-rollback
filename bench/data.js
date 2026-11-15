@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794699256467,
-  "repoUrl": "https://github.com/wallstop/fortress-rollback",
+  "lastUpdate": 1794716869214,
+  "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "ead1837497cf8de075c9024dbb6a6c9f0276db0e",
-          "message": "Harden bounded bincode input decoding (#283)\n\n## Summary\n\n- reject trailing bytes inside hot-join state snapshot payloads\n- route replay inputs and coordinated graceful-drop backfill through the\nshared bounded decoder\n- apply the existing recursion-depth guard to custom `Config::Input`\ndeserializers in every build\n- preserve per-value replay limits without capping the whole remaining\nconcatenated replay\n- document the precise Serde-managed allocation boundary\n- harden the pre-existing rewritten-history release fixture against Git\n2.54 missing-object failures\n\nProgresses #273. This PR intentionally does not select a replacement\nserializer, change network/replay bytes, or close the issue.\n\n## Why\n\nA `Copy` result does not prove its custom `Deserialize` implementation\nis non-recursive: it may recursively decode and discard an owned helper\nbefore returning. Replay and coordinated-drop input paths also still\nused generic bincode decode, while hot-join state accepted nested\ntrailing bytes.\n\nCI also reproduced the pre-existing release fixture's\nGit-version-sensitive force-push failure. Publishing the deliberate\nrewrite to a fresh empty bare remote removes advertised-old-ref pack\nnegotiation from that test.\n\n## Validation\n\n- agent preflight: all checks passed, including 286 release tests and\n1,392 links\n- default all-target Nextest: 2,954/2,954 passed (71 skipped)\n- hot-join all-target Nextest: 3,207/3,207 passed (72 skipped)\n- release-checkpoint module: 23/23; rewritten-history case: 25/25\nconsecutive reproductions\n- strict all-target Clippy with `tokio,json,hot-join`\n- 169 doctests passed (54 ignored)\n- Rust 1.86 workspace all-target check\n- `wasm32-unknown-unknown` hot-join check\n- no-default-features recursive custom-input regression\n- formatting and `git diff --check`\n\n## Compatibility\n\nValid wire, replay, state, bridge-input, and checksum bytes are\nunchanged. The new failures apply only to malformed/trailing input or\nvalues exceeding existing Serde-managed allocation/recursion policies.\nHand-written `Deserialize` implementations remain responsible for\nallocations they perform outside the deserializer.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes fail-closed behavior on untrusted decode paths (replay, drop\nbackfill, hot-join state) where bugs could affect availability or\nsession handling, but valid formats are unchanged and scope is bounded\ndeserialization hardening rather than auth or persistence.\n> \n> **Overview**\n> Hardens **peer-controlled bincode decoding** so malformed payloads\nfail closed without oversized Serde-managed allocations or unbounded\nrecursion, while **valid wire, replay, and snapshot bytes stay\nunchanged**.\n> \n> **Replay inputs** and **coordinated graceful-drop backfill** now use\nthe same bounded decoder as normal and hot-join bridge inputs (per-value\nallocation cap, recursion-depth limit, exact consumption where\nrequired), replacing generic `decode` on those paths. **Replay** uses a\nnew prefix helper so many concatenated inputs can be decoded from a\nstream larger than the per-value cap without rejecting the whole\nremainder.\n> \n> **Hot-join state snapshots** decode through a depth-limited serde\n**seed** with bincode’s consumed-byte count, so **trailing bytes inside\nthe nested `state_bytes` payload** are rejected—not only at the outer\nmessage boundary.\n> \n> The library drops the assumption that `Copy` on `Config::Input` proves\nnon-recursive decoding; custom `Deserialize` impls that recursively\ndecode helpers are now depth-limited on every affected path. Docs and\nchangelog state that allocations performed **outside** the deserializer\nin hand-written `Deserialize` remain the impl’s responsibility.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nb550b18cf33e729c2ae2c60b2c63a63765393a96. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-02T17:14:32-07:00",
-          "tree_id": "77ac7d96ef52e8ba58906aa4d28603ff4c54c009",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/ead1837497cf8de075c9024dbb6a6c9f0276db0e"
-        },
-        "date": 1785716600196,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 147837,
-            "range": "± 1644",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 46749,
-            "range": "± 213",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1244,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 107",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3146,
-            "range": "± 207",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3167,
             "range": "± 198",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fc6a5f55eef3967f191a17bfea9594a578896c6d",
+          "message": "docs(dst): record measured fleet-search rejections (#420) (#424)\n\n## Summary\n\nCompletes the remaining fleet-search comparison in #420 by recording\nmeasured rejections for prefix-replay branching and LDFI-lite, and\nrefreshes lockfile patch updates across every workspace.\n\nPLAN.md now carries only the calendar-bound seven-window organic\npresence ratchet (#403).\n\nCloses #420.\n\n## Measured comparison\n\n### Prefix-replay branching: rejected\n\n- Four 250-step rare-state prefixes (`input_queue_length = 2`,\n`max_prediction = 1`, clean network, `ContinueWithout`) x 64 matched\nsuffixes = 256 branches / 256,000 simulated steps.\n- Every branch reproduced its prefix cumulative trace hash exactly at\nthe cut.\n- Branch arm: only the `0x15` prefix vector (prediction-limit, nudge,\ninput-ring), zero new organic vectors, 3 per-ID peer-count buckets, 0\nfailures.\n- Matched fresh-seed arm: `0x15` and `0x17` (adds floor-round), floor\nrow in 86/256 schedules, 7 buckets, 0 failures.\n- Replaying a prefix consumes suffix reach without a session-state\nsnapshot API; no state discovery per compute.\n\n### LDFI-lite: rejected\n\n- 16 matched 1,000-step green schedules with a bounded 4,096-delivery\nlog and greedy support removal.\n- Greedy support sets of 1-4 deliveries in 15/16 schedules; the\nremaining schedule still confirmed after every candidate was removed.\n- Support removal lowered the target's final confirmed frame by one\nframe in 15/15 tested schedules, with 0 oracle failures.\n- 240 matched random drop sets of the same size lowered it in 0/240,\nwith 0 oracle failures; baseline had 0 failures.\n- LDFI-lite is a stronger targeted confirmation perturbation (15/15 vs\n0/240) but observed no oracle failure in the matched green arms, so the\ndelivery ring, drop-set plumbing, and greedy re-run search are not\nretained.\n\n### Detector control\n\nThe state-discovery arm does not consume oracle failures. The shared\noracle's failure path is pinned by the existing `corrupt_state_from`\nnegative control\n(`artifact_reproduction_rejects_mutated_progress_evidence`, which\nasserts a corrupted run fails). The zero-failure LDFI result is \"no\noracle failure observed in the matched green arms,\" not a claim that the\nfleet is defect-free.\n\nThe experiment instrumentation was removed after recording the result;\nthe reusable measurements and method live in the fleet-search roadmap.\n\n## Verification\n\n- `cargo tf`: 2,738 passed.\n- `cargo tfull`: 3,195 passed, 75 skipped.\n- `cargo fmt --all --check`: passed.\n- `python3 scripts/ci/agent-preflight.py --full --auto-fix`: all checks\npassed.\n- `python3 scripts/hooks/check-plan-hygiene.py`: passed.\n- `python3 scripts/hooks/validate-agent-skills.py`: 49 skills valid.\n- `npx markdownlint` and `typos` on changed docs: passed.\n- `python3 scripts/release/workspace_locks.py check`: passed.",
+          "timestamp": "2026-11-15T04:15:33Z",
+          "tree_id": "e15399845227ead8a8f7e0e837e8f82512bf85d6",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/fc6a5f55eef3967f191a17bfea9594a578896c6d"
+        },
+        "date": 1794716868094,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 27243,
+            "range": "± 549",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 16724,
+            "range": "± 334",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 493,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 615,
+            "range": "± 12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 5667,
+            "range": "± 285",
             "unit": "ns/iter"
           }
         ]
