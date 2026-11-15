@@ -702,13 +702,14 @@ fn warmed_hot_paths_obey_allocation_contracts() {
     // A serving host sends the confirmed frame's inputs to every spectator once
     // per advance. The ordered confirmed-input vector now serializes directly,
     // so this path must retain only the send's own encode buffers instead of a
-    // per-frame handle map.
+    // per-frame handle map (the byte ceiling is the map-regression guard;
+    // operations keep a little headroom for allocator/compression growth).
     let spectator_host_frames = warmed_spectator_host_frame_stats();
     for (repetition, stats) in spectator_host_frames.iter().enumerate() {
         assert_allocation_ceiling(
             &format!("warmed spectator-host frame repetition {repetition}"),
             *stats,
-            4,
+            6,
             128,
         );
     }

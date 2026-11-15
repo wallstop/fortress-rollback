@@ -72,9 +72,14 @@ pub(super) fn receive_all_messages_from<A: Debug>(
                         // the typical 1-4 case; later messages reuse that
                         // capacity. Both paths stay fallible and guarded by
                         // MAX_RECEIVE_MESSAGES_PER_POLL raw receive attempts.
+                        // If the batch reservation itself is refused, a
+                        // single-slot retry keeps the just-decoded datagram.
                         let reserve = if received_messages.is_empty() { 4 } else { 1 };
                         // reserve-in-loop: guarded by MAX_RECEIVE_MESSAGES_PER_POLL raw receive attempts.
-                        if received_messages.try_reserve(reserve).is_err() {
+                        let reserved = received_messages.try_reserve(reserve).is_ok();
+                        // reserve-in-loop: single-slot fallback keeps the just-decoded datagram.
+                        let reserved = reserved || received_messages.try_reserve(1).is_ok();
+                        if !reserved {
                             report_violation!(
                                 ViolationSeverity::Error,
                                 ViolationKind::NetworkProtocol,

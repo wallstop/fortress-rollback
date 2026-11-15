@@ -8060,8 +8060,9 @@ impl<T: Config> P2PSession<T> {
         let mut confirmed_frame = Frame::new(i32::MAX);
 
         // The double-failure-relay fold-membership-asymmetry gate is
-        // slot-independent — compute it once and reuse it for the floor-round
-        // hold check (`slot_round_incomplete`) below.
+        // slot-independent — compute it once and reuse it for the per-slot
+        // bounds (`remote_slot_confirmed_bound_with_topology`) and the
+        // floor-round hold check (`slot_round_incomplete`) below.
         let relay_topology = self.pessimistic_floor_relay_topology();
 
         for (idx, con_stat) in self.local_connect_status.iter().enumerate() {
@@ -10645,8 +10646,9 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
 
-            // Validate the ascending handle order/frame stamps before the
-            // ordered slice is serialized directly (no per-frame handle map).
+            // Validate the frame stamps before the ordered slice is serialized
+            // directly (no per-frame handle map). Ascending handle order and
+            // completeness are construction invariants of `confirmed_inputs`.
             for (handle, input) in inputs.iter().enumerate() {
                 // Validate frame consistency - should be NULL or match expected frame
                 if input.frame != Frame::NULL && input.frame != self.next_spectator_frame {
@@ -11156,6 +11158,10 @@ impl<T: Config> P2PSession<T> {
     /// Computes the production fold and its exact lower-floor predicate without
     /// mutating the observation census. Hidden diagnostics use this pure path so
     /// reading diagnostic state can never manufacture coverage.
+    ///
+    /// `relay_topology` is the slot-independent
+    /// [`Self::pessimistic_floor_relay_topology`] result; folds that call this
+    /// once per slot pass the shared value so the predicate is not rescanned.
     fn remote_slot_confirmed_bound_observation(
         &self,
         handle: PlayerHandle,

@@ -129,10 +129,9 @@ use crate::{
 
 /// Per-slot inputs in ascending [`PlayerHandle`] order, indexed by handle.
 ///
-/// The inline capacity covers the common 1-4 player session so the
-/// spectator/replay confirmation path does not allocate per frame; larger
-/// sessions reserve once through the fallible path in
-/// [`SyncLayer::confirmed_inputs`].
+/// The inline capacity covers the common 1-4 player session so the spectator
+/// confirmation/send path does not allocate per frame; larger sessions reserve
+/// once through the fallible path in [`SyncLayer::confirmed_inputs`].
 pub(crate) type PlayerInputVec<I> = SmallVec<[PlayerInput<I>; 4]>;
 
 /// A retained-history transaction failed before commit.
