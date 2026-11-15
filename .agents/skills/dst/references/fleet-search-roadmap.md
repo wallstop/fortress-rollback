@@ -40,8 +40,11 @@ existing oracle.
    matched fresh-seed arm found the missing `floor_round.lower_floor_consumable.v1` vector (`0x17`)
    in 86 of its 256 schedules and 7 buckets over the same budget; both arms had zero failures.
    Replaying a prefix consumes suffix reach without a session-state snapshot API, so the technique
-   adds no state discovery per compute and is rejected. Do not add snapshot plumbing for this
-   purpose without a measured coverage gap.
+   adds no state discovery per compute and is rejected. The state-discovery metric does not consume
+   oracle failures; the oracle's failure path is separately pinned by the existing
+   `corrupt_state_from` negative control (`artifact_reproduction_rejects_mutated_progress_evidence`
+   asserts a corrupted run fails). Do not add snapshot plumbing for this purpose without a measured
+   coverage gap.
 5. **Lineage-driven fault injection (LDFI-lite).** Record the deliveries supporting confirmation,
    then greedily remove small support sets. Compare failure yield with random loss. Introduce a SAT
    dependency only if greedy search plateaus and a measured result justifies the added complexity.
@@ -51,9 +54,11 @@ existing oracle.
    support set lowered the target's final confirmed frame in 15/15 tested schedules (1 frame each)
    with zero oracle failures. Matched random drop sets of the same size lowered it in 0 of 240
    trials and also produced zero oracle failures; the baseline had zero failures. LDFI-lite is a
-   stronger targeted confirmation perturbation (15/15 vs 0/240) but finds no defect in a green
-   fleet, so the delivery-identity ring, drop-set plumbing, and greedy re-run search are not
-   retained.
+   stronger targeted confirmation perturbation (15/15 vs 0/240) but observed no oracle failure in
+   the matched green arms, so the delivery-identity ring, drop-set plumbing, and greedy re-run
+   search are not retained. The same oracle's known-failing `corrupt_state_from` control
+   (`artifact_reproduction_rejects_mutated_progress_evidence`) proves the detector reports
+   failures; the zero-failure result is not a claim that the fleet is defect-free.
 
 ## Shared experiment contract
 
