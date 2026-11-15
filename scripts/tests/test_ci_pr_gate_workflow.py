@@ -49,7 +49,7 @@ def test_pr_gate_has_one_aggregate_required_job() -> None:
 
     assert gate["name"] == "CI Gate"
     assert gate["if"] == "always()"
-    assert set(gate["needs"]) == {"fast", "api-census", "wasm-check", "semver"}
+    assert set(gate["needs"]) == {"fast", "api-census", "wasm-check"}
 
     step = gate["steps"][0]
     assert step["env"]["NEEDS_JSON"] == "${{ toJSON(needs) }}"

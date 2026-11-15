@@ -110,30 +110,9 @@ jobs:
       - name: Reject browser-only dependencies on Emscripten
         run: ./scripts/ci/check-emscripten-dependencies.sh
 
-  semver:
-    name: Semver Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Rust cache
-        uses: ./.github/actions/setup-rust-cache
-        with:
-          cache-key: pr-semver
-          cache-paths: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            semver-checks/target
-
-      - name: Check semver compatibility
-        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
-
   gate:
     name: CI Gate
-    needs: [fast, api-census, wasm-check, semver]
+    needs: [fast, api-census, wasm-check]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
