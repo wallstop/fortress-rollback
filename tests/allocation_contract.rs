@@ -718,6 +718,24 @@ fn warmed_hot_paths_obey_allocation_contracts() {
         "warmed spectator-host frame repetitions"
     );
 
+    // Small RLE inputs take the conservative single-pass reservation (one
+    // allocation sized for the worst-case encoding). The exact two-pass
+    // fallback would reserve only the two-byte encoded output, so checking the
+    // reservation keeps the small-input fast path mutation-visible.
+    let (rle_encoded, rle_stats) = measure(|| {
+        fortress_rollback::rle::try_encode([0_u8; 32])
+            .expect("encode an allocation-contract RLE run")
+    });
+    assert_eq!(rle_encoded.len(), 2);
+    assert_eq!(
+        rle_stats.allocations, 1,
+        "single-pass RLE encoding must allocate once: {rle_stats:?}"
+    );
+    assert!(
+        allocated_and_grown_bytes(rle_stats) >= 32,
+        "small RLE encoding must use the conservative single-pass reservation: {rle_stats:?}"
+    );
+
     // Every player event decoded from one Input frame observes the same
     // immutable connection-status snapshot. Cloning that internal event must
     // share the snapshot instead of duplicating its player-count-sized buffer.
