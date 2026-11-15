@@ -45,6 +45,23 @@ impl<T: Config> InputSource<T> for [Option<PlayerInput<T::Input>>] {
     }
 }
 
+/// Complete per-slot input vectors in ascending [`PlayerHandle`] order, as
+/// produced by [`SyncLayer::confirmed_inputs`]. Index `i` is the input for
+/// handle `i`, and every registered slot is present (a disconnected slot is a
+/// blank entry), so this borrows the vector directly instead of rebuilding a
+/// per-frame handle-keyed map on the spectator-send path.
+///
+/// [`SyncLayer::confirmed_inputs`]: crate::sync_layer::SyncLayer::confirmed_inputs
+impl<T: Config> InputSource<T> for [PlayerInput<T::Input>] {
+    fn get(&self, handle: PlayerHandle) -> Option<&PlayerInput<T::Input>> {
+        self.get(handle.as_usize())
+    }
+
+    fn serializable_len(&self, num_players: usize) -> usize {
+        self.len().min(num_players)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InputBytesDecodeError {
     AllocationFailed {

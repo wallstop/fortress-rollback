@@ -10626,7 +10626,7 @@ impl<T: Config> P2PSession<T> {
         }
 
         while self.next_spectator_frame <= confirmed_frame {
-            let mut inputs = self
+            let inputs = self
                 .sync_layer
                 .confirmed_inputs(self.next_spectator_frame, &self.local_connect_status)?;
 
@@ -10645,8 +10645,9 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
 
-            let mut input_map = BTreeMap::new();
-            for (handle, input) in inputs.iter_mut().enumerate() {
+            // Validate the ascending handle order/frame stamps before the
+            // ordered slice is serialized directly (no per-frame handle map).
+            for (handle, input) in inputs.iter().enumerate() {
                 // Validate frame consistency - should be NULL or match expected frame
                 if input.frame != Frame::NULL && input.frame != self.next_spectator_frame {
                     // Unreachable by construction: `confirmed_inputs` stamps
@@ -10662,13 +10663,12 @@ impl<T: Config> P2PSession<T> {
                         handle
                     );
                 }
-                input_map.insert(PlayerHandle::new(handle), *input);
             }
 
             // send it to all spectators.
             for endpoint in self.player_reg.spectators.values_mut() {
                 if endpoint.is_running() {
-                    endpoint.send_input(&input_map, &self.local_connect_status);
+                    endpoint.send_input(inputs.as_slice(), &self.local_connect_status);
                 }
             }
 

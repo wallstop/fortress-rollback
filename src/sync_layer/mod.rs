@@ -114,6 +114,7 @@ use crate::proof_vec::ProofVec;
 use crate::sessions::config::SaveMode;
 use crate::telemetry::{InvariantChecker, InvariantViolation, ViolationKind, ViolationSeverity};
 use crate::{report_violation, safe_frame_add};
+use smallvec::SmallVec;
 // `safe_frame_sub!` is invoked from the confirmed-frame discard pass (compiled
 // out under Kani; see `set_last_confirmed_frame`) and, under the `hot-join`
 // feature, from `seek_to_frame`. Import it whenever either consumer is present.
@@ -125,6 +126,14 @@ use crate::{
     Config, FortressError, FortressRequest, Frame, IndexOutOfBounds, InputStatus, InputVec,
     InternalErrorKind, InvalidFrameReason, PlayerHandle,
 };
+
+/// Per-slot inputs in ascending [`PlayerHandle`] order, indexed by handle.
+///
+/// The inline capacity covers the common 1-4 player session so the
+/// spectator/replay confirmation path does not allocate per frame; larger
+/// sessions reserve once through the fallible path in
+/// [`SyncLayer::confirmed_inputs`].
+pub(crate) type PlayerInputVec<I> = SmallVec<[PlayerInput<I>; 4]>;
 
 /// A retained-history transaction failed before commit.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1537,8 +1546,20 @@ impl<T: Config> SyncLayer<T> {
         &self,
         frame: Frame,
         connect_status: &[ConnectionStatus],
-    ) -> Result<Vec<PlayerInput<T::Input>>, FortressError> {
-        let mut inputs = Vec::new();
+    ) -> Result<PlayerInputVec<T::Input>, FortressError> {
+        let mut inputs = PlayerInputVec::new();
+        if inputs.try_reserve(connect_status.len()).is_err() {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::InputQueue,
+                "Failed to reserve confirmed input buffer for {} players",
+                connect_status.len()
+            );
+            return Err(crate::error::allocation_failed(
+                "sync_layer.confirmed_inputs",
+                connect_status.len(),
+            ));
+        }
         for (i, con_stat) in connect_status.iter().enumerate() {
             let queue = self
                 .input_queues
