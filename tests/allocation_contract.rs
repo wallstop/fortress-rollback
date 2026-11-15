@@ -603,6 +603,16 @@ fn warmed_hot_paths_obey_allocation_contracts() {
         assert_zero_allocations(&format!("warmed {hosts}-host spectator poll"), first);
     }
 
+    // A built-in adapter poll that finds no queued datagram must not allocate a
+    // batch reservation: applications poll every frame even when the socket is
+    // idle. The first decoded message still gets the typical four-slot batch.
+    let mut idle_socket = fortress_rollback::UdpNonBlockingSocket::bind_to_port(0)
+        .expect("bind allocation-contract UDP socket");
+    let ((), idle_poll_stats) = measure(|| {
+        black_box(idle_socket.receive_all_messages());
+    });
+    assert_zero_allocations("idle built-in UDP receive poll", idle_poll_stats);
+
     // Every player event decoded from one Input frame observes the same
     // immutable connection-status snapshot. Cloning that internal event must
     // share the snapshot instead of duplicating its player-count-sized buffer.

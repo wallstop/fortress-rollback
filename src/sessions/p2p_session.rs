@@ -8071,7 +8071,9 @@ impl<T: Config> P2PSession<T> {
                 // `disconnect_player` both reject local handles), so the local
                 // slot always contributes its own last added frame.
                 confirmed_frame = std::cmp::min(confirmed_frame, con_stat.last_frame);
-            } else if let Some(bound) = self.remote_slot_confirmed_bound(handle, con_stat) {
+            } else if let Some(bound) =
+                self.remote_slot_confirmed_bound_with_topology(handle, con_stat, relay_topology)
+            {
                 // Post-prune fresh-ack HOLD (the double-failure-relay floor round,
                 // `AsyncAckSoundRoundSeq`, S55 — closing the connected-relay
                 // reorder facet and subsuming the S49 cold-cache facet). When a
@@ -8273,7 +8275,7 @@ impl<T: Config> P2PSession<T> {
             self.local_connect_status
                 .get(target.as_usize())
                 .and_then(|local| {
-                    self.remote_slot_confirmed_bound_observation(target, local)
+                    self.remote_slot_confirmed_bound_observation(target, local, relay_topology)
                         .bound
                 });
         Some(HostileGossipDiagnostic {
@@ -11123,7 +11125,28 @@ impl<T: Config> P2PSession<T> {
         handle: PlayerHandle,
         local_status: &ConnectionStatus,
     ) -> Option<Frame> {
-        let observation = self.remote_slot_confirmed_bound_observation(handle, local_status);
+        self.remote_slot_confirmed_bound_with_topology(
+            handle,
+            local_status,
+            self.pessimistic_floor_relay_topology(),
+        )
+    }
+
+    /// [`Self::remote_slot_confirmed_bound`] with the slot-independent
+    /// relay-topology gate supplied by the caller.
+    ///
+    /// [`Self::confirmed_frame`] folds every slot and already computes the gate
+    /// once; without this entry point each per-slot fold would rescan every
+    /// remote endpoint to recompute the same predicate, making the steady-mesh
+    /// fold pay an extra O(N²) pass.
+    fn remote_slot_confirmed_bound_with_topology(
+        &self,
+        handle: PlayerHandle,
+        local_status: &ConnectionStatus,
+        relay_topology: bool,
+    ) -> Option<Frame> {
+        let observation =
+            self.remote_slot_confirmed_bound_observation(handle, local_status, relay_topology);
         if observation.lower_floor_consumed {
             self.record_sometimes_state(SOMETIMES_LOWER_FLOOR_CONSUMED);
         }
@@ -11137,6 +11160,7 @@ impl<T: Config> P2PSession<T> {
         &self,
         handle: PlayerHandle,
         local_status: &ConnectionStatus,
+        relay_topology: bool,
     ) -> RemoteSlotConfirmedBoundObservation {
         // N-peer pending-reactivation shield, bound leg (companion to the
         // fold shield in `update_player_disconnects`): while this survivor
@@ -11236,7 +11260,7 @@ impl<T: Config> P2PSession<T> {
         // N>=4 relay topology: this session has PRUNED a remote AND >= 2 remotes
         // still run. Outside it, the one-hop fold below is sound (S41 *stale-echo*
         // NOTABUG), and consuming the floor only adds needless pacing lag.
-        let consume_round_floor = self.pessimistic_floor_relay_topology();
+        let consume_round_floor = relay_topology;
         let mut any_reports_connected = false;
         let mut gossip_min: Option<Frame> = None;
         let mut lower_floor_consumed = false;

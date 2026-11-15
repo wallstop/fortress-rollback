@@ -20,17 +20,10 @@ pub(super) fn receive_all_messages_from<A: Debug>(
 
     metrics.record_receive_poll();
 
-    // Pre-allocate for typical case of 1-4 messages per poll.
+    // Allocated lazily on the first decoded message: an idle poll must not
+    // reserve an empty batch (a game polls every frame even when no datagram is
+    // ready). The typical 1-4 messages then fit the first small reservation.
     let mut received_messages = Vec::new();
-    if received_messages.try_reserve_exact(4).is_err() {
-        report_violation!(
-            ViolationSeverity::Error,
-            ViolationKind::NetworkProtocol,
-            "Failed to reserve {} receive batch",
-            adapter_name
-        );
-        return received_messages;
-    }
 
     let mut receive_attempts = 0usize;
     let mut reported_wire_rejects = 0u8;
@@ -75,8 +68,13 @@ pub(super) fn receive_all_messages_from<A: Debug>(
                 };
                 match codec::decode_message(buf_slice) {
                     Ok((msg, _consumed)) => {
+                        // First decoded message in this poll sizes the batch for
+                        // the typical 1-4 case; later messages reuse that
+                        // capacity. Both paths stay fallible and guarded by
+                        // MAX_RECEIVE_MESSAGES_PER_POLL raw receive attempts.
+                        let reserve = if received_messages.is_empty() { 4 } else { 1 };
                         // reserve-in-loop: guarded by MAX_RECEIVE_MESSAGES_PER_POLL raw receive attempts.
-                        if received_messages.try_reserve(1).is_err() {
+                        if received_messages.try_reserve(reserve).is_err() {
                             report_violation!(
                                 ViolationSeverity::Error,
                                 ViolationKind::NetworkProtocol,
