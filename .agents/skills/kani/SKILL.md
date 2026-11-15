@@ -55,6 +55,35 @@ CI uses `--quick` which sets `--default-unwind 8`. Proofs without explicit `#[ka
 
 For nested loops, set unwind to `max(all_loop_bounds) + 1`.
 
+## cfg(kani) Compile Contract
+
+`#[cfg(kani)]` code is invisible to `cargo check`, clippy, tests, and rustdoc, so
+it can rot while every normal build stays green. The required `Kani cfg Compile`
+PR job runs `cargo kani --only-codegen` on Rust and build-input changes; it
+type-checks the default-feature `cfg(kani)` tree (the tiers do not enable extra
+features either) without running a proof.
+
+The recurring break is iterating a `ProofVec` by reference. `ProofVec<T>` is
+`Vec<T>` in production and the stack-backed `InlineVec<T, CAP>` under Kani,
+which exposes only `push`, `get`, `get_mut`, `len`, `first`, `iter`, `iter_mut`
+and `clone` for `Copy` elements:
+
+```text
+// WRONG: compiles everywhere except the cfg(kani) tree
+for queue in &self.input_queues { /* ... */ }
+
+// CORRECT: use the shared subset
+for queue in self.input_queues.iter() { /* ... */ }
+```
+
+Run the gate locally before pushing. Match the repository pin in `.kani-version`
+(the devcontainer installs it); a newer local Kani bundle can surface unrelated
+nightly-lint failures under this crate's `deny(warnings)`:
+
+```bash
+cargo kani --only-codegen
+```
+
 ### Simple Proofs Without Loops
 
 ```rust

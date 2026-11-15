@@ -92,6 +92,15 @@ const CONFIG_DIGEST_DOMAIN: &[u8; 8] = b"FRv1-cfg";
 const HOT_JOIN_FEATURE: u32 = 1 << 0;
 /// Per-endpoint D14 carrier mailbox bound, aligned with the raw receive-poll cap.
 const MAX_RECEIVED_DROP_MESSAGES: usize = crate::network::MAX_RECEIVE_MESSAGES_PER_POLL;
+/// Bound on outstanding sync-request IDs retained while `Synchronizing`.
+///
+/// A peer that never returns a matching `SyncReply` would otherwise grow this
+/// set forever at one entry per retry (`sync_retry_interval`, default 200 ms).
+/// Sixty-four outstanding IDs is far above the in-flight window for any
+/// supported latency while keeping a stalled handshake's memory bounded.
+/// Pruning the lowest ID only discards a stale request: retries continue and a
+/// live reply for any retained ID still advances the handshake.
+const MAX_OUTSTANDING_SYNC_REQUESTS: usize = 64;
 
 /// One coordinated graceful-drop control message carried by a running endpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2265,6 +2274,11 @@ impl<T: Config> UdpProtocol<T> {
             Some(rng) => rng.gen(),
             None => random(),
         };
+        if self.sync_random_requests.len() >= MAX_OUTSTANDING_SYNC_REQUESTS {
+            if let Some(stale) = self.sync_random_requests.first().copied() {
+                self.sync_random_requests.remove(&stale);
+            }
+        }
         #[cfg(feature = "trace-validation")]
         let request_id_disposition = if self.sync_random_requests.insert(random_number) {
             HandshakeRequestIdDisposition::Fresh
@@ -2979,21 +2993,10 @@ impl<T: Config> UdpProtocol<T> {
             // send an input ack
             self.send_input_ack();
 
-            // delete received inputs that are too old
-            let last_recv_frame = self.last_recv_frame();
-            let history_frames = self
-                .protocol_config
-                .input_history_multiplier
-                .checked_mul(self.max_prediction)
-                .and_then(|frames| i32::try_from(frames).ok())
-                .unwrap_or(i32::MAX);
-            self.recv_inputs.retain(|&k, _| {
-                k >= safe_frame_sub!(
-                    last_recv_frame,
-                    history_frames,
-                    "UdpProtocol::on_input history prune"
-                )
-            });
+            // delete received inputs that are too old. `recv_inputs` is keyed by
+            // frame in ascending order, so pop the stale prefix instead of
+            // scanning the whole history on every decoded packet.
+            self.prune_recv_inputs();
         } else {
             // A stale retransmission can outlive its delta reference after the
             // receiver prunes old input history. The frames are already known,
@@ -3360,9 +3363,37 @@ impl<T: Config> UdpProtocol<T> {
 
     /// Returns the frame of the last received input
     fn last_recv_frame(&self) -> Frame {
-        match self.recv_inputs.iter().max_by_key(|&(k, _)| k) {
-            Some((k, _)) => *k,
+        match self.recv_inputs.last_key_value() {
+            Some((&frame, _)) => frame,
             None => Frame::NULL,
+        }
+    }
+
+    /// Drops received inputs older than the configured history window.
+    ///
+    /// `recv_inputs` is keyed by frame in ascending order, so the stale prefix
+    /// is popped in O(pruned) rather than scanning the whole map. The frame at
+    /// exactly `last_recv_frame - history_frames` is retained (inclusive
+    /// floor).
+    fn prune_recv_inputs(&mut self) {
+        let last_recv_frame = self.last_recv_frame();
+        let history_frames = self
+            .protocol_config
+            .input_history_multiplier
+            .checked_mul(self.max_prediction)
+            .and_then(|frames| i32::try_from(frames).ok())
+            .unwrap_or(i32::MAX);
+        let prune_floor = safe_frame_sub!(
+            last_recv_frame,
+            history_frames,
+            "UdpProtocol::on_input history prune"
+        );
+        while self
+            .recv_inputs
+            .first_key_value()
+            .is_some_and(|(&frame, _)| frame < prune_floor)
+        {
+            self.recv_inputs.pop_first();
         }
     }
 
@@ -7107,6 +7138,63 @@ mod tests {
         assert_eq!(
             timeout_count3, 0,
             "SyncTimeout should only be emitted once per timeout"
+        );
+    }
+
+    #[test]
+    fn prune_recv_inputs_retains_the_inclusive_floor() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.protocol_config.input_history_multiplier = 2;
+        protocol.recv_inputs.clear();
+        for frame in [0, 4, 10, 20] {
+            let frame = Frame::new(frame);
+            protocol.recv_inputs.insert(
+                frame,
+                InputBytes {
+                    frame,
+                    bytes: Vec::new(),
+                },
+            );
+        }
+
+        protocol.prune_recv_inputs();
+
+        let frames = protocol.recv_inputs.keys().copied().collect::<Vec<_>>();
+        assert_eq!(
+            frames,
+            vec![Frame::new(4), Frame::new(10), Frame::new(20)],
+            "frames below the floor are pruned; the inclusive floor is retained"
+        );
+    }
+
+    #[test]
+    fn outstanding_sync_requests_stay_bounded() {
+        let (config, clock) = mutable_clock_config();
+        let mut protocol = create_protocol_with_config(
+            vec![PlayerHandle::new(0)],
+            2,
+            1,
+            8,
+            SyncConfig::default(),
+            config,
+        );
+        protocol.synchronize().unwrap();
+        let connect_status = [ConnectionStatus::default(); 2];
+
+        for _ in 0..1_000 {
+            advance_test_clock(&clock, Duration::from_millis(250));
+            for _event in protocol.poll(&connect_status) {}
+        }
+
+        assert_eq!(
+            protocol.sync_random_requests.len(),
+            MAX_OUTSTANDING_SYNC_REQUESTS,
+            "a stalled handshake must retain at most the outstanding-request cap"
+        );
+        assert!(
+            protocol.sync_requests_sent > MAX_OUTSTANDING_SYNC_REQUESTS as u32,
+            "the bounded set must not stop retries"
         );
     }
 

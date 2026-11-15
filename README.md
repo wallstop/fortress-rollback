@@ -65,9 +65,11 @@ cargo fmt && cargo c && cargo tfull   # Full: simulation + multi-process suites
 python3 scripts/ci/agent-preflight.py --full --auto-fix  # Full preflight
 ```
 
-The PR gate is the single required `CI Gate` check; Miri, Kani, TLA+, mutation,
-coverage, fuzzing, and browser exports run on merge queues or schedules so
-ordinary edits do not wait on them.
+The PR gate is the single required `CI Gate` check; Miri, full Kani proofs,
+TLA+, mutation, coverage, fuzzing, and browser exports run on merge queues or
+schedules so ordinary edits do not wait on them. Rust and build-input changes do
+run `cargo kani --only-codegen` in the PR gate, which type-checks the
+default-feature `cfg(kani)` tree without executing a proof.
 
 ## Choose the Right Guide
 

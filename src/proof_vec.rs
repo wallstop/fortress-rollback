@@ -28,7 +28,18 @@
 /// A growable vector. In production this is exactly [`Vec<T>`]; under Kani it is
 /// the fixed-capacity `InlineVec`. The two expose the same subset of the `Vec`
 /// API that the rollback containers use (`push`, `get`, `get_mut`, `len`,
-/// `first`, `clone`, `iter`, `iter_mut`), so call sites are identical.
+/// `first`, `iter`, `iter_mut`, and `clone` for `Copy` elements), so call sites
+/// are identical.
+///
+/// # Compile contract
+///
+/// `InlineVec` is not a `Vec`: it deliberately omits `IntoIterator for
+/// &InlineVec`, `Index`, and the rest of the allocation-bearing surface. Use
+/// `.iter()` / `.iter_mut()` to iterate and `.get()` to index. A by-reference
+/// `for queue in &self.field` loop compiles under `cargo check`, clippy, and
+/// tests (where `ProofVec<T>` is `Vec<T>`) but fails the `cfg(kani)` tree —
+/// exactly the break that blocked the merge queue after PR #427. The required
+/// `Kani cfg Compile` PR job runs `cargo kani --only-codegen` to catch it.
 #[cfg(not(kani))]
 pub(crate) type ProofVec<T> = Vec<T>;
 

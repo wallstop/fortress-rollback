@@ -1,0 +1,107 @@
+# Install the repository-pinned Kani verifier.
+#
+# The version is read from the checked-in `.kani-version` file so the PR compile
+# gate and the deep verification tiers can never drift apart. Caching covers
+# both the Kani binary bundle and the cargo/target tree so repeat runs pay a
+# warm compile rather than a cold CBMC codegen build.
+
+name: "Setup Kani"
+description: "Install the pinned Kani verifier with binary and build caching"
+
+inputs:
+  install-timeout-minutes:
+    description: "Per-attempt budget for the Kani install retry wrapper"
+    required: false
+    default: "15"
+
+outputs:
+  version:
+    description: "Kani version read from .kani-version"
+    value: ${{ steps.pin.outputs.version }}
+  nightly-toolchain:
+    description: "Pinned nightly toolchain used in cache keys"
+    value: ${{ steps.nightly.outputs.toolchain }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve pinned Kani version
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="$(tr -d '[:space:]' < .kani-version)"
+        if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error file=.kani-version::invalid Kani version '$version' (expected X.Y.Z)"
+          exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - name: Install pinned Rust nightly
+      id: nightly
+      uses: ./.github/actions/install-pinned-nightly
+
+    - name: Cache Kani
+      uses: actions/cache@v6
+      continue-on-error: true
+      with:
+        path: |
+          ~/.cargo/bin/cargo-kani
+          ~/.cargo/bin/kani-*
+          ~/.kani
+        key: kani-${{ steps.pin.outputs.version }}-${{ steps.nightly.outputs.toolchain }}-${{ runner.os }}
+
+    # Cache the cargo registry + git deps + target dir. A cold CBMC/codegen
+    # crate build otherwise dominates per-job time. Keyed on Cargo.lock so it
+    # invalidates on dependency changes; the restore-keys prefix lets a
+    # near-miss (same Kani version, different lockfile) restore a warm target.
+    - name: Cache Kani build (cargo registry + target)
+      uses: actions/cache@v6
+      continue-on-error: true
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: kani-build-${{ runner.os }}-${{ steps.pin.outputs.version }}-${{ steps.nightly.outputs.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          kani-build-${{ runner.os }}-${{ steps.pin.outputs.version }}-${{ steps.nightly.outputs.toolchain }}-
+
+    - name: Install Kani with retry
+      uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
+      with:
+        # Bounded per-attempt: callers size their job timeout for
+        # max_attempts * this value + the two retry delays.
+        timeout_minutes: ${{ inputs.install-timeout-minutes }}
+        max_attempts: 3
+        retry_wait_seconds: 60
+        command: |
+          set -euo pipefail
+          if ! command -v cargo-kani &> /dev/null; then
+            # `=` makes the requirement exact; a caret range would let a newer
+            # patch release satisfy the install while the cache key still names
+            # the pinned version.
+            cargo install --locked kani-verifier --version "=${{ steps.pin.outputs.version }}"
+          fi
+          # Always run setup: the binary cache restores `~/.kani` but not the
+          # rustup toolchain its `toolchain` symlink targets, so a cache hit
+          # without this leaves a dangling link and `cargo kani` fails.
+          cargo kani setup
+
+    - name: Verify Kani toolchain
+      shell: bash
+      env:
+        EXPECTED_KANI_VERSION: ${{ steps.pin.outputs.version }}
+      run: |
+        set -euo pipefail
+        echo "=== Environment Diagnostics ==="
+        echo "PATH: $PATH"
+        echo "Cargo: $(which cargo)"
+        echo "Rustc: $(rustc --version)"
+        reported="$(cargo kani --version)"
+        echo "Kani: $reported"
+        installed="$(printf '%s\n' "$reported" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+        if [[ "$installed" != "$EXPECTED_KANI_VERSION" ]]; then
+          echo "::error::Kani version mismatch: pinned $EXPECTED_KANI_VERSION but found '${installed:-unknown}'. A restored cache or install resolved a different release."
+          exit 1
+        fi
