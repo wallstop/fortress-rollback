@@ -487,6 +487,9 @@ where
     last_recv_time: Instant,
 
     // debug desync
+    /// Pending peer-reported checksums. Hard-capped at
+    /// [`ProtocolConfig::max_checksum_history`] entries regardless of the order
+    /// in which report frames arrive (the report frame is peer-controlled).
     pub(crate) pending_checksums: BTreeMap<Frame, u128>,
     /// Highest frame at which a checksum this peer sent matched our local
     /// checksum history. Per-peer so that verification against one remote does
@@ -3279,9 +3282,11 @@ impl<T: Config> UdpProtocol<T> {
         let max_history = self.protocol_config.max_checksum_history;
         if self.pending_checksums.len() >= max_history {
             // Calculate frames to keep, using saturating arithmetic to prevent underflow
-            let max_history = i32::try_from(max_history).unwrap_or(i32::MAX);
-            let interval = i32::try_from(interval).unwrap_or(i32::MAX);
-            let frames_to_subtract = max_history.saturating_sub(1).saturating_mul(interval);
+            let history_frames = i32::try_from(max_history).unwrap_or(i32::MAX);
+            let interval_frames = i32::try_from(interval).unwrap_or(i32::MAX);
+            let frames_to_subtract = history_frames
+                .saturating_sub(1)
+                .saturating_mul(interval_frames);
             let oldest_frame_to_keep = safe_frame_sub!(
                 body.frame,
                 frames_to_subtract,
@@ -3291,6 +3296,17 @@ impl<T: Config> UdpProtocol<T> {
                 .retain(|&frame, _| frame >= oldest_frame_to_keep);
         }
         self.pending_checksums.insert(body.frame, body.checksum);
+
+        // `body.frame` is peer-controlled: a strictly descending report stream
+        // makes the frame-relative retain above keep every existing entry, so
+        // it cannot be the only bound. Enforce the configured count cap
+        // unconditionally, dropping the lowest frames just as an in-order
+        // stream's retain would.
+        while self.pending_checksums.len() > max_history {
+            if self.pending_checksums.pop_first().is_none() {
+                break;
+            }
+        }
     }
 
     /// Upon receiving a `JoinRequest`, store the requested slot for the orchestration
@@ -6544,6 +6560,56 @@ mod tests {
         assert!(protocol.pending_checksums.contains_key(&max_frame));
         // Old frames should be gone
         assert!(!protocol.pending_checksums.contains_key(&Frame::new(0)));
+    }
+
+    #[test]
+    fn checksum_history_stays_bounded_for_descending_frame_reports() {
+        // `frame` is peer-chosen, so the retention bound must not depend on
+        // reports arriving in ascending order. A descending stream must still
+        // keep the map at the configured cap.
+        for desync_detection in [DesyncDetection::On { interval: 1 }, DesyncDetection::Off] {
+            for max_history in [1usize, 8] {
+                let protocol_config = ProtocolConfig {
+                    max_checksum_history: max_history,
+                    ..ProtocolConfig::default()
+                };
+                let mut protocol: UdpProtocol<TestConfig> = UdpProtocol::new(
+                    vec![PlayerHandle::new(0)],
+                    test_addr(),
+                    2,
+                    1,
+                    8,
+                    Duration::from_secs(5),
+                    Duration::from_secs(3),
+                    60,
+                    desync_detection,
+                    SyncConfig::default(),
+                    protocol_config,
+                    TimeSyncConfig::default(),
+                )
+                .expect("Failed to create test protocol");
+
+                for offset in 0..64 {
+                    protocol.on_checksum_report(&ChecksumReport {
+                        frame: Frame::new(1_000_000 - offset),
+                        checksum: offset as u128,
+                    });
+                }
+
+                assert_eq!(
+                    protocol.pending_checksums.len(),
+                    max_history,
+                    "descending reports must saturate, not exceed, the checksum cap \
+                     with {desync_detection:?} and max_history {max_history}"
+                );
+                assert!(
+                    protocol
+                        .pending_checksums
+                        .contains_key(&Frame::new(1_000_000)),
+                    "the highest reported frame should survive the count bound"
+                );
+            }
+        }
     }
 
     // ==========================================
@@ -10892,11 +10958,13 @@ mod property_tests {
             ..ProptestConfig::default()
         })]
 
-        /// INV-PROTO-7: Checksum history never exceeds max_checksum_history
+        /// INV-PROTO-7: Checksum history never exceeds max_checksum_history,
+        /// even when the peer reports frames in arbitrary (including strictly
+        /// descending) order.
         #[test]
         fn prop_checksum_history_bounded(
             seed in seed_strategy(),
-            num_checksums in 1usize..100,
+            frames in prop::collection::vec(0i32..=1_000_000, 1..100),
         ) {
             let protocol_config = ProtocolConfig {
                 max_checksum_history: 32,
@@ -10919,20 +10987,19 @@ mod property_tests {
             )
             .expect("Failed to create protocol");
 
-            // Add many checksums
-            for i in 0..num_checksums {
+            for (i, frame) in frames.into_iter().enumerate() {
                 let report = ChecksumReport {
-                    frame: Frame::new(i as i32),
+                    frame: Frame::new(frame),
                     checksum: i as u128,
                 };
                 protocol.on_checksum_report(&report);
+                prop_assert!(
+                    protocol.pending_checksums.len() <= 32,
+                    "Checksum history ({}) exceeded max (32) after report {}",
+                    protocol.pending_checksums.len(),
+                    i
+                );
             }
-
-            prop_assert!(
-                protocol.pending_checksums.len() <= 32,
-                "Checksum history ({}) should not exceed max (32)",
-                protocol.pending_checksums.len()
-            );
         }
 
         /// INV-PROTO-7: Old checksums are evicted when history is full

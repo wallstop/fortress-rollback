@@ -506,8 +506,10 @@ pub struct ProtocolConfig {
     /// The history is bounded by scheduled checksum frames, independent of
     /// whether every peer has supplied or matched a checksum for those frames.
     /// Missing local checksums can therefore leave fewer than this many entries.
-    /// Higher values can detect older desyncs but use more memory. Only relevant
-    /// when desync detection is enabled.
+    /// The receive-side pending-report map for each peer is additionally
+    /// hard-capped at this count regardless of the order in which report frames
+    /// arrive. Higher values can detect older desyncs but use more memory. Only
+    /// relevant when desync detection is enabled.
     ///
     /// Default: 32
     pub max_checksum_history: usize,

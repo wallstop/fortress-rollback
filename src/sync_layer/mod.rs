@@ -399,6 +399,32 @@ impl<T: Config> SyncLayer<T> {
         )
     }
 
+    /// Earliest frame from which every live input queue still retains confirmed
+    /// inputs.
+    ///
+    /// Rollback can clamp a below-window target up to
+    /// [`Self::rollback_window_floor`], but confirmation may already have
+    /// discarded frames down to `confirmed - 1`. A re-simulation must start no
+    /// earlier than this shared retained floor. Empty queues do not constrain
+    /// it; returns [`Frame::NULL`] when no queue retains an input.
+    pub(crate) fn oldest_retained_input_frame(&self) -> Frame {
+        let mut oldest = Frame::NULL;
+        for queue in &self.input_queues {
+            // Empty queues (a peer dropped before its first input, or a
+            // hot-join reactivated slot whose ring is blanked) do not constrain
+            // the floor: `synchronized_inputs` serves them from frozen/default
+            // or reactivation-floor semantics. Only queues with retained ring
+            // history can make an earlier target unloadable.
+            let Some(range) = queue.retained_input_range() else {
+                continue;
+            };
+            if oldest.is_null() || range.first > oldest {
+                oldest = range.first;
+            }
+        }
+        oldest
+    }
+
     /// Saves the current game state.
     ///
     /// This method relies on the invariant that `current_frame` is always valid
@@ -2889,6 +2915,27 @@ mod sync_layer_tests {
         // With sparse saving, confirmed frame should not exceed last saved frame (0)
         sync_layer.set_last_confirmed_frame(Frame::new(5), SaveMode::Sparse);
         assert_eq!(sync_layer.last_confirmed_frame(), Frame::new(0));
+    }
+
+    #[test]
+    fn oldest_retained_input_frame_ignores_empty_queues() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        for i in 0..10i32 {
+            sync_layer.add_remote_input(
+                PlayerHandle::new(0),
+                PlayerInput::new(Frame::new(i), TestInput { inp: i as u8 }),
+            );
+            sync_layer.advance_frame();
+        }
+        // Queue 1 never received an input; queue 0 retains the full history.
+        assert_eq!(sync_layer.oldest_retained_input_frame(), Frame::new(0));
+
+        sync_layer.set_last_confirmed_frame(Frame::new(5), SaveMode::EveryFrame);
+        assert_eq!(
+            sync_layer.oldest_retained_input_frame(),
+            Frame::new(4),
+            "the empty queue must not turn the shared floor into NULL"
+        );
     }
 
     #[test]

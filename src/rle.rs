@@ -122,9 +122,67 @@ pub fn try_encode(buf: impl AsRef<[u8]>) -> RleResult<Vec<u8>> {
 
 /// Encode a bitfield starting at a specific offset.
 fn try_encode_with_offset(buf: &[u8], offset: usize) -> RleResult<Vec<u8>> {
+    if let Some(slice) = buf.get(offset..) {
+        if slice.is_empty() {
+            return Ok(Vec::new());
+        }
+        if slice.len() <= SINGLE_PASS_ENCODE_LIMIT {
+            let capacity = single_pass_encode_capacity(slice.len());
+            let mut enc = Vec::new();
+            enc.try_reserve_exact(capacity)
+                .map_err(|_err| allocation_failed("rle.encode", capacity))?;
+            write_encoded(slice, &mut enc);
+            return Ok(enc);
+        }
+    }
     try_encode_with_offset_and_reserve(buf, offset, |output, encoded_len| {
         output.try_reserve_exact(encoded_len)
     })
+}
+
+/// Inputs at or below this size are encoded in a single pass. Larger buffers
+/// keep the exact two-pass sizing so the conservative reservation below cannot
+/// waste a large amount of memory.
+const SINGLE_PASS_ENCODE_LIMIT: usize = 4096;
+
+/// Conservative worst-case capacity for one-pass RLE output.
+///
+/// The encoded form is never larger than 1.5× the input plus a small constant:
+/// non-contiguous runs cost their payload plus at most a two-byte varint
+/// header, and contiguous runs cost only a header. The constant covers the
+/// small-input boundary and the largest header for the 4 KiB limit.
+fn single_pass_encode_capacity(input_len: usize) -> usize {
+    input_len
+        .saturating_add(input_len.div_ceil(2))
+        .saturating_add(16)
+}
+
+/// Writes the RLE encoding of `slice` into `enc`.
+fn write_encoded(slice: &[u8], enc: &mut Vec<u8>) {
+    let mut cursor = 0;
+    // `slice.get(..)` is used instead of `slice[..]` so the scanner is panic-free
+    // by construction (zero-panic policy / `clippy::indexing_slicing`); the bounds
+    // checks are identical to the previous `cursor < slice.len()` guards.
+    while let Some(&byte) = slice.get(cursor) {
+        let start = cursor;
+        cursor += 1;
+        if byte == 0 || byte == 255 {
+            while slice.get(cursor) == Some(&byte) {
+                cursor += 1;
+            }
+            write_contiguous(enc, (cursor - start) as u64, byte);
+        } else {
+            while let Some(&b) = slice.get(cursor) {
+                if b == 0 || b == 255 {
+                    break;
+                }
+                cursor += 1;
+            }
+            // start <= cursor <= slice.len() by construction, so this range is
+            // always valid; `unwrap_or_default()` is an unreachable safety net.
+            write_noncontiguous_slice(enc, slice.get(start..cursor).unwrap_or_default());
+        }
+    }
 }
 
 fn try_encode_with_offset_and_reserve<R>(
@@ -144,30 +202,7 @@ where
         None => return Ok(enc), // Invalid offset, return empty
     };
 
-    let mut cursor = 0;
-    // `slice.get(..)` is used instead of `slice[..]` so the scanner is panic-free
-    // by construction (zero-panic policy / `clippy::indexing_slicing`); the bounds
-    // checks are identical to the previous `cursor < slice.len()` guards.
-    while let Some(&byte) = slice.get(cursor) {
-        let start = cursor;
-        cursor += 1;
-        if byte == 0 || byte == 255 {
-            while slice.get(cursor) == Some(&byte) {
-                cursor += 1;
-            }
-            write_contiguous(&mut enc, (cursor - start) as u64, byte);
-        } else {
-            while let Some(&b) = slice.get(cursor) {
-                if b == 0 || b == 255 {
-                    break;
-                }
-                cursor += 1;
-            }
-            // start <= cursor <= slice.len() by construction, so this range is
-            // always valid; `unwrap_or_default()` is an unreachable safety net.
-            write_noncontiguous_slice(&mut enc, slice.get(start..cursor).unwrap_or_default());
-        }
-    }
+    write_encoded(slice, &mut enc);
 
     Ok(enc)
 }
@@ -1495,6 +1530,25 @@ mod property_tests {
             let encoded = encode(&data);
             let decoded = decode(&encoded).expect("decode should not fail");
             prop_assert_eq!(data, decoded, "Roundtrip failed for game state pattern");
+        }
+
+        /// Property: The one-pass capacity bound covers every encoded output.
+        ///
+        /// Small buffers skip the exact length pre-scan, so the conservative
+        /// reservation must never be too small (that would make `Vec` grow
+        /// infallibly on the hot network path).
+        #[test]
+        fn prop_single_pass_capacity_bounds_output(
+            data in proptest::collection::vec(any::<u8>(), 0..=SINGLE_PASS_ENCODE_LIMIT),
+        ) {
+            let encoded = encode(&data);
+            prop_assert!(
+                encoded.len() <= single_pass_encode_capacity(data.len()),
+                "encoded length {} exceeded one-pass capacity {} for input length {}",
+                encoded.len(),
+                single_pass_encode_capacity(data.len()),
+                data.len()
+            );
         }
 
         /// Property: Encoded length prediction is always accurate.
