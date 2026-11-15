@@ -106,8 +106,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmed-input history no longer wedges `advance_frame`. The re-simulation now starts at the
   oldest frame every live input queue still retains (advancing to the first loadable sparse
   checkpoint when needed), so the rollback completes and clears `disconnect_frame` instead of
-  failing with `SynchronizedInputsFailed` on every later call. If no loadable in-window checkpoint
-  exists, the rollback still fails closed rather than reporting a completed correction.
+  failing with `SynchronizedInputsFailed` on every later call. A target exactly at the
+  prediction-window floor takes the same retained-input raise: confirmation can already have
+  discarded that frame there. If no loadable in-window checkpoint exists, the rollback still fails
+  closed rather than reporting a completed correction.
 - **Pre-existing:** automatic `ContinueWithout` timeouts now require a strict majority of the
   agreed membership to remain reachable in addition to an independent surviving witness. A
   symmetric partition that outlives the disconnect timeout no longer commits complementary

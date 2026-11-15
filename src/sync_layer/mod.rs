@@ -416,7 +416,7 @@ impl<T: Config> SyncLayer<T> {
     /// earlier than this shared retained floor. Empty queues do not constrain
     /// it; returns [`Frame::NULL`] when no queue retains an input.
     pub(crate) fn oldest_retained_input_frame(&self) -> Frame {
-        let mut oldest = Frame::NULL;
+        let mut oldest: Option<Frame> = None;
         for queue in self.input_queues.iter() {
             // Empty queues (a peer dropped before its first input, or a
             // hot-join reactivated slot whose ring is blanked) do not constrain
@@ -426,11 +426,9 @@ impl<T: Config> SyncLayer<T> {
             let Some(range) = queue.retained_input_range() else {
                 continue;
             };
-            if oldest.is_null() || range.first > oldest {
-                oldest = range.first;
-            }
+            oldest = Some(oldest.map_or(range.first, |current| current.max(range.first)));
         }
-        oldest
+        oldest.unwrap_or(Frame::NULL)
     }
 
     /// Saves the current game state.
@@ -2939,6 +2937,13 @@ mod sync_layer_tests {
 
     #[test]
     fn oldest_retained_input_frame_ignores_empty_queues() {
+        let empty = SyncLayer::<TestConfig>::new(2, 8);
+        assert_eq!(
+            empty.oldest_retained_input_frame(),
+            Frame::NULL,
+            "no retained input must report NULL, not frame zero"
+        );
+
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
         for i in 0..10i32 {
             sync_layer.add_remote_input(
@@ -2955,6 +2960,37 @@ mod sync_layer_tests {
             sync_layer.oldest_retained_input_frame(),
             Frame::new(4),
             "the empty queue must not turn the shared floor into NULL"
+        );
+    }
+
+    #[test]
+    fn oldest_retained_input_frame_returns_the_newest_queue_floor() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        // Queue 0 keeps receiving local inputs and wraps its ring, so its
+        // retained history starts near the live edge. Queue 1 stops at frame 3
+        // and retains the original history. A rollback can start no earlier
+        // than the newer floor.
+        for i in 0..=140i32 {
+            let frame = Frame::new(i);
+            assert_eq!(
+                sync_layer.add_local_input(
+                    PlayerHandle::new(0),
+                    PlayerInput::new(frame, TestInput { inp: i as u8 }),
+                ),
+                frame
+            );
+            if i <= 3 {
+                assert!(sync_layer.add_remote_input(
+                    PlayerHandle::new(1),
+                    PlayerInput::new(frame, TestInput { inp: i as u8 }),
+                ));
+            }
+            sync_layer.advance_frame();
+        }
+        assert_eq!(
+            sync_layer.oldest_retained_input_frame(),
+            Frame::new(13),
+            "the floor must be the maximum of every live queue's retained start"
         );
     }
 

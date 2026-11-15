@@ -828,6 +828,27 @@ mod tests {
     }
 
     #[test]
+    fn ordered_slice_serializable_len_pre_reserves_the_complete_batch() {
+        let frame = Frame::new(7);
+        let inputs = [
+            PlayerInput::new(frame, TestInput { inp: 1 }),
+            PlayerInput::new(frame, TestInput { inp: 2 }),
+            PlayerInput::new(frame, TestInput { inp: 3 }),
+        ];
+        let from_slice = InputBytes::try_from_inputs::<TestConfig>(3, inputs.as_slice()).unwrap();
+
+        // `TestInput` is four encoded bytes, so the complete-slice estimate must
+        // reserve the twelve-byte batch up front. A truncated estimate would
+        // grow the buffer instead and weaken the bounded-allocation contract.
+        assert_eq!(from_slice.bytes.len(), 12);
+        assert_eq!(
+            from_slice.bytes.capacity(),
+            12,
+            "the ordered-slice source must pre-reserve every serializable player"
+        );
+    }
+
+    #[test]
     fn ordered_slice_input_source_matches_map_with_blanks_and_truncation() {
         let frame = Frame::new(50);
         let blank = PlayerInput::blank_input(Frame::NULL);
