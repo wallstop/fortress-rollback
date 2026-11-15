@@ -66,7 +66,7 @@ def test_merge_is_sequential_and_does_not_replay_fleet_schedules() -> None:
     text = workflow_text()
     prepare = named_step(text, "Prepare sometimes-state census directory")
     fleet = named_step(text, "Run sharded fleet and targeted probes")
-    merge = named_step(text, "Merge and validate sometimes-state census")
+    merge = named_step(text, "Merge, validate, and gate sometimes-state census")
 
     assert 'census_dir="$RUNNER_TEMP/simulation-census"' in prepare
     assert 'rm -rf -- "$census_dir"' in prepare
@@ -183,5 +183,5 @@ def test_census_upload_is_always_retained_and_separate_from_failures() -> None:
     assert "retention-days: 7" in failures
     assert "simulation-census" not in failures
     assert text.index(upload) > text.index(
-        named_step(text, "Merge and validate sometimes-state census")
+        named_step(text, "Merge, validate, and gate sometimes-state census")
     )

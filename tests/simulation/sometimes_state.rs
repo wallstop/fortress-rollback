@@ -37,6 +37,24 @@ pub const SOMETIMES_STATE_ORGANIC_ELIGIBLE: [bool; SOMETIMES_STATE_COUNT] =
 pub const RATCHET_WINDOW_COUNT: usize = 7;
 pub const RATCHET_MIN_QUALIFYING_STATES: usize = 3;
 
+/// Organic IDs retained by the seven-window presence ratchet (#403).
+///
+/// Evidence: nightly runs `43363930081`, `43555370869`, `43675676701`,
+/// `43681492566`, `43683288193`, `43685697209`, and `43687685677`
+/// (2026-11-13 through 2026-11-15), each a full 1,000-schedule organic window.
+/// Every ID below recorded `schedules_hit >= 1` in 7/7 windows; the ignored
+/// evaluator reproduces this set.
+///
+/// The nightly merge fails when a retained ID records zero organic hits, so a
+/// search-power regression cannot silently drop a state the fleet has proven
+/// reachable. The targeted-only sparse-earlier ID is excluded (#402).
+pub const RATCHET_RETAINED_IDS: [&str; 4] = [
+    "rollback.at_prediction_limit.v1",
+    "floor_round.lower_floor_consumable.v1",
+    "connect_status.nudge_sent.v1",
+    "input_ring.within_one_slot_of_capacity.v1",
+];
+
 pub const ORGANIC_SHARDS: u32 = 8;
 pub const ORGANIC_SCHEDULES_PER_SHARD: u64 = 125;
 pub const ORGANIC_STEPS_PER_SCHEDULE: u64 = 5_000;
@@ -491,6 +509,15 @@ pub struct DomainSummary {
 pub struct OrganicSummary(DomainSummary);
 
 impl OrganicSummary {
+    /// Whether this organic window recorded the registry entry at `index`.
+    ///
+    /// Presence is schedule-based: `peer_sessions_hit` is diagnostic and never
+    /// substitutes for the schedule denominator, and targeted/planted evidence
+    /// cannot enter this type.
+    fn has_presence(&self, index: usize) -> bool {
+        self.0.states[index].schedules_hit > 0
+    }
+
     fn validate(&self) -> Result<(), String> {
         let summary = &self.0;
         if summary.schedule_count != ORGANIC_SCHEDULES
@@ -1004,17 +1031,32 @@ fn missing_presence_ids(vector: &SometimesStateVector) -> Vec<&'static str> {
         .collect()
 }
 
-pub fn missing_organic_ratchet_ids(summary: &OrganicSummary) -> Vec<&'static str> {
-    summary
-        .0
-        .states
-        .iter()
-        .enumerate()
-        .filter_map(|(index, state)| {
-            (SOMETIMES_STATE_ORGANIC_ELIGIBLE[index] && state.schedules_hit == 0)
-                .then_some(SOMETIMES_STATE_IDS[index])
+/// Retained IDs with zero organic presence in this window.
+///
+/// Presence-only: a retained ID fails only when its organic `schedules_hit` is
+/// zero. Counts are never compared against a floor, so ordinary seed variation
+/// cannot trip the ratchet. A retained ID missing from the registry fails
+/// closed, even though the registry test below rejects that configuration.
+pub fn missing_retained_ratchet_ids(summary: &OrganicSummary) -> Vec<&'static str> {
+    RATCHET_RETAINED_IDS
+        .into_iter()
+        .filter(|id| {
+            SOMETIMES_STATE_IDS
+                .iter()
+                .position(|candidate| candidate == id)
+                .is_none_or(|index| !summary.has_presence(index))
         })
         .collect()
+}
+
+/// Fails when this nightly window lost organic presence for a retained ID.
+fn enforce_retained_presence(merged: &MergedCensusReport) -> Result<(), String> {
+    let missing = missing_retained_ratchet_ids(&merged.organic);
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("organic presence ratchet lost: {missing:?}"))
+    }
 }
 
 /// One ID's organic presence across the ratchet windows.
@@ -1084,7 +1126,7 @@ pub fn evaluate_seven_window_ratchet(
             organic_eligible: SOMETIMES_STATE_ORGANIC_ELIGIBLE[index],
             windows_hit: windows
                 .iter()
-                .filter(|window| window.organic.0.states[index].schedules_hit > 0)
+                .filter(|window| window.organic.has_presence(index))
                 .count(),
         })
         .collect::<Vec<_>>();
@@ -1131,7 +1173,9 @@ fn merge_nightly_sometimes_state_census() {
         "nightly census merge requires FORTRESS_SIM_TIER=nightly"
     );
     let root = census_root_from_env().expect("nightly census root is configured");
-    let _merged = merge_nightly_at(&root).expect("nightly census merges and validates");
+    let (_merged_path, merged) =
+        merge_nightly_at(&root).expect("nightly census merges and validates");
+    enforce_retained_presence(&merged).expect("organic presence ratchet holds");
 }
 
 /// Run after collecting seven consecutive scheduled-main windows:
@@ -1158,15 +1202,20 @@ fn evaluate_nightly_sometimes_state_ratchet() {
         );
     }
     if report.accepted {
+        assert_eq!(
+            report.retained, RATCHET_RETAINED_IDS,
+            "checked-in ratchet must match the seven-window evidence"
+        );
         println!("retained: {:?}", report.retained);
     } else {
-        println!(
-            "ratchet rejected: {} of {RATCHET_MIN_QUALIFYING_STATES} required eligible IDs qualify",
-            report
-                .states
-                .iter()
-                .filter(|state| state.organic_eligible && state.windows_hit == RATCHET_WINDOW_COUNT)
-                .count()
+        let qualifying = report
+            .states
+            .iter()
+            .filter(|state| state.organic_eligible && state.windows_hit == RATCHET_WINDOW_COUNT)
+            .count();
+        panic!(
+            "checked-in ratchet evidence rejected: {qualifying} of \
+             {RATCHET_MIN_QUALIFYING_STATES} required eligible IDs qualify"
         );
     }
 }
@@ -1642,22 +1691,77 @@ mod tests {
                 "input_ring.within_one_slot_of_capacity.v1",
             ]
         );
+        for id in RATCHET_RETAINED_IDS {
+            let index = SOMETIMES_STATE_IDS
+                .iter()
+                .position(|candidate| *candidate == id)
+                .expect("retained ID is registered");
+            assert!(
+                SOMETIMES_STATE_ORGANIC_ELIGIBLE[index],
+                "{id} must stay organic-eligible"
+            );
+        }
+        assert!(RATCHET_RETAINED_IDS.len() >= RATCHET_MIN_QUALIFYING_STATES);
+        assert!(!RATCHET_RETAINED_IDS.contains(&"rollback.sparse_earlier_checkpoint_selected.v1"));
+    }
 
-        let organic = OrganicSummary(DomainSummary {
-            schedule_count: 1,
-            scheduled_steps: 1,
-            execution_count: 1,
-            peer_session_count: 2,
-            states: std::array::from_fn(|index| StateCount {
-                id: SOMETIMES_STATE_IDS[index].to_owned(),
-                schedules_hit: 0,
-                peer_sessions_hit: 0,
-            }),
-        });
+    fn organic_summary_without(absent: &str) -> OrganicSummary {
+        merged_window(0, SOMETIMES_STATE_IDS.map(|id| id != absent)).organic
+    }
+
+    #[test]
+    fn nightly_ratchet_gate_rejects_windows_missing_a_retained_id() {
+        let complete = || {
+            merged_window(
+                400,
+                SOMETIMES_STATE_IDS.map(|id| RATCHET_RETAINED_IDS.contains(&id)),
+            )
+        };
+        assert_eq!(enforce_retained_presence(&complete()), Ok(()));
+
+        let lost_id = RATCHET_RETAINED_IDS[0];
+        let index = SOMETIMES_STATE_IDS
+            .iter()
+            .position(|candidate| *candidate == lost_id)
+            .expect("retained ID is registered");
+        let mut lost = complete();
+        lost.organic.0.states[index].schedules_hit = 0;
         assert_eq!(
-            missing_organic_ratchet_ids(&organic),
-            eligible,
-            "only organic-eligible IDs can block the presence ratchet"
+            enforce_retained_presence(&lost),
+            Err(format!("organic presence ratchet lost: [\"{lost_id}\"]"))
+        );
+    }
+
+    #[test]
+    fn retained_ratchet_gate_names_each_missing_id() {
+        assert_eq!(
+            missing_retained_ratchet_ids(&organic_summary_without("unregistered.v1")),
+            Vec::<&str>::new()
+        );
+        for id in SOMETIMES_STATE_IDS {
+            let expected = if RATCHET_RETAINED_IDS.contains(&id) {
+                vec![id]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                missing_retained_ratchet_ids(&organic_summary_without(id)),
+                expected,
+                "{id} gate membership must match RATCHET_RETAINED_IDS"
+            );
+        }
+
+        let mut peer_only = organic_summary_without("none.v1");
+        let index = SOMETIMES_STATE_IDS
+            .iter()
+            .position(|id| *id == RATCHET_RETAINED_IDS[0])
+            .expect("retained ID is registered");
+        peer_only.0.states[index].schedules_hit = 0;
+        peer_only.0.states[index].peer_sessions_hit = 2;
+        assert_eq!(
+            missing_retained_ratchet_ids(&peer_only),
+            vec![RATCHET_RETAINED_IDS[0]],
+            "peer-session hits never substitute for the schedule denominator"
         );
     }
 
@@ -1697,21 +1801,27 @@ mod tests {
     }
 
     #[test]
-    fn seven_window_ratchet_retains_only_eligible_ids_present_in_every_window() {
+    fn seven_window_ratchet_retains_the_checked_in_eligible_set() {
+        let present = SOMETIMES_STATE_IDS.map(|id| RATCHET_RETAINED_IDS.contains(&id));
         let windows = (0..RATCHET_WINDOW_COUNT)
-            .map(|index| merged_window(100 + index as u64, [true; SOMETIMES_STATE_COUNT]))
+            .map(|index| merged_window(100 + index as u64, present))
+            .collect::<Vec<_>>();
+        let report =
+            evaluate_seven_window_ratchet(&windows).expect("complete seven-window set evaluates");
+        assert!(report.accepted);
+        assert_eq!(report.retained, RATCHET_RETAINED_IDS);
+    }
+
+    #[test]
+    fn seven_window_ratchet_never_retains_targeted_only_evidence() {
+        let windows = (0..RATCHET_WINDOW_COUNT)
+            .map(|index| merged_window(150 + index as u64, [true; SOMETIMES_STATE_COUNT]))
             .collect::<Vec<_>>();
         let report =
             evaluate_seven_window_ratchet(&windows).expect("complete seven-window set evaluates");
         assert!(report.accepted);
         assert_eq!(
-            report.retained,
-            vec![
-                "rollback.at_prediction_limit.v1",
-                "floor_round.lower_floor_consumable.v1",
-                "connect_status.nudge_sent.v1",
-                "input_ring.within_one_slot_of_capacity.v1",
-            ],
+            report.retained, RATCHET_RETAINED_IDS,
             "the targeted-only sparse-earlier ID must never be retained"
         );
         assert!(report
@@ -1733,10 +1843,10 @@ mod tests {
             report
                 .states
                 .iter()
-                .filter(|state| state.windows_hit == RATCHET_WINDOW_COUNT)
+                .filter(|state| state.organic_eligible && state.windows_hit == RATCHET_WINDOW_COUNT)
                 .count(),
-            3,
-            "rejected report still records the raw per-window presence"
+            2,
+            "only organic-eligible presence counts toward the qualifying threshold"
         );
     }
 

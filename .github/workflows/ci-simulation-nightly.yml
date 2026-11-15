@@ -97,7 +97,7 @@ jobs:
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
-      - name: Merge and validate sometimes-state census
+      - name: Merge, validate, and gate sometimes-state census
         if: always()
         run: >-
           cargo test
