@@ -209,4 +209,4 @@ Common desync causes:
 - [ ] Fix is minimal and at the right level
 - [ ] Similar patterns checked across codebase
 - [ ] Regression test added
-- [ ] `cargo c && cargo t` passes after fix
+- [ ] `cargo c && cargo tf` passes after fix

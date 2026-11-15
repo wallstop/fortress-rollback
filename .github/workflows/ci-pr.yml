@@ -1,0 +1,130 @@
+name: CI - PR Gate
+
+# Fast, high-signal gate for pull requests and merge-queue candidates.
+# Deep assurance runs on merge_group/nightly workflows.
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fast:
+    name: Fast Gate (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable snapshot
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Install cargo-nextest
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-nextest
+
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
+        with:
+          cache-key: pr-fast
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --features tokio,json -- -D warnings
+
+      - name: Run full Linux test suite
+        run: cargo nextest run --profile ci --features tokio,json
+
+      - name: Response-time budget note
+        run: 'echo "Fast gate target: under 10 minutes wall time."'
+
+  api-census:
+    name: Public API Census
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned Rust nightly
+        id: nightly
+        uses: ./.github/actions/install-pinned-nightly
+
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
+        with:
+          cache-key: pr-api-census-${{ steps.nightly.outputs.toolchain }}
+          cache-paths: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/public-api-census
+
+      - name: Verify checked public API snapshot
+        run: python3 scripts/api/public_api_census.py --check
+
+  wasm-check:
+    name: WASM Compile Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain with WASM targets
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable snapshot
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown,wasm32-unknown-emscripten
+          components: clippy
+
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
+        with:
+          cache-key: pr-wasm
+
+      - name: Check wasm32-unknown-unknown
+        run: cargo check --target wasm32-unknown-unknown --no-default-features
+
+      - name: Check wasm32-unknown-emscripten
+        run: cargo check --target wasm32-unknown-emscripten --no-default-features
+
+      - name: Reject browser-only dependencies on Emscripten
+        run: ./scripts/ci/check-emscripten-dependencies.sh
+
+  gate:
+    name: CI Gate
+    needs: [fast, api-census, wasm-check]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require every PR gate dependency to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS_JSON" | jq -e '
+            all(.[];
+              .result == "success" or .result == "skipped" or .result == "neutral"
+            )
+          '

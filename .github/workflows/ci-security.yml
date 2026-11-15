@@ -16,6 +16,7 @@ on:
       - 'scripts/tests/test_ci_security_workflow.py'
       - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-security.yml'
+  merge_group:
   pull_request:
     branches: [main]
     paths:

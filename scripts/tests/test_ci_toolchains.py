@@ -867,7 +867,11 @@ def test_nightly_installer_changes_trigger_consuming_workflows(
     workflow = _load_yaml(WORKFLOWS / workflow_name)
     on_block = workflow.get("on", workflow.get(True))
 
-    for event in ("push", "pull_request"):
+    checked_events = [
+        event for event in ("push", "pull_request") if event in on_block
+    ]
+    assert checked_events
+    for event in checked_events:
         assert ".github/actions/install-pinned-nightly/**" in on_block[event]["paths"]
 
 

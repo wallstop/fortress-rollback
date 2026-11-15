@@ -1,0 +1,6 @@
+[toolchain]
+# Keep local formatting and lint output aligned with the stable toolchain used
+# by CI. Bump intentionally after validating the full local and CI tiers.
+channel = "stable"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

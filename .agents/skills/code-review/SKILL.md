@@ -205,4 +205,4 @@ Structure findings as:
 - [ ] Tests cover both happy path and error cases
 - [ ] `cargo doc --no-deps` passes (no broken doc links)
 - [ ] CHANGELOG updated if pub/user-observable change
-- [ ] `cargo c && cargo t` passes
+- [ ] `cargo c && cargo tf` passes

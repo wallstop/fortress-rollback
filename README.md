@@ -54,6 +54,21 @@ The [first-session guide](https://wallstop.github.io/fortress-rollback/getting-s
 loop as a runnable program. The [request-handling example](https://github.com/wallstop/fortress-rollback/blob/main/examples/request_handling.rs)
 shows the manual and macro forms.
 
+## Development Feedback Loop
+
+The repository uses three validation tiers: a sub-30-second edit loop, a full
+local suite before handoff, and deep assurance on the merge queue or nightlies.
+
+```bash
+cargo fmt && cargo c && cargo tf      # Fast: unit + normal integration tests
+cargo fmt && cargo c && cargo tfull   # Full: simulation + multi-process suites
+python3 scripts/ci/agent-preflight.py --full --auto-fix  # Full preflight
+```
+
+The PR gate is the single required `CI Gate` check; Miri, Kani, TLA+, mutation,
+coverage, fuzzing, and browser exports run on merge queues or schedules so
+ordinary edits do not wait on them.
+
 ## Choose the Right Guide
 
 | Goal | Canonical page |

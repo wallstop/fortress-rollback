@@ -72,7 +72,6 @@ DOCS_WORKFLOW_REQUIRED_PATHS = {
     "scripts/ci/check-derive-bounds.sh",
     ".markdownlint.json",
     ".markdown-link-check.json",
-    ".lychee.toml",
     ".vale.ini",
     ".vale/**",
     ".github/actions/install-cargo-tool/**",

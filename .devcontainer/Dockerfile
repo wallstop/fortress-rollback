@@ -228,7 +228,9 @@ RUN cargo install cargo-spellcheck || echo "cargo-spellcheck optional"
 # Layer 11: Environment and helper scripts
 # ============================================================================
 ENV RUST_BACKTRACE=1
-ENV CARGO_INCREMENTAL=0
+# Keep incremental builds enabled in the interactive dev container. CI
+# workflows set CARGO_INCREMENTAL=0 explicitly for reproducible clean builds.
+ENV CARGO_INCREMENTAL=1
 
 USER root
 

@@ -30,6 +30,7 @@ on:
       - '.github/**/*.py'
       - '.github/actions/install-cargo-tool/**'
       - '.github/workflows/ci-quality.yml'
+  merge_group:
   pull_request:
     branches: [main]
     paths:

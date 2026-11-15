@@ -9,9 +9,14 @@ before hitting pre-commit failures.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 PYTHON_EXECUTABLE = sys.executable or "python3"
@@ -42,6 +47,143 @@ SPELLCHECK_EXTENSIONS = {
     ".json",
 }
 
+CACHE_SCHEMA = "2"
+DEFAULT_CACHE_DIR = (
+    Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    / "fortress-rollback"
+    / "agent-preflight"
+)
+
+# Per-check input roots keep a cache hit useful when an unrelated file changes.
+# Checks that intentionally scan repository-wide content fall back to the full
+# tracked tree.
+CHECK_INPUT_PREFIXES: dict[str, tuple[str, ...]] = {
+    "plan-hygiene": (
+        "PLAN.md",
+        ".agents/skills/fortress-development/",
+        ".agents/skills/dev-pipeline/",
+        ".agents/skills/dst/",
+        "scripts/hooks/check-plan-hygiene.py",
+        "scripts/tests/test_plan_hygiene.py",
+    ),
+    "workspace-lock-check": (
+        "Cargo.toml",
+        "Cargo.lock",
+        "fuzz/Cargo.lock",
+        "loom-tests/Cargo.lock",
+        "tests/network-peer/Cargo.toml",
+        "tests/replay-fixture/Cargo.toml",
+        "tests/wasm-browser-smoke/Cargo.toml",
+        "scripts/release/workspace_locks.py",
+    ),
+    "release-automation-tests": (
+        "scripts/release/",
+        "scripts/tests/test_workspace_locks.py",
+        "scripts/tests/test_prepare_release.py",
+        "scripts/tests/test_release_policy.py",
+        "scripts/tests/test_release_state.py",
+        "scripts/tests/test_release_state_ci.py",
+        "scripts/tests/test_release_checkpoint.py",
+        "scripts/tests/test_publish_state.py",
+        "scripts/tests/test_release_branch.py",
+        "scripts/tests/test_main_ruleset.py",
+        "scripts/tests/test_sync_issue_template_versions.py",
+        "scripts/tests/test_issue_template_versions_wiring.py",
+        "scripts/tests/test_release_workflows.py",
+        ".github/workflows/publish.yml",
+        ".github/workflows/release-prepare.yml",
+        ".github/workflows/ci-release-state.yml",
+        ".github/rulesets/",
+    ),
+    "ci-toolchain-contract": (
+        ".github/actions/",
+        ".github/workflows/",
+        ".tla-tools-version",
+        "rust-toolchain.toml",
+        "scripts/tests/test_ci_toolchains.py",
+    ),
+    "advisory-dispositions": (
+        "Cargo.toml",
+        "Cargo.lock",
+        "deny.toml",
+        "supply-chain/",
+        "scripts/ci/check-advisory-dispositions.py",
+    ),
+    "validate-agent-skills": (".agents/skills/", "scripts/hooks/validate-agent-skills.py"),
+    "agent-skills-quality": (
+        ".agents/skills/",
+        "scripts/docs/check-agent-skills.sh",
+        "scripts/docs/check_agent_skills.py",
+    ),
+    "actionlint": (".github/workflows/", ".github/actions/"),
+    "changelog-unreleased-rule": (
+        "CHANGELOG.md",
+        "scripts/hooks/check-changelog-unreleased.py",
+    ),
+    "wire-golden-immutable": (
+        "src/network/wire_golden",
+        "tests/network/wire_golden",
+        "scripts/hooks/check-wire-golden-immutable.py",
+    ),
+    "vale-advisory": ("docs/", ".vale/", ".vale.ini"),
+    "link-check": ("docs/", "wiki/", "src/", "tests/", "README.md"),
+    "doc-claims": (
+        "src/",
+        "tests/",
+        "examples/",
+        "benches/",
+        "docs/",
+        "specs/",
+        "wiki/",
+        "scripts/ci/check-doc-claims.sh",
+        "scripts/hooks/check-rust-semantic-claims.py",
+    ),
+    "tla-config-consistency": (
+        "specs/tla/",
+        "scripts/docs/check-tla-config-consistency.py",
+    ),
+    "network-timing-invariants": (
+        ".config/nextest.toml",
+        "tests/network/multi_process.rs",
+        "src/network/protocol/mod.rs",
+        ".github/workflows/ci-network-nightly.yml",
+        "scripts/hooks/check-network-timing-invariants.py",
+    ),
+    "advance-frame-error-handling": (
+        "src/",
+        "tests/",
+        "examples/",
+        "benches/",
+        "scripts/hooks/check-advance-frame-error-handling.py",
+    ),
+    "unbounded-alloc": ("src/", "scripts/hooks/check-unbounded-alloc.py"),
+    "violation-site-baseline": (
+        "src/",
+        "tests/",
+        "scripts/simulation/violation_sites.py",
+        "scripts/simulation/violation-site-baseline.tsv",
+    ),
+    "kani-violation-cost": ("src/", "scripts/verification/check-kani-violation-cost.sh"),
+    "tomllib-fallback": (
+        "scripts/",
+        ".github/",
+        "scripts/hooks/check-tomllib-fallback.py",
+    ),
+    "typos": (
+        "src/",
+        "tests/",
+        "examples/",
+        "benches/",
+        "docs/",
+        "wiki/",
+        "scripts/",
+        ".agents/",
+        "README.md",
+        "CHANGELOG.md",
+        ".typos.toml",
+    ),
+}
+
 
 @dataclass(frozen=True)
 class PlannedCheck:
@@ -52,6 +194,18 @@ class PlannedCheck:
     command: list[str]
     fix_hint: str | None = None
     fix_command: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """One executed check result with timing evidence."""
+
+    check_id: str
+    description: str
+    return_code: int
+    duration_seconds: float
+    auto_fixed: bool
+    cached: bool = False
 
 
 def repo_root_from_script() -> Path:
@@ -790,56 +944,279 @@ def run_check_command(repo_root: Path, command: list[str]) -> int:
     return subprocess.run(command, cwd=repo_root, check=False).returncode
 
 
+def run_check_command_captured(
+    repo_root: Path, command: list[str]
+) -> tuple[int, str]:
+    """Run a check command with captured output for parallel execution."""
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    output = f"{completed.stdout}{completed.stderr}"
+    return completed.returncode, output
+
+
+def _run_check_timed(
+    repo_root: Path, command: list[str]
+) -> tuple[int, str, float]:
+    """Run a check and return its exit code, output, and wall time."""
+    started = time.monotonic()
+    return_code, output = run_check_command_captured(repo_root, command)
+    return return_code, output, round(time.monotonic() - started, 3)
+
+
+def tracked_paths(repo_root: Path) -> list[str]:
+    """Return tracked repository paths in stable order."""
+    result = subprocess.run(  # noqa: S603 - fixed executable, no shell
+        ["git", "-C", str(repo_root), "ls-files", "-z"],  # noqa: S607
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return sorted(
+        raw.decode("utf-8", errors="surrogateescape")
+        for raw in result.stdout.split(b"\0")
+        if raw
+    )
+
+
+def _check_input_paths(check_id: str, paths: list[str]) -> list[str]:
+    prefixes = CHECK_INPUT_PREFIXES.get(check_id)
+    if prefixes is None:
+        return paths
+    return [
+        path
+        for path in paths
+        if any(path == prefix or path.startswith(prefix) for prefix in prefixes)
+    ]
+
+
+def check_cache_key(repo_root: Path, check: PlannedCheck, paths: list[str]) -> str:
+    """Return a content-addressed key for one check on the current tree."""
+    digest = hashlib.sha256()
+    digest.update(CACHE_SCHEMA.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(Path(__file__).read_bytes())
+    digest.update(b"\0")
+    digest.update(check.check_id.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update("\0".join(check.command).encode("utf-8"))
+    for relative in _check_input_paths(check.check_id, paths):
+        path = repo_root / relative
+        digest.update(b"\0")
+        digest.update(relative.encode("utf-8", errors="surrogateescape"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()
+
+
+def _cache_file(cache_dir: Path, key: str) -> Path:
+    return cache_dir / f"{key}.json"
+
+
+def load_cached_result(
+    cache_dir: Path, key: str, check: PlannedCheck
+) -> CheckResult | None:
+    """Return a cached success result when the content key still matches."""
+    path = _cache_file(cache_dir, key)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        payload.get("schema") != CACHE_SCHEMA
+        or payload.get("key") != key
+        or payload.get("check_id") != check.check_id
+        or payload.get("return_code") != 0
+    ):
+        return None
+    return CheckResult(
+        check_id=check.check_id,
+        description=check.description,
+        return_code=0,
+        duration_seconds=0.0,
+        auto_fixed=False,
+        cached=True,
+    )
+
+
+def store_cached_result(cache_dir: Path, key: str, check: PlannedCheck) -> None:
+    """Persist one successful check result for the current content key."""
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target = _cache_file(cache_dir, key)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema": CACHE_SCHEMA,
+                    "key": key,
+                    "check_id": check.check_id,
+                    "return_code": 0,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(target)
+    except OSError:
+        # Caching is an accelerator; never fail a green check because of it.
+        return
+
+
 def execute_checks(
     repo_root: Path,
     checks: list[PlannedCheck],
     auto_fix: bool,
+    *,
+    quiet: bool = False,
+    results: list[CheckResult] | None = None,
+    cache_dir: Path | None = None,
+    paths: list[str] | None = None,
 ) -> int:
-    """Execute planned checks.
+    """Execute planned checks concurrently while preserving planned order.
 
+    Successful results are content-addressed in ``cache_dir`` and reused when
+    the check command and its input tree are byte-identical. Auto-fix is applied
+    only to failing checks and is re-run sequentially.
     Returns 0 on success and 1 when any check fails.
     """
     failures: list[PlannedCheck] = []
+    outputs: dict[str, str] = {}
+    cached_results: dict[str, CheckResult] = {}
+    cache_keys: dict[str, str] = {}
+    pending: list[PlannedCheck] = []
+
+    tracked = paths if paths is not None else tracked_paths(repo_root)
+    for check in checks:
+        if cache_dir is None:
+            pending.append(check)
+            continue
+        key = check_cache_key(repo_root, check, tracked)
+        cache_keys[check.check_id] = key
+        cached = load_cached_result(cache_dir, key, check)
+        if cached is None:
+            pending.append(check)
+        else:
+            cached_results[check.check_id] = cached
+
+    if not quiet:
+        for check in pending:
+            print(f"[RUN ] {check.check_id}: {check.description}")
+
+    durations: dict[str, float] = {}
+    return_codes: dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(pending)))) as pool:
+        futures = {
+            check.check_id: pool.submit(
+                _run_check_timed, repo_root, check.command
+            )
+            for check in pending
+        }
+        for check in pending:
+            return_code, output, duration = futures[check.check_id].result()
+            return_codes[check.check_id] = return_code
+            outputs[check.check_id] = output
+            durations[check.check_id] = duration
 
     for check in checks:
-        print(f"[RUN ] {check.check_id}: {check.description}")
-        return_code = run_check_command(repo_root, check.command)
-
-        if return_code == 0:
-            print(f"[PASS] {check.check_id}")
+        cached = cached_results.get(check.check_id)
+        if cached is not None:
+            if not quiet:
+                print(f"[PASS] {check.check_id} (cached)")
+            if results is not None:
+                results.append(cached)
             continue
 
-        print(f"[FAIL] {check.check_id}", file=sys.stderr)
+        return_code = return_codes[check.check_id]
+        output = outputs[check.check_id]
+        auto_fixed = False
 
-        if auto_fix and check.fix_command is not None:
-            print(
-                f"[FIX ] Attempting auto-fix for {check.check_id}...",
-                file=sys.stderr,
+        if return_code == 0:
+            if not quiet and output:
+                print(output, end="" if output.endswith("\n") else "\n")
+            if not quiet:
+                print(f"[PASS] {check.check_id}")
+            if cache_dir is not None:
+                store_cached_result(cache_dir, cache_keys[check.check_id], check)
+        else:
+            if not quiet:
+                if output:
+                    print(output, end="" if output.endswith("\n") else "\n")
+                print(f"[FAIL] {check.check_id}", file=sys.stderr)
+
+            if auto_fix and check.fix_command is not None:
+                if not quiet:
+                    print(
+                        f"[FIX ] Attempting auto-fix for {check.check_id}...",
+                        file=sys.stderr,
+                    )
+                fix_code, fix_output = run_check_command_captured(
+                    repo_root, check.fix_command
+                )
+                if fix_output and not quiet:
+                    print(
+                        fix_output,
+                        end="" if fix_output.endswith("\n") else "\n",
+                    )
+                if fix_code == 0:
+                    retry_code, retry_output = run_check_command_captured(
+                        repo_root, check.command
+                    )
+                    if retry_output and not quiet:
+                        print(
+                            retry_output,
+                            end="" if retry_output.endswith("\n") else "\n",
+                        )
+                    if retry_code == 0:
+                        return_code = 0
+                        auto_fixed = True
+                        if cache_dir is not None:
+                            store_cached_result(
+                                cache_dir, cache_keys[check.check_id], check
+                            )
+                        if not quiet:
+                            print(f"[PASS] {check.check_id} (auto-fixed)")
+
+                if return_code != 0 and not quiet:
+                    print(
+                        f"[FAIL] {check.check_id} auto-fix did not resolve the issue.",
+                        file=sys.stderr,
+                    )
+
+            if return_code != 0:
+                failures.append(check)
+
+        if results is not None:
+            results.append(
+                CheckResult(
+                    check_id=check.check_id,
+                    description=check.description,
+                    return_code=return_code,
+                    duration_seconds=durations[check.check_id],
+                    auto_fixed=auto_fixed,
+                )
             )
-            fix_code = run_check_command(repo_root, check.fix_command)
-            if fix_code == 0:
-                retry_code = run_check_command(repo_root, check.command)
-                if retry_code == 0:
-                    print(f"[PASS] {check.check_id} (auto-fixed)")
-                    continue
-
-            print(
-                f"[FAIL] {check.check_id} auto-fix did not resolve the issue.",
-                file=sys.stderr,
-            )
-
-        failures.append(check)
 
     if not failures:
-        print("All agent preflight checks passed.")
+        if not quiet:
+            print("All agent preflight checks passed.")
         return 0
 
-    print("Agent preflight checks failed:", file=sys.stderr)
-    for check in failures:
-        print(f"- {check.check_id}: {check.description}", file=sys.stderr)
-        if check.fix_hint:
-            label = "auto-fix" if check.fix_command is not None else "manual-fix"
-            print(f"{label}: {check.fix_hint}", file=sys.stderr)
+    if not quiet:
+        print("Agent preflight checks failed:", file=sys.stderr)
+        for check in failures:
+            print(f"- {check.check_id}: {check.description}", file=sys.stderr)
+            if check.fix_hint:
+                label = "auto-fix" if check.fix_command is not None else "manual-fix"
+                print(f"{label}: {check.fix_hint}", file=sys.stderr)
     return 1
 
 
@@ -852,8 +1229,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--all",
+        "--full",
+        dest="all",
         action="store_true",
-        help="Run all checks regardless of changed files.",
+        help="Run all checks regardless of changed files (full handoff tier).",
     )
     parser.add_argument(
         "--auto-fix",
@@ -869,6 +1248,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="Print changed files and selected checks.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable JSON result with per-check timings.",
+    )
+    parser.add_argument(
+        "--timings",
+        action="store_true",
+        help="Print per-check wall-clock timings after the run.",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable content-addressed result caching.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=DEFAULT_CACHE_DIR,
+        help="Directory for content-addressed check results.",
     )
     return parser
 
@@ -889,12 +1289,22 @@ def main(argv: list[str] | None = None) -> int:
             changed_files = collect_changed_files(repo_root)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
-            print("Falling back to --all checks.", file=sys.stderr)
-            changed_files = set()
-            args.all = True
+            print(
+                "Refusing to guess a check set. Resolve the Git state and rerun, "
+                "or pass --full explicitly.",
+                file=sys.stderr,
+            )
+            return 2
 
     if not args.all and not changed_files:
         print("No changed files detected; skipping preflight checks.")
+        if args.json:
+            print(
+                json.dumps(
+                    {"passed": True, "checks": [], "changed_files": []},
+                    sort_keys=True,
+                )
+            )
         return 0
 
     existing_files = {
@@ -919,9 +1329,52 @@ def main(argv: list[str] | None = None) -> int:
 
     if not planned_checks:
         print("No relevant preflight checks for the current file set.")
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "passed": True,
+                        "checks": [],
+                        "changed_files": sorted(changed_files),
+                    },
+                    sort_keys=True,
+                )
+            )
         return 0
 
-    return execute_checks(repo_root, planned_checks, auto_fix=args.auto_fix)
+    results: list[CheckResult] = []
+    exit_code = execute_checks(
+        repo_root,
+        planned_checks,
+        auto_fix=args.auto_fix,
+        quiet=args.json,
+        results=results,
+        cache_dir=None if args.no_cache else args.cache_dir,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "passed": exit_code == 0,
+                    "changed_files": sorted(changed_files),
+                    "checks": [asdict(result) for result in results],
+                },
+                sort_keys=True,
+            )
+        )
+    elif args.timings:
+        print("")
+        print("Preflight timings:")
+        for result in sorted(results, key=lambda item: -item.duration_seconds):
+            print(
+                f"  {result.duration_seconds:8.3f}s  {result.check_id} "
+                f"(rc={result.return_code})"
+            )
+        total = sum(result.duration_seconds for result in results)
+        print(f"  {total:8.3f}s  total")
+
+    return exit_code
 
 
 if __name__ == "__main__":

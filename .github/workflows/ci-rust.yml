@@ -23,26 +23,9 @@ on:
       - 'tests/godot-emscripten/**'
       - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-rust.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - '**.rs'
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - 'rust-toolchain.toml'
-      - '.cargo/config.toml'
-      - 'Cross.toml'
-      - 'clippy.toml'
-      - 'rustfmt.toml'
-      - 'scripts/verification/verify-kani.sh'
-      - 'scripts/verification/check-kani-coverage.sh'
-      - 'scripts/ci/check-emscripten-dependencies.sh'
-      - 'scripts/api/public_api_census.py'
-      - 'scripts/tests/test_public_api_census.py'
-      - 'docs/api/public-api-*.tsv'
-      - 'tests/godot-emscripten/**'
-      - '.github/actions/install-pinned-nightly/**'
-      - '.github/workflows/ci-rust.yml'
+  merge_group:
+  schedule:
+    - cron: '0 5 * * 0'
   workflow_dispatch:
 
 env:
@@ -199,15 +182,6 @@ jobs:
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
-
-      - name: Build docs
-        run: cargo doc --verbose
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets --features tokio,json -- -D warnings
 
   hot-join:
     name: Hot Join Feature
@@ -532,7 +506,7 @@ jobs:
     # Backstop only: a warm sccache + target cache brings this well under a
     # minute. Allow a cold Cargo.lock rebuild to finish and save its cache.
     timeout-minutes: 40
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'merge_group' || github.event_name == 'push'
 
     steps:
       - uses: actions/checkout@v7

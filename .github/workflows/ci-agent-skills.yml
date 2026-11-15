@@ -10,6 +10,7 @@ on:
       - 'scripts/docs/check-agent-skills.sh'
       - 'scripts/tests/test_validate_agent_skills.py'
       - 'scripts/tests/test_check_agent_skills.sh'
+  merge_group:
   pull_request:
     paths:
       - '.agents/skills/**'

@@ -19,19 +19,6 @@ on:
         required: false
         default: '180'
 
-  pull_request:
-    paths:
-      - '.cargo/mutants.toml'
-      - '.github/actions/install-cargo-tool/**'
-      - '.github/workflows/ci-mutation.yml'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - 'scripts/ci/aggregate_mutation_results.py'
-      - 'scripts/tests/test_aggregate_mutation_results.py'
-      - 'scripts/tests/test_ci_mutation_workflow.py'
-      - 'src/**'
-      - 'tests/**'
-
   schedule:
     - cron: '0 2 1 * *'  # First day of month at 2 AM UTC
 
@@ -48,6 +35,8 @@ on:
       - 'scripts/tests/test_ci_mutation_workflow.py'
       - 'src/**'
       - 'tests/**'
+
+  merge_group:
 
 concurrency:
   group: mutation-${{ github.ref }}
@@ -74,7 +63,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable snapshot
@@ -93,12 +82,12 @@ jobs:
           version: 27.1.0
 
       - name: Run authoritative baseline
-        run: cargo nextest run --locked --all-targets --features tokio,json,hot-join,violation-census --no-capture
+        run: cargo nextest run --locked --all-targets --features tokio,json,hot-join,violation-census
 
       - name: Plan exact mutation corpus
         id: plan
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
           BEFORE_SHA: ${{ github.event.before }}
           EVENT_NAME: ${{ github.event_name }}
           FILE_FILTER: ${{ inputs.file_filter }}
@@ -121,10 +110,10 @@ jobs:
           elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             scope="filtered"
             filter_args+=(--file "$FILE_FILTER")
-          elif [ "$EVENT_NAME" = "pull_request" ]; then
+          elif [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
             scope="diff"
             if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "pull_request mutation scope requires a 40-character base SHA"
+              echo "$EVENT_NAME mutation scope requires a 40-character base SHA"
               exit 1
             fi
             git diff --binary --unified=0 "$BASE_SHA" HEAD -- '*.rs' > mutation-scope.diff
@@ -205,7 +194,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable snapshot
@@ -226,7 +215,7 @@ jobs:
       - name: Run bounded mutation shard
         id: mutants
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
           BEFORE_SHA: ${{ github.event.before }}
           EVENT_NAME: ${{ github.event_name }}
           FILE_FILTER: ${{ inputs.file_filter }}
@@ -240,7 +229,7 @@ jobs:
           filter_args=()
           case "$MUTATION_SCOPE" in
             diff)
-              if [ "$EVENT_NAME" = "pull_request" ]; then
+              if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
                 git diff --binary --unified=0 "$BASE_SHA" HEAD -- '*.rs' > mutation-scope.diff
               elif [ "$EVENT_NAME" = "push" ]; then
                 git diff --binary --unified=0 "$BEFORE_SHA" HEAD -- '*.rs' > mutation-scope.diff
@@ -352,7 +341,7 @@ jobs:
       - name: Checkout exact head
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha || github.sha }}
 
       - name: Download mutation shards
         uses: actions/download-artifact@v8

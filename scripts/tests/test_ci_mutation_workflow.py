@@ -76,7 +76,11 @@ def test_workflow_uses_exact_head_diff_and_bounded_dynamic_shards() -> None:
     text = workflow_text()
 
     assert text.count("fetch-depth: 0") == 2
-    assert text.count("github.event.pull_request.head.sha || github.sha") == 3
+    expected_ref = (
+        "github.event.merge_group.head_sha || "
+        "github.event.pull_request.head.sha || github.sha"
+    )
+    assert text.count(expected_ref) == 3
     assert "git diff --binary --unified=0" in text
     assert "--in-diff mutation-scope.diff" in text
     assert "(expected_mutants + 49) / 50" in text
@@ -167,7 +171,7 @@ def test_baseline_and_summary_are_fail_closed() -> None:
     summary = named_step(text, "Aggregate mutation policy")
     terminal = named_step(text, "Require successful baseline and shard jobs")
 
-    assert "--no-capture" in baseline
+    assert "--no-capture" not in baseline
     assert "aggregate_mutation_results.py" in summary
     assert "--expected-shards" in summary
     assert "--expected-mutants" in summary

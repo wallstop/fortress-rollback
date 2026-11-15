@@ -14,6 +14,7 @@ on:
       - 'docker/**'
       - 'scripts/ci/docker-network-tests.sh'
       - '.github/workflows/ci-network.yml'
+  merge_group:
   pull_request:
     branches: [main]
     paths:

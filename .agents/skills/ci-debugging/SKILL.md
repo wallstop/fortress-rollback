@@ -130,7 +130,7 @@ Enable debug logging: set repo variable `ACTIONS_STEP_DEBUG=true`.
 ## Commands Before Every Commit
 
 ```bash
-cargo c && cargo t                                        # Format + lint + test
+cargo c && cargo tf                                       # Format + lint + fast test
 cargo doc --no-deps                                       # Doc changes
 actionlint                                                # Workflow changes
 npx markdownlint '**/*.md' --config .markdownlint.json --fix  # Markdown changes

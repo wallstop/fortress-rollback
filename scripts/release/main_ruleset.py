@@ -75,7 +75,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     if rule_types != required_rule_types:
         raise RulesetError(
             "main protection must contain exactly the deletion, non-fast-forward, "
-            "linear-history, and release-state status-check rules"
+            "linear-history, and status-check rules"
         )
     status_rule = rules[-1]
     required_parameters = {
@@ -83,14 +83,18 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
             {
                 "context": "Verify prepared release state",
                 "integration_id": 15368,
-            }
+            },
+            {
+                "context": "CI Gate",
+                "integration_id": 15368,
+            },
         ],
         "strict_required_status_checks_policy": True,
         "do_not_enforce_on_create": False,
     }
     if status_rule.get("parameters") != required_parameters:
         raise RulesetError(
-            "release-state status check must be exact, required, and strict"
+            "release-state and CI Gate status checks must be exact, required, and strict"
         )
     return _managed(document)
 

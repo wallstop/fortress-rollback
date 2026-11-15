@@ -1,0 +1,64 @@
+name: CI - Fuzz Corpus (Nightly)
+
+# Every supported parser surface has a checked-in fuzz target. This lane keeps
+# the corpus honest without paying fuzzing cost on every pull request.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  corpus-regression:
+    name: Fuzz Corpus Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned Rust nightly
+        id: nightly
+        uses: ./.github/actions/install-pinned-nightly
+
+      - name: Cache cargo registry and fuzz corpus
+        uses: actions/cache@v6
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/corpus
+          key: fuzz-corpus-${{ steps.nightly.outputs.toolchain }}-${{ hashFiles('fuzz/**/*.rs', 'fuzz/Cargo.lock') }}
+          restore-keys: |
+            fuzz-corpus-${{ steps.nightly.outputs.toolchain }}-
+
+      - name: Install cargo-fuzz
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-fuzz
+
+      - name: Run every fuzz target against its corpus
+        run: |
+          set -euo pipefail
+          toolchain="${{ steps.nightly.outputs.toolchain }}"
+          mapfile -t targets < <(cargo "+${toolchain}" fuzz list)
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "::error::No fuzz targets discovered."
+            exit 1
+          fi
+          for target in "${targets[@]}"; do
+            echo "== ${target} =="
+            cargo "+${toolchain}" fuzz run "$target" -- -runs=0
+          done

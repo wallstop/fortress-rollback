@@ -255,12 +255,13 @@ def test_static_workflow_paths_cover_all_relevant_sources() -> None:
 
     for event in ("push", "pull_request"):
         assert "**/*.sh" in lint[event]["paths"]
-        assert "**/*.rs" in codeql[event]["paths"]
         assert "scripts/**/*.py" in quality[event]["paths"]
         assert ".github/**/*.py" in quality[event]["paths"]
         assert {"Cargo.toml", "tests/**", "fuzz/**", "loom-tests/**"}.issubset(
             quality[event]["paths"]
         )
+    assert "schedule" in codeql, "Rust CodeQL is scheduled, not PR-gating"
+    assert "pull_request" not in codeql
 
 
 def test_z3_verification_uses_pinned_compatible_solver() -> None:

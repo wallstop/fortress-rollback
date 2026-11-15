@@ -77,6 +77,14 @@ def _load_workflow(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _triggers(workflow: dict) -> dict:
+    on_block = workflow.get("on")
+    if on_block is None:
+        on_block = workflow.get(True)
+    assert isinstance(on_block, dict), "workflow missing on block"
+    return on_block
+
+
 def _workflow_paths(workflow: dict, event: str) -> set[str]:
     on_block = workflow.get("on")
     if on_block is None:
@@ -268,8 +276,8 @@ def test_public_api_census_uses_pinned_nightly_and_checked_snapshot() -> None:
         "scripts/tests/test_public_api_census.py",
         "docs/api/public-api-*.tsv",
     }
-    for event in ("push", "pull_request"):
-        assert expected_paths <= _workflow_paths(workflow, event)
+    assert expected_paths <= _workflow_paths(workflow, "push")
+    assert "merge_group" in _triggers(workflow)
 
 
 def test_no_panics_gate_rejects_debug_assertions_and_scan_failures() -> None:
@@ -290,14 +298,20 @@ def test_no_panics_gate_rejects_debug_assertions_and_scan_failures() -> None:
 
 
 @pytest.mark.parametrize("workflow_path", CARGO_HEAVY_WORKFLOWS_WITH_PATH_FILTERS)
-@pytest.mark.parametrize("event", ("push", "pull_request"))
 def test_cargo_heavy_workflows_trigger_on_cargo_config_changes(
-    workflow_path: Path, event: str
+    workflow_path: Path,
 ) -> None:
     """Cargo-heavy CI must run when repo-level Cargo config changes."""
     workflow = _load_workflow(workflow_path)
+    triggers = _triggers(workflow)
 
-    assert ".cargo/config.toml" in _workflow_paths(workflow, event)
+    checked_events = [
+        event for event in ("push", "pull_request") if event in triggers
+    ]
+    assert checked_events, f"{workflow_path.name} must trigger on push or PR"
+    for event in checked_events:
+        assert ".cargo/config.toml" in _workflow_paths(workflow, event)
+    assert "merge_group" in triggers
     assert ".cargo/**" not in _workflow_paths(workflow, event)
 
 
@@ -436,8 +450,8 @@ def test_wasm_job_rejects_browser_dependencies_only_on_emscripten() -> None:
     assert check_step["if"] == "matrix.target == 'wasm32-unknown-emscripten'"
     assert check_step["run"] == f"./{EMSCRIPTEN_DEPENDENCY_CHECK}"
 
-    for event in ("push", "pull_request"):
-        assert EMSCRIPTEN_DEPENDENCY_CHECK in _workflow_paths(workflow, event)
+    assert EMSCRIPTEN_DEPENDENCY_CHECK in _workflow_paths(workflow, "push")
+    assert "merge_group" in _triggers(workflow)
 
 
 def test_wasm_job_runs_browser_session_transport_in_browser() -> None:
@@ -580,8 +594,8 @@ def test_godot_fixture_changes_trigger_rust_ci() -> None:
     """Every fixture input must schedule its browser integration gate."""
     workflow = _load_ci_rust_workflow()
 
-    for event in ("push", "pull_request"):
-        assert GODOT_FIXTURE_PATH_FILTER in _workflow_paths(workflow, event)
+    assert GODOT_FIXTURE_PATH_FILTER in _workflow_paths(workflow, "push")
+    assert "merge_group" in _triggers(workflow)
 
 
 def test_godot_browser_job_pins_its_toolchain() -> None:

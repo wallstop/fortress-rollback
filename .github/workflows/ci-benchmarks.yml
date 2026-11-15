@@ -14,16 +14,7 @@ on:
       - '.cargo/config.toml'
       - 'benches/**'
       - '.github/workflows/ci-benchmarks.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - '**.rs'
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - '.cargo/config.toml'
-      - 'benches/**'
-      - '.github/workflows/ci-benchmarks.yml'
-  workflow_dispatch:  # Allow manual runs
+  merge_group:
 
 permissions:
   contents: read
@@ -38,7 +29,7 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'merge_group' || github.event_name == 'pull_request'
     # Use a consistent runner for reproducible results
     # Note: Performance may vary between runner hardware revisions
 
@@ -87,8 +78,8 @@ jobs:
       # this runner; a regression needs both a >1.50 median ratio and two votes.
       - name: Run paired Criterion regression gate
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          RAW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          RAW_HEAD_SHA: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
           TESTED_MERGE_SHA: ${{ github.sha }}
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
@@ -165,7 +156,7 @@ jobs:
 
   benchmark-history:
     name: Track Benchmark History
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -305,7 +296,7 @@ jobs:
     permissions:
       contents: read
     # Quick benchmarks run even if full benchmark fails.
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'merge_group' || github.event_name == 'pull_request'
 
     steps:
       - uses: actions/checkout@v7

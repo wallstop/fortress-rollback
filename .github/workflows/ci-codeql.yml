@@ -1,22 +1,6 @@
 name: CI - CodeQL
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/**'
-      - 'scripts/**/*.py'
-      - '**/*.rs'
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-  pull_request:
-    branches: [main]
-    paths:
-      - '.github/**'
-      - 'scripts/**/*.py'
-      - '**/*.rs'
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
   schedule:
     - cron: '30 4 * * 0'
   workflow_dispatch:
