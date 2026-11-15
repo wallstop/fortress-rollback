@@ -43,10 +43,16 @@ multiplexing = false
 retry = 10
 
 [alias]
-# Convenient aliases for common operations
-# All test aliases use --no-capture so output is visible on failures
-t = "nextest run --no-capture"
-qt = "nextest run --no-fail-fast --no-capture"
-ci = "nextest run --profile ci --no-capture"
+# Convenient aliases for common operations.
+# Tests run in parallel by default; nextest's failure-output setting surfaces
+# failures immediately. Add --no-capture only when debugging one test.
+t = "nextest run"
+qt = "nextest run --no-fail-fast"
+ci = "nextest run --profile ci"
+# Fast inner loop: everything except the heavy simulation fleet and the
+# serialized real-UDP multi-process group (~2,780 tests in under 10 seconds).
+tf = "nextest run -- --skip simulation:: --skip network::multi_process"
+# Full local suite, including simulation and multi-process coverage.
+tfull = "nextest run --workspace --features tokio,json"
 c = "clippy --workspace --all-targets --features tokio,json"
 b = "build --workspace --all-targets"

@@ -9,14 +9,7 @@ on:
       - '**/Cargo.lock'
       - '.cargo/config.toml'
       - '.github/workflows/ci-coverage.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - '**.rs'
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - '.cargo/config.toml'
-      - '.github/workflows/ci-coverage.yml'
+  merge_group:
   workflow_dispatch:
 
 permissions:

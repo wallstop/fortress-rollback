@@ -22,17 +22,19 @@ description: "Repository-wide engineering policy and project context for Fortres
 ## Quick Commands
 
 ```bash
-cargo fmt && cargo clippy --workspace --all-targets --features tokio,json && cargo nextest run --no-capture  # Full local validation
-cargo c && cargo t                        # Aliases from .cargo/config.toml
+cargo fmt && cargo c && cargo tf          # Fast tier: per-edit loop (<30s warm)
+cargo fmt && cargo c && cargo tfull       # Full tier: before handoff/push
+python3 scripts/ci/agent-preflight.py     # Changed-file preflight
+python3 scripts/ci/agent-preflight.py --full --auto-fix  # Before PR handoff
 typos                                     # Spell check (CI enforced)
 cargo test --features z3-verification -- --nocapture  # Z3 proofs (slow)
 ```
 
-**Test output rule:** Always use `--no-capture` (nextest) / `-- --nocapture` (cargo test) so output is visible on failure, and NEVER pipe test output through `tail`/`head` -- redirect to a temp file instead:
+**Test output rule:** nextest captures failures automatically (`failure-output = "immediate-final"`), so run it in parallel by default. Use `--no-capture` / `cargo test -- --nocapture` only when reproducing one test. NEVER pipe test output through `tail`/`head` -- redirect to a temp file instead:
 
 ```bash
-cargo nextest run --no-capture > /tmp/test-results.txt 2>&1  # Then read the file
-for i in $(seq 1 10); do cargo nextest run --no-capture >> /tmp/flaky-check.txt 2>&1; done  # Repeated runs
+cargo nextest run test_name --no-capture > /tmp/test-results.txt 2>&1  # Then read the file
+for i in $(seq 1 10); do cargo nextest run test_name --no-capture >> /tmp/flaky-check.txt 2>&1; done  # Repeated runs
 ```
 
 ## CLI Tools (Dev Container)
@@ -292,7 +294,7 @@ oracle. Generator fixes made on release branches must also land on `main`.
 - **Doc/link validation:** `python3 scripts/docs/check-links.py` plus `bash scripts/ci/check-doc-claims.sh` for Rust semantic claim drift (also flags rustdoc intra-doc links whose backticked text names an item the `crate::`/`super::`/`self::` target's last segment does not -- they resolve but land on the wrong page; see [doc-code-sync.md](../doc-code-sync/SKILL.md#intra-doc-link-text-vs-target)). Runs in agent preflight when `.rs`/`.md` files change.
 - **Spell check:** `typos` (also runs in agent preflight via `agent-typos.py`)
 - **Vale (advisory):** `vale docs/` -- checks prose quality, non-blocking in CI. Cheat-sheet of recurring swaps and weasel words: [`.agents/skills/user-facing-docs/SKILL.md`](../user-facing-docs/SKILL.md#prose-conventions). Agent preflight surfaces per-file counts via the `vale-advisory` check.
-- **Full local validation:** `cargo fmt && cargo clippy --workspace --all-targets --features tokio,json && cargo nextest run --no-capture`
+- **Full local validation:** `cargo fmt && cargo c && cargo tfull` (parallel nextest; no `--no-capture`)
 
 Shell regex portability rule: avoid PCRE-style escapes in `grep -E`/`sed -E` (`\b`, `\s`, `\w`, etc.). Use POSIX-safe classes like `[[:space:]]`, `[[:alnum:]_]`, and token boundaries `(^|[^[:alnum:]_])word([^[:alnum:]_]|$)`.
 
@@ -327,11 +329,40 @@ For docs/wiki mirrors, use a first-line `<!-- SYNC: ... -->` header with explici
 ## Quality Checklist
 
 - [ ] `cargo fmt` and `cargo clippy --workspace --all-targets --features tokio,json` pass
-- [ ] All tests pass (`cargo nextest run`)
+- [ ] Fast tier passes (`cargo tf`), and the full tier passes before handoff (`cargo tfull`)
 - [ ] New functionality has tests and Rustdoc examples
 - [ ] Code is 100% safe Rust and handles every error path
 - [ ] Public APIs have no duplicate methods and document feature dependencies
 - [ ] Changelog reviewed for pub/user-observable changes
+
+## Agent Coordination and Validation Tiers
+
+Use a coordinator/implementer/verifier topology when a task spans more than one
+module or more than two independent workstreams. For a single-file fix, one
+implementer is faster; do not add coordination overhead without parallelism.
+
+- **Coordinator:** owns `PLAN.md`, issue scope, task cards, integration, and CI
+  triage. It does not edit production code.
+- **Implementer:** one task card, one worktree, non-overlapping file ownership.
+  Runs `cargo c && cargo tf` after edits and `cargo tfull` before handoff.
+- **Verifier:** independent context. Runs the full tier on the exact SHA and
+  performs adversarial review. Only Critical/Major findings block; Minor/Nit
+  findings become follow-up issues unless they affect correctness.
+- **CI triage:** starts only after local full validation is green. Caps at two
+  CI rounds per task; a third needs coordinator sign-off.
+
+Task cards use [`assets/task-card.md`](assets/task-card.md). Record final
+evidence in the local, gitignored `progress/session-*.md` file, not in
+`PLAN.md`.
+
+Validation tiers:
+
+| Tier | When | Command |
+| --- | --- | --- |
+| Fast | every edit | `cargo c && cargo tf` plus changed-file preflight |
+| Full | before handoff | `cargo tfull` plus `agent-preflight.py --full` |
+| PR gate | PR update | `CI Gate` workflow |
+| Deep | merge queue / nightly | merge-group and scheduled workflows |
 
 ## For Agents
 

@@ -25,17 +25,7 @@ on:
       - 'clippy.toml'
       - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-safety.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.cargo/config.toml'
-      - 'clippy.toml'
-      - '.github/actions/install-pinned-nightly/**'
-      - '.github/workflows/ci-safety.yml'
+  merge_group:
   schedule:
     # Run weekly on Sundays at 3 AM UTC for thorough analysis
     - cron: '0 3 * * 0'

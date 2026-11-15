@@ -17,20 +17,9 @@ on:
       - '.tla-tools-version'
       - '.github/actions/install-pinned-nightly/**'
       - '.github/workflows/ci-verification.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - '**.rs'
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - '.cargo/config.toml'
-      - 'specs/**'
-      - 'scripts/verification/verify-sync-handshake-traces.py'
-      - 'scripts/verification/verify-*.sh'
-      - 'scripts/verification/check-kani-coverage.sh'
-      - '.tla-tools-version'
-      - '.github/actions/install-pinned-nightly/**'
-      - '.github/workflows/ci-verification.yml'
+  merge_group:
+  schedule:
+    - cron: '0 6 * * 0'
   workflow_dispatch:
 
 # Cancel stale verification runs when a newer commit lands on the same ref.

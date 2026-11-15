@@ -9,9 +9,12 @@ before hitting pre-commit failures.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 PYTHON_EXECUTABLE = sys.executable or "python3"
@@ -52,6 +55,17 @@ class PlannedCheck:
     command: list[str]
     fix_hint: str | None = None
     fix_command: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """One executed check result with timing evidence."""
+
+    check_id: str
+    description: str
+    return_code: int
+    duration_seconds: float
+    auto_fixed: bool
 
 
 def repo_root_from_script() -> Path:
@@ -790,56 +804,142 @@ def run_check_command(repo_root: Path, command: list[str]) -> int:
     return subprocess.run(command, cwd=repo_root, check=False).returncode
 
 
+def run_check_command_captured(
+    repo_root: Path, command: list[str]
+) -> tuple[int, str]:
+    """Run a check command with captured output for parallel execution."""
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    output = f"{completed.stdout}{completed.stderr}"
+    return completed.returncode, output
+
+
+def _run_check_timed(
+    repo_root: Path, command: list[str]
+) -> tuple[int, str, float]:
+    """Run a check and return its exit code, output, and wall time."""
+    started = time.monotonic()
+    return_code, output = run_check_command_captured(repo_root, command)
+    return return_code, output, round(time.monotonic() - started, 3)
+
+
 def execute_checks(
     repo_root: Path,
     checks: list[PlannedCheck],
     auto_fix: bool,
+    *,
+    quiet: bool = False,
+    results: list[CheckResult] | None = None,
 ) -> int:
-    """Execute planned checks.
+    """Execute planned checks concurrently while preserving planned order.
 
+    Auto-fix is applied only to failing checks and is re-run sequentially.
     Returns 0 on success and 1 when any check fails.
     """
     failures: list[PlannedCheck] = []
+    outputs: dict[str, str] = {}
+
+    if not quiet:
+        for check in checks:
+            print(f"[RUN ] {check.check_id}: {check.description}")
+
+    durations: dict[str, float] = {}
+    return_codes: dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(checks)))) as pool:
+        futures = {
+            check.check_id: pool.submit(
+                _run_check_timed, repo_root, check.command
+            )
+            for check in checks
+        }
+        for check in checks:
+            return_code, output, duration = futures[check.check_id].result()
+            return_codes[check.check_id] = return_code
+            outputs[check.check_id] = output
+            durations[check.check_id] = duration
 
     for check in checks:
-        print(f"[RUN ] {check.check_id}: {check.description}")
-        return_code = run_check_command(repo_root, check.command)
+        return_code = return_codes[check.check_id]
+        output = outputs[check.check_id]
+        auto_fixed = False
 
         if return_code == 0:
-            print(f"[PASS] {check.check_id}")
-            continue
+            if not quiet and output:
+                print(output, end="" if output.endswith("\n") else "\n")
+            if not quiet:
+                print(f"[PASS] {check.check_id}")
+        else:
+            if not quiet:
+                if output:
+                    print(output, end="" if output.endswith("\n") else "\n")
+                print(f"[FAIL] {check.check_id}", file=sys.stderr)
 
-        print(f"[FAIL] {check.check_id}", file=sys.stderr)
+            if auto_fix and check.fix_command is not None:
+                if not quiet:
+                    print(
+                        f"[FIX ] Attempting auto-fix for {check.check_id}...",
+                        file=sys.stderr,
+                    )
+                fix_code, fix_output = run_check_command_captured(
+                    repo_root, check.fix_command
+                )
+                if fix_output and not quiet:
+                    print(
+                        fix_output,
+                        end="" if fix_output.endswith("\n") else "\n",
+                    )
+                if fix_code == 0:
+                    retry_code, retry_output = run_check_command_captured(
+                        repo_root, check.command
+                    )
+                    if retry_output and not quiet:
+                        print(
+                            retry_output,
+                            end="" if retry_output.endswith("\n") else "\n",
+                        )
+                    if retry_code == 0:
+                        return_code = 0
+                        auto_fixed = True
+                        if not quiet:
+                            print(f"[PASS] {check.check_id} (auto-fixed)")
 
-        if auto_fix and check.fix_command is not None:
-            print(
-                f"[FIX ] Attempting auto-fix for {check.check_id}...",
-                file=sys.stderr,
+                if return_code != 0 and not quiet:
+                    print(
+                        f"[FAIL] {check.check_id} auto-fix did not resolve the issue.",
+                        file=sys.stderr,
+                    )
+
+            if return_code != 0:
+                failures.append(check)
+
+        if results is not None:
+            results.append(
+                CheckResult(
+                    check_id=check.check_id,
+                    description=check.description,
+                    return_code=return_code,
+                    duration_seconds=durations[check.check_id],
+                    auto_fixed=auto_fixed,
+                )
             )
-            fix_code = run_check_command(repo_root, check.fix_command)
-            if fix_code == 0:
-                retry_code = run_check_command(repo_root, check.command)
-                if retry_code == 0:
-                    print(f"[PASS] {check.check_id} (auto-fixed)")
-                    continue
-
-            print(
-                f"[FAIL] {check.check_id} auto-fix did not resolve the issue.",
-                file=sys.stderr,
-            )
-
-        failures.append(check)
 
     if not failures:
-        print("All agent preflight checks passed.")
+        if not quiet:
+            print("All agent preflight checks passed.")
         return 0
 
-    print("Agent preflight checks failed:", file=sys.stderr)
-    for check in failures:
-        print(f"- {check.check_id}: {check.description}", file=sys.stderr)
-        if check.fix_hint:
-            label = "auto-fix" if check.fix_command is not None else "manual-fix"
-            print(f"{label}: {check.fix_hint}", file=sys.stderr)
+    if not quiet:
+        print("Agent preflight checks failed:", file=sys.stderr)
+        for check in failures:
+            print(f"- {check.check_id}: {check.description}", file=sys.stderr)
+            if check.fix_hint:
+                label = "auto-fix" if check.fix_command is not None else "manual-fix"
+                print(f"{label}: {check.fix_hint}", file=sys.stderr)
     return 1
 
 
@@ -852,8 +952,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--all",
+        "--full",
+        dest="all",
         action="store_true",
-        help="Run all checks regardless of changed files.",
+        help="Run all checks regardless of changed files (full handoff tier).",
     )
     parser.add_argument(
         "--auto-fix",
@@ -869,6 +971,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="Print changed files and selected checks.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable JSON result with per-check timings.",
+    )
+    parser.add_argument(
+        "--timings",
+        action="store_true",
+        help="Print per-check wall-clock timings after the run.",
     )
     return parser
 
@@ -889,12 +1001,22 @@ def main(argv: list[str] | None = None) -> int:
             changed_files = collect_changed_files(repo_root)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
-            print("Falling back to --all checks.", file=sys.stderr)
-            changed_files = set()
-            args.all = True
+            print(
+                "Refusing to guess a check set. Resolve the Git state and rerun, "
+                "or pass --full explicitly.",
+                file=sys.stderr,
+            )
+            return 2
 
     if not args.all and not changed_files:
         print("No changed files detected; skipping preflight checks.")
+        if args.json:
+            print(
+                json.dumps(
+                    {"passed": True, "checks": [], "changed_files": []},
+                    sort_keys=True,
+                )
+            )
         return 0
 
     existing_files = {
@@ -919,9 +1041,51 @@ def main(argv: list[str] | None = None) -> int:
 
     if not planned_checks:
         print("No relevant preflight checks for the current file set.")
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "passed": True,
+                        "checks": [],
+                        "changed_files": sorted(changed_files),
+                    },
+                    sort_keys=True,
+                )
+            )
         return 0
 
-    return execute_checks(repo_root, planned_checks, auto_fix=args.auto_fix)
+    results: list[CheckResult] = []
+    exit_code = execute_checks(
+        repo_root,
+        planned_checks,
+        auto_fix=args.auto_fix,
+        quiet=args.json,
+        results=results,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "passed": exit_code == 0,
+                    "changed_files": sorted(changed_files),
+                    "checks": [asdict(result) for result in results],
+                },
+                sort_keys=True,
+            )
+        )
+    elif args.timings:
+        print("")
+        print("Preflight timings:")
+        for result in sorted(results, key=lambda item: -item.duration_seconds):
+            print(
+                f"  {result.duration_seconds:8.3f}s  {result.check_id} "
+                f"(rc={result.return_code})"
+            )
+        total = sum(result.duration_seconds for result in results)
+        print(f"  {total:8.3f}s  total")
+
+    return exit_code
 
 
 if __name__ == "__main__":

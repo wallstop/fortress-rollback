@@ -147,8 +147,8 @@ one-line record using the [design-decisions skill](../design-decisions/SKILL.md)
 cargo check
 cargo clippy --workspace --all-targets --features tokio,json
 
-# Run affected tests
-cargo nextest run module_name --no-capture
+# Run affected tests (fast tier; add --no-capture only to debug one test)
+cargo tf
 ```
 
 ### Commit Granularity
@@ -159,7 +159,7 @@ cargo nextest run module_name --no-capture
 | "Validate input delay in `SessionBuilder::with_input_delay`" | "Fix stuff"       |
 | "Add regression test for issue #42"                          | "WIP"             |
 
-Each commit should pass `cargo c && cargo t` independently.
+Each commit should pass `cargo c && cargo tf` independently.
 
 ---
 
@@ -182,7 +182,7 @@ rg 'HashMap|HashSet|Instant::now|thread_rng' --type rust src/
 python3 scripts/ci/agent-preflight.py --auto-fix
 
 # Full quality gate (see context.md "Mandatory Linting" for details)
-cargo c && cargo t
+cargo c && cargo tf
 cargo doc --no-deps
 typos
 ```
@@ -208,7 +208,7 @@ All readiness checks should pass before opening a PR.
 
 ```bash
 # Level 1: Format + lint + unit tests (always)
-cargo c && cargo t
+cargo c && cargo tf
 
 # Level 2: Doc tests (if docs changed)
 cargo test --doc -- --nocapture
@@ -265,7 +265,7 @@ For production-blocking bugs, compress the pipeline:
 1. **Scope:** One-line description in the PR title
 2. **Skip design phase** (but still read existing code)
 3. **Implement:** Fix + regression test in one commit
-4. **Self-review:** Run `cargo c && cargo t` only
+4. **Self-review:** Run `cargo c && cargo tf` only
 5. **Ship:** Get one reviewer, merge quickly
 6. **Follow up:** Add docs, additional tests, and related fixes as separate PRs
 

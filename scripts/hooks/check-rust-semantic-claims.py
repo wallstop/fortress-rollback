@@ -4,12 +4,26 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 SCAN_DIRS = ("src", "tests", "examples", "benches")
+GENERATED_DIR_NAMES = frozenset(
+    {
+        ".git",
+        ".tla-tools",
+        ".venv",
+        "__pycache__",
+        "mutants.out",
+        "node_modules",
+        "site",
+        "target",
+    }
+)
 
 FN_RE = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^({;]*>)?\s*\(")
 INCLUSIVE_RANGE_ASSERT_RE = re.compile(
@@ -493,8 +507,55 @@ def check_delegated_mesh_contracts(path: Path, function: RustFunction) -> list[F
     ]
 
 
+def _is_scan_path(relative_path: str) -> bool:
+    """Return true when a repo-relative path is under a scan root."""
+    first = Path(relative_path).parts[0]
+    return first in SCAN_DIRS
+
+
+def _tracked_rust_files(repo_root: Path) -> list[Path] | None:
+    """Return tracked Rust files under the scan roots, or None outside Git."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "-z", "--", "*.rs"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+
+    tracked: list[Path] = []
+    for raw_path in result.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        relative_path = raw_path.decode("utf-8", errors="surrogateescape")
+        if _is_scan_path(relative_path):
+            tracked.append(repo_root / relative_path)
+    return tracked
+
+
+def _walk_rust_files(repo_root: Path) -> list[Path]:
+    """Walk scan roots while pruning generated trees (non-Git fallback)."""
+    files: list[Path] = []
+    for dirname in SCAN_DIRS:
+        root = repo_root / dirname
+        if not root.exists():
+            continue
+        for current_root, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(
+                name for name in dirnames if name not in GENERATED_DIR_NAMES
+            )
+            for filename in sorted(filenames):
+                if filename.endswith(".rs"):
+                    files.append(Path(current_root) / filename)
+    return files
+
+
 def collect_rust_files(repo_root: Path, explicit_files: list[str]) -> list[Path]:
-    """Collect Rust files to scan."""
+    """Collect Rust files to scan.
+
+    Repository scans use tracked files so local generated/build trees cannot
+    change the result. The non-Git fallback prunes generated directories.
+    """
     if explicit_files:
         selected_files: list[Path] = []
         for raw_path in explicit_files:
@@ -505,12 +566,10 @@ def collect_rust_files(repo_root: Path, explicit_files: list[str]) -> list[Path]
                 selected_files.append(path)
         return sorted(set(selected_files))
 
-    files: list[Path] = []
-    for dirname in SCAN_DIRS:
-        root = repo_root / dirname
-        if root.exists():
-            files.extend(root.rglob("*.rs"))
-    return sorted(files)
+    tracked = _tracked_rust_files(repo_root)
+    if tracked is not None:
+        return sorted(tracked)
+    return sorted(_walk_rust_files(repo_root))
 
 
 def check_file(path: Path) -> list[Finding]:
@@ -544,6 +603,11 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         help="Optional Rust files to scan; defaults to src/, tests/, examples/, benches/.",
     )
+    parser.add_argument(
+        "--list-files",
+        action="store_true",
+        help="Print the Rust files that would be scanned and exit.",
+    )
     return parser
 
 
@@ -552,6 +616,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     repo_root = repo_root_from_script()
     rust_files = collect_rust_files(repo_root, args.files)
+
+    if args.list_files:
+        for path in rust_files:
+            print(path)
+        return 0
 
     findings: list[Finding] = []
     for path in rust_files:

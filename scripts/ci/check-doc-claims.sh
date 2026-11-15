@@ -144,6 +144,7 @@ main() {
     echo "=========================================="
     echo ""
 
+    local semantic_claim_checker="$PROJECT_ROOT/scripts/hooks/check-rust-semantic-claims.py"
     local codec_file="$PROJECT_ROOT/src/network/codec.rs"
     local codec_decode_helpers=""
     if [[ -f "$codec_file" ]]; then
@@ -165,6 +166,7 @@ main() {
     # Find all Rust source files (excluding target directories)
     while IFS= read -r file; do
         [[ -z "$file" ]] && continue
+        [[ -f "$file" ]] || continue
 
         local rel_path="${file#"$PROJECT_ROOT/"}"
 
@@ -298,9 +300,7 @@ main() {
             echo -e "  ${GREEN}OK${NC}: $rel_path (no codec::decode_* doc/comment refs)"
         fi
 
-    done < <(find "$PROJECT_ROOT/src" "$PROJECT_ROOT/tests" "$PROJECT_ROOT/examples" "$PROJECT_ROOT/benches" \
-        -name '*.rs' -print 2>/dev/null \
-        | sort)
+    done < <(python3 "$semantic_claim_checker" --list-files)
 
     echo ""
 
@@ -310,7 +310,6 @@ main() {
 
     echo ""
 
-    local semantic_claim_checker="$PROJECT_ROOT/scripts/hooks/check-rust-semantic-claims.py"
     if [[ -f "$semantic_claim_checker" ]]; then
         if ! python3 "$semantic_claim_checker"; then
             issues=$((issues + 1))

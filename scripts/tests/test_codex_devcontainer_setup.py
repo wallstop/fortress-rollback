@@ -168,6 +168,15 @@ class TestCodexDevcontainerConfiguration:
         assert '"CARGO_PROFILE_DEV_DEBUG": "1"' in text
         assert '"CARGO_PROFILE_TEST_DEBUG": "1"' in text
 
+    def test_devcontainer_keeps_incremental_builds_for_the_edit_loop(self) -> None:
+        """CI sets CARGO_INCREMENTAL=0; the interactive container must not."""
+        text = DEVCONTAINER_JSON.read_text(encoding="utf-8")
+        assert '"CARGO_INCREMENTAL": "1"' in text
+        dockerfile = (REPO_ROOT / ".devcontainer" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        assert "ENV CARGO_INCREMENTAL=1" in dockerfile
+
     def test_devcontainer_puts_user_npm_binaries_first_on_path(self) -> None:
         """Terminals should resolve refreshed user-owned CLIs before image copies."""
         text = DEVCONTAINER_JSON.read_text(encoding="utf-8")

@@ -12,6 +12,7 @@ on:
       - '**/*.sh'
       - '**/Dockerfile*'
       - '.devcontainer/devcontainer.json'
+  merge_group:
   pull_request:
     branches: [main]
     paths:

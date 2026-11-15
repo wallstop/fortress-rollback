@@ -170,11 +170,14 @@ def test_workflow_uses_read_only_merge_gate_and_separate_write_history() -> None
     history = jobs["benchmark-history"]
 
     assert gate["permissions"] == {"contents": "read"}
-    assert gate["if"] == "github.event_name == 'pull_request'"
+    assert gate["if"] == (
+        "github.event_name == 'merge_group' || "
+        "github.event_name == 'pull_request'"
+    )
     checkout = gate["steps"][0]
     assert checkout["with"]["persist-credentials"] is False
     assert history["permissions"] == {"contents": "write", "deployments": "write"}
-    assert history["if"] == "github.event_name != 'pull_request'"
+    assert history["if"] == "github.event_name == 'push'"
     for name in ("Track stable benchmark history", "Track informational benchmark results"):
         assert _step(history, name)["with"]["fail-on-alert"] is False
 
@@ -184,7 +187,10 @@ def test_workflow_has_no_dependabot_benchmark_bypass() -> None:
     jobs = _workflow_jobs()
 
     assert "dependabot[bot]" not in text
-    assert jobs["benchmark-quick"]["if"] == "github.event_name == 'pull_request'"
+    assert jobs["benchmark-quick"]["if"] == (
+        "github.event_name == 'merge_group' || "
+        "github.event_name == 'pull_request'"
+    )
     assert jobs["benchmark-quick"]["steps"][0]["with"]["persist-credentials"] is False
 
 
@@ -206,7 +212,10 @@ def test_workflow_compares_base_with_tested_merge_and_guards_harnesses() -> None
     paired = _step(gate, "Run paired Criterion regression gate")
     run = paired["run"]
 
-    assert paired["env"]["RAW_HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+    assert paired["env"]["RAW_HEAD_SHA"] == (
+        "${{ github.event.merge_group.head_sha || "
+        "github.event.pull_request.head.sha }}"
+    )
     assert paired["env"]["TESTED_MERGE_SHA"] == "${{ github.sha }}"
     assert 'original_sha="$(git rev-parse HEAD)"' in run
     assert 'echo "RAW_HEAD_SHA=$RAW_HEAD_SHA"' in run

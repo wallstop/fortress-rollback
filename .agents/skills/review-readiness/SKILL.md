@@ -11,7 +11,7 @@ Concrete gate between implementation and external review. Use this after `dev-pi
 
 ## Quick Gate (Must Pass)
 
-- [ ] `cargo c && cargo t` passes
+- [ ] `cargo c && cargo tf` passes for the edit loop, and `cargo tfull` passes before handoff
 - [ ] Zero-panic scan has no new production hits
 - [ ] Determinism scan has no risky additions in simulation paths
 - [ ] Error handling is explicit (`Result`, no silent discard)
@@ -27,8 +27,9 @@ If two or more checks fail, return to design and reduce scope before requesting 
 ## Commands
 
 ```bash
-# Build + tests
-cargo c && cargo t
+# Build + fast tests during edits; full suite before handoff
+cargo c && cargo tf
+cargo tfull
 
 # Zero-panic scan (production code)
 rg '\.unwrap\(\)|\.expect\(|panic!\(|todo!\(|unimplemented!\(' --type rust src/
@@ -38,6 +39,8 @@ rg 'HashMap|HashSet|Instant::now|SystemTime|thread_rng|random\(\)' --type rust s
 
 # Changed-file-aware preflight checks (version sync, Agent Skills, workflows)
 python3 scripts/ci/agent-preflight.py --auto-fix
+# Full handoff tier
+python3 scripts/ci/agent-preflight.py --full --auto-fix
 ```
 
 ---

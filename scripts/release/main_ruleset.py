@@ -83,14 +83,18 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
             {
                 "context": "Verify prepared release state",
                 "integration_id": 15368,
-            }
+            },
+            {
+                "context": "CI Gate",
+                "integration_id": 15368,
+            },
         ],
         "strict_required_status_checks_policy": True,
         "do_not_enforce_on_create": False,
     }
     if status_rule.get("parameters") != required_parameters:
         raise RulesetError(
-            "release-state status check must be exact, required, and strict"
+            "release-state and CI Gate status checks must be exact, required, and strict"
         )
     return _managed(document)
 

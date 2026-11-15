@@ -513,34 +513,26 @@ def test_collect_changed_files_merges_all_git_sources(monkeypatch) -> None:
     assert changed == {"unstaged.md", "staged.md", "untracked.md"}
 
 
-def test_main_falls_back_to_all_checks_when_git_detection_fails(
+def test_main_refuses_to_guess_check_set_when_git_detection_fails(
     monkeypatch,
     capsys,
 ) -> None:
     def raise_detection_error(_repo_root: Path) -> set[str]:
         raise RuntimeError("git detection failed")
 
-    observed: dict[str, bool] = {}
-
-    def fake_plan(
-        _changed_files: set[str],
-        run_all: bool = False,
-        existing_files: set[str] | None = None,
-    ) -> list[PlannedCheck]:
-        observed["run_all"] = run_all
-        assert existing_files == set()
-        return []
+    def fail_plan(*_args, **_kwargs) -> list[PlannedCheck]:
+        raise AssertionError("plan_checks must not run after git detection failure")
 
     monkeypatch.setattr(agent_preflight, "collect_changed_files", raise_detection_error)
-    monkeypatch.setattr(agent_preflight, "plan_checks", fake_plan)
+    monkeypatch.setattr(agent_preflight, "plan_checks", fail_plan)
 
     code = agent_preflight.main([])
 
-    assert code == 0
-    assert observed == {"run_all": True}
+    assert code == 2
     captured = capsys.readouterr()
     assert "git detection failed" in captured.err
-    assert "Falling back to --all checks." in captured.err
+    assert "Refusing to guess a check set" in captured.err
+    assert "Falling back" not in captured.err
 
 
 def test_execute_checks_auto_fix_retries_and_passes(monkeypatch) -> None:
@@ -558,13 +550,13 @@ def test_execute_checks_auto_fix_retries_and_passes(monkeypatch) -> None:
         tuple(check.fix_command): [0],
     }
 
-    def fake_run(_repo_root: Path, command: list[str]) -> int:
+    def fake_run(_repo_root: Path, command: list[str]) -> tuple[int, str]:
         key = tuple(command)
         calls.append(key)
         values = outcomes[key]
-        return values.pop(0)
+        return values.pop(0), ""
 
-    monkeypatch.setattr(agent_preflight, "run_check_command", fake_run)
+    monkeypatch.setattr(agent_preflight, "run_check_command_captured", fake_run)
 
     code = execute_checks(Path("/repo"), [check], auto_fix=True)
 
@@ -590,12 +582,12 @@ def test_execute_checks_auto_fix_retry_failure_returns_error(monkeypatch) -> Non
         tuple(check.fix_command): [0],
     }
 
-    def fake_run(_repo_root: Path, command: list[str]) -> int:
+    def fake_run(_repo_root: Path, command: list[str]) -> tuple[int, str]:
         key = tuple(command)
         values = outcomes[key]
-        return values.pop(0)
+        return values.pop(0), ""
 
-    monkeypatch.setattr(agent_preflight, "run_check_command", fake_run)
+    monkeypatch.setattr(agent_preflight, "run_check_command_captured", fake_run)
 
     code = execute_checks(Path("/repo"), [check], auto_fix=True)
 
@@ -614,10 +606,10 @@ def test_execute_checks_manual_fix_label_for_non_autofixable_checks(
         fix_command=None,
     )
 
-    def fake_run(_repo_root: Path, _command: list[str]) -> int:
-        return 1
+    def fake_run(_repo_root: Path, _command: list[str]) -> tuple[int, str]:
+        return 1, ""
 
-    monkeypatch.setattr(agent_preflight, "run_check_command", fake_run)
+    monkeypatch.setattr(agent_preflight, "run_check_command_captured", fake_run)
 
     code = execute_checks(Path("/repo"), [check], auto_fix=True)
 
@@ -634,10 +626,10 @@ def test_execute_checks_without_auto_fix_fails(monkeypatch) -> None:
         fix_hint="run sync",
     )
 
-    def fake_run(_repo_root: Path, _command: list[str]) -> int:
-        return 1
+    def fake_run(_repo_root: Path, _command: list[str]) -> tuple[int, str]:
+        return 1, ""
 
-    monkeypatch.setattr(agent_preflight, "run_check_command", fake_run)
+    monkeypatch.setattr(agent_preflight, "run_check_command_captured", fake_run)
 
     code = execute_checks(Path("/repo"), [check], auto_fix=False)
 

@@ -1,0 +1,34 @@
+name: CI - Metrics
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  collect:
+    name: Collect CI Timing Metrics
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Collect recent workflow and job timings
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/ci_metrics.py --limit 100 --json \
+            > ci-metrics.json
+
+      - name: Upload metrics artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-metrics
+          path: ci-metrics.json
+          retention-days: 90

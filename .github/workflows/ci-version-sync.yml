@@ -17,6 +17,7 @@ on:
       - "scripts/sync-version.sh"
       - "scripts/hooks/check-wire-golden-immutable.py"
       - ".github/workflows/ci-version-sync.yml"
+  merge_group:
   pull_request:
     branches: [main]
     paths:

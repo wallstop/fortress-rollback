@@ -8,10 +8,13 @@ description: "Rust Testing Guide guidance for Fortress Rollback. Use when Writin
 ## Quick Reference
 
 ```bash
-# Run tests with nextest (ALWAYS use --no-capture)
-cargo nextest run --no-capture
+# Fast tier: everything except heavy simulation and serialized real-UDP tests.
+cargo tf
 
-# Run specific test / pattern
+# Full tier: all 3,000+ tests, executed in parallel.
+cargo tfull
+
+# Reproduce one failing test with visible output.
 cargo nextest run test_name --no-capture
 cargo nextest run -E 'test(parse_) | test(validate_)' --no-capture
 
@@ -21,11 +24,12 @@ cargo test --doc -- --nocapture
 # Run ignored/slow tests
 cargo test -- --ignored --nocapture
 
-# IMPORTANT: Never pipe test output through tail/head.
-# Redirect to temp file and read it instead:
-cargo nextest run --no-capture > /tmp/test-results.txt 2>&1
+# IMPORTANT: nextest prints failure output automatically. Do not pass
+# --no-capture for full runs; it serializes the suite. Never pipe test output
+# through tail/head. Redirect to a temp file and read it instead:
+cargo nextest run test_name --no-capture > /tmp/test-results.txt 2>&1
 # For repeated runs (flakiness check), use a for loop:
-for i in $(seq 1 10); do cargo nextest run --no-capture >> /tmp/flaky-check.txt 2>&1; done
+for i in $(seq 1 10); do cargo nextest run test_name --no-capture >> /tmp/flaky-check.txt 2>&1; done
 ```
 
 ## Test Organization

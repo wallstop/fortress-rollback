@@ -53,6 +53,7 @@ on:
       - ".github/workflows/publish.yml"
       - ".github/workflows/ci-version-sync.yml"
       - ".github/workflows/ci-verification.yml"
+  merge_group:
   pull_request:
     branches: [main]
     paths:

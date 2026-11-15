@@ -394,7 +394,7 @@ cargo llvm-cov --html
 | ------------------- | ------------------------------------ | ----------------------------------------- |
 | `TLA_TOOLS_JAR`     | `.tla-tools/tla2tools.jar`           | Path to TLA+ tools                        |
 | `RUST_BACKTRACE`    | `1`                                  | Enable backtraces                         |
-| `CARGO_INCREMENTAL` | `0`                                  | Disable incremental (for reproducibility) |
+| `CARGO_INCREMENTAL` | `1`                                  | Enable incremental builds for the fast edit loop |
 | `MIRIFLAGS`         | `-Zmiri-symbolic-alignment-check...` | Miri configuration                        |
 | `TLA_WORKERS`       | `auto`                               | TLC worker threads                        |
 | `TLA_MEMORY`        | `4g`                                 | TLC JVM heap size                         |
