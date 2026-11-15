@@ -4,10 +4,12 @@
 the `Verify prepared release state` and `CI Gate` checks and is synchronized by
 `scripts/release/main_ruleset.py`.
 
-`merge-queue.json` is the prepared merge-queue policy. GitHub only accepts the
-`merge_queue` rule for repositories owned by an organization, so it cannot be
-applied to the current personal-account repository. Apply it after transferring
-the repository to an organization:
+`merge-queue.json` is the live merge-queue policy, applied to
+`Ambiguous-Interactive/fortress-rollback` as ruleset `27289856`. It uses squash
+merges, `ALLGREEN` grouping, five concurrent builds, and a 60-minute required
+check timeout.
+
+To recreate it on another organization-owned repository:
 
 ```bash
 gh api -X POST repos/OWNER/fortress-rollback/rulesets \
