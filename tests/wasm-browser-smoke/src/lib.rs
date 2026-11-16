@@ -62,6 +62,13 @@ mod tests {
         );
     }
 
+    #[wasm_bindgen_test]
+    fn input_compression_matches_native_reference() {
+        fortress_replay_fixture::check_compression_parity().expect(
+            "browser input-compression and RLE bytes must match the native reference digest",
+        );
+    }
+
     fn virtual_clock() -> (fortress_rollback::ClockFn, Arc<AtomicU64>) {
         let base = Instant::now();
         let offset_ms = Arc::new(AtomicU64::new(0));

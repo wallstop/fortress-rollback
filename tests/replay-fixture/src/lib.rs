@@ -237,6 +237,91 @@ pub fn check_machine_width_parity() -> Result<(), String> {
     Ok(())
 }
 
+/// Digest of the input-compression and RLE codec cases checked by
+/// [`check_compression_parity`]. Captured natively; browser and Emscripten lanes
+/// assert the same value.
+pub const EXPECTED_COMPRESSION_DIGEST: u128 = 0x6a92_a341_7a08_6527_46a0_8659_dd6c_6182;
+
+/// Checks the XOR-delta plus RLE input-compression pipeline and the raw RLE
+/// codec against checked-in native bytes on this target.
+///
+/// Session input packets always run this pipeline, so a target-specific
+/// encoding difference would desync mixed native/browser peers even though
+/// application checksums and replay playback agree. The cases cover zero and
+/// `0xFF` runs, mixed uncompressed bytes, the empty input, and run lengths on
+/// both sides of the one- and two-byte varint boundaries.
+///
+/// # Errors
+///
+/// Returns a descriptive diagnostic when the folded digest differs from the
+/// captured native reference.
+pub fn check_compression_parity() -> Result<(), String> {
+    let mut digest = digest_bytes(0, b"fortress-portable-compression");
+    for (label, reference, batch) in compression_cases() {
+        let encoded = fortress_rollback::__internal::encode(&reference, batch.iter());
+        digest = digest_bytes(digest, label.as_bytes());
+        digest = digest_bytes(digest, &encoded);
+        let decoded = fortress_rollback::__internal::decode(&reference, &encoded)
+            .map_err(|error| format!("{label} compression failed to decode: {error}"))?;
+        for frame in decoded {
+            digest = digest_bytes(digest, &frame);
+        }
+    }
+    for (label, bytes) in rle_cases() {
+        let encoded = fortress_rollback::rle::encode(&bytes);
+        digest = digest_bytes(digest, label.as_bytes());
+        digest = digest_bytes(digest, &encoded);
+        let decoded = fortress_rollback::rle::decode(&encoded)
+            .map_err(|error| format!("{label} RLE failed to decode: {error}"))?;
+        digest = digest_bytes(digest, &decoded);
+    }
+    if digest != EXPECTED_COMPRESSION_DIGEST {
+        return Err(format!(
+            "compression digest {digest:#034x} differs from native \
+             {EXPECTED_COMPRESSION_DIGEST:#034x}"
+        ));
+    }
+    Ok(())
+}
+
+/// Reference/batch pairs covering the input-compression shapes a session emits.
+fn compression_cases() -> Vec<(&'static str, Vec<u8>, Vec<Vec<u8>>)> {
+    let pattern: Vec<u8> = (0..32u8).map(|index| index.wrapping_mul(7)).collect();
+    vec![
+        ("zero-reference", vec![0u8; 32], vec![vec![0u8; 32]; 8]),
+        ("ff-reference", vec![0xFFu8; 32], vec![vec![0u8; 32]; 3]),
+        ("stable-pattern", pattern.clone(), vec![pattern.clone(); 4]),
+        (
+            "mixed-batch",
+            pattern,
+            (0..5u8)
+                .map(|frame| {
+                    (0..32u8)
+                        .map(|index| index.wrapping_mul(3).wrapping_add(frame.wrapping_mul(11)))
+                        .collect()
+                })
+                .collect(),
+        ),
+    ]
+}
+
+/// Raw RLE inputs covering contiguous-run and uncompressed encodings.
+fn rle_cases() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("empty", Vec::new()),
+        ("zero-run-5", vec![0u8; 5]),
+        ("ff-run-5", vec![0xFFu8; 5]),
+        ("zero-run-31", vec![0u8; 31]),
+        ("zero-run-32", vec![0u8; 32]),
+        ("zero-run-300", vec![0u8; 300]),
+        ("ff-run-300", vec![0xFFu8; 300]),
+        ("zero-run-16384", vec![0u8; 16_384]),
+        ("ff-run-16384", vec![0xFFu8; 16_384]),
+        ("mixed", vec![0, 0, 1, 2, 3, 0xFF, 0xFF, 0, 7]),
+        ("ramp", (0..=255u8).collect()),
+    ]
+}
+
 /// Observable result of replaying the captured schedule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReplayEvidence {
@@ -681,6 +766,11 @@ mod tests {
     #[test]
     fn machine_width_hashing_matches_checked_in_native_constants() {
         check_machine_width_parity().expect("native hashing must match the captured constants");
+    }
+
+    #[test]
+    fn compression_matches_checked_in_native_digest() {
+        check_compression_parity().expect("native compression must match the captured digest");
     }
 
     #[test]
