@@ -1963,6 +1963,13 @@ impl<T: Config> UdpProtocol<T> {
             .saturating_sub(self.pending_output.len())
     }
 
+    /// Direct pending-output length for unit tests that must observe queue
+    /// growth without waiting for the public metrics sampling window.
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn pending_output_len_for_tests(&self) -> usize {
+        self.pending_output.len()
+    }
+
     fn pending_input_matches_reference_len(&self, input: &InputBytes, context: &str) -> bool {
         let reference_len = self.last_acked_input.bytes.len();
         if reference_len == 0 || input.bytes.len() != reference_len {
@@ -10055,6 +10062,38 @@ mod tests {
             header: MessageHeader::new(HOT_JOIN_REMOTE_CONN_ID),
             body,
         });
+    }
+
+    #[test]
+    fn packet_connect_status_snapshot_is_reused_only_while_unchanged() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let statuses = vec![ConnectionStatus::default(); 2];
+
+        let first = protocol.packet_connect_status_snapshot(&statuses);
+        let second = protocol.packet_connect_status_snapshot(&statuses);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "an unchanged status array must reuse the cached snapshot"
+        );
+
+        let mut changed = statuses.clone();
+        changed[1].last_frame = Frame::new(3);
+        let third = protocol.packet_connect_status_snapshot(&changed);
+        assert!(
+            !Arc::ptr_eq(&first, &third),
+            "a changed status array must allocate a new snapshot"
+        );
+        assert_eq!(
+            first[1].last_frame,
+            Frame::NULL,
+            "previously emitted events must retain their original snapshot"
+        );
+
+        let fourth = protocol.packet_connect_status_snapshot(&changed);
+        assert!(
+            Arc::ptr_eq(&third, &fourth),
+            "the replacement snapshot is reused while it stays current"
+        );
     }
 
     #[test]

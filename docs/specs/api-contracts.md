@@ -829,8 +829,9 @@ remote-frame aging assumes symmetric one-way delay (`RTT/2`), so asymmetric path
 - `NotSynchronized` - not yet synchronized with host
 - `PredictionThreshold` - no viewable frame is available yet while at least one
   host remains connected
-- `SpectatorStreamEnded { frame }` - every host disconnected and the buffered
-  stream is exhausted before `frame` could be completed
+- `SpectatorStreamEnded { frame }` - every host disconnected; the buffered
+  stream is exhausted before `frame` could be completed, or the last host
+  left before synchronization completed
 - `SpectatorDivergence { frame, player }` - connected redundant hosts disagreed
   on the same player/frame and the spectator has failed closed
 

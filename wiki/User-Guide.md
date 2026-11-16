@@ -3719,7 +3719,7 @@ Fortress Rollback uses `FortressError` for all error conditions. The enum is exh
 | `MismatchedChecksum { current_frame, mismatched_frames }` | Desync in SyncTestSession              | Debug non-determinism                                         |
 | `SpectatorTooFarBehind`                                   | Spectator can't catch up               | Reconnect spectator                                           |
 | `SpectatorDivergence { frame, player }`                   | Redundant spectator hosts disagreed    | Stop this spectator session; reconnect or inspect hosts       |
-| `SpectatorStreamEnded { frame }`                          | All hosts left; next input never arrived | Terminal truncation: stop and restart the spectator session |
+| `SpectatorStreamEnded { frame }`                          | All hosts left; stream ended or never synced | Terminal truncation: stop and restart the spectator session |
 | `SerializationError { context }`                          | Serialization failed                   | Check input/state serialization                               |
 | `SocketError { context }`                                 | Network socket error                   | Check network, retry connection                               |
 | `InternalError { context }`                               | Library bug                            | Please report!                                                |

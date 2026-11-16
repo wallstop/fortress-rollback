@@ -59,11 +59,12 @@ matches. Remove repeated addresses instead of relying on the former first-match
 routing behavior.
 
 Spectators now report the end of a host stream explicitly. Once every host has
-disconnected and the frames buffered before the final host's `Goodbye` have been
-drained, `advance_frame` returns the new terminal
-`FortressError::SpectatorStreamEnded { frame }` instead of `PredictionThreshold`.
-A final input arriving in a later poll from an already-removed host is rejected
-as an unknown source. Add the new arm to exhaustive `FortressError` matches and
+disconnected, `advance_frame` returns the new terminal
+`FortressError::SpectatorStreamEnded { frame }` instead of retrying
+`PredictionThreshold` or `NotSynchronized`. A running spectator first drains the
+frames buffered before the final host's `Goodbye`; a host that leaves before the
+session ever synchronized produces the error immediately. A final input arriving
+in a later poll from an already-removed host is rejected as an unknown source. Add the new arm to exhaustive `FortressError` matches and
 stop or reconnect the spectator rather than retrying:
 
 ```rust

@@ -1255,14 +1255,16 @@ pub enum FortressError {
         /// The player whose input differed between hosts.
         player: PlayerHandle,
     },
-    /// Every host feeding a spectator has disconnected, and the next frame's
-    /// inputs never arrived before the final host was removed.
+    /// Every host feeding a spectator has disconnected, and no host remains to
+    /// complete synchronization or supply the next frame.
     ///
-    /// A spectator keeps advancing through frames whose inputs were received
-    /// before the last host's `Goodbye`/disconnect. Once those are exhausted,
-    /// playback reaches a terminal truncation point: no host remains to supply
-    /// the missing frame, and inputs arriving from an already-removed host are
-    /// rejected as unknown sources. This is not a transient wait — unlike
+    /// A running spectator keeps advancing through frames whose inputs were
+    /// received before the last host's `Goodbye`/disconnect. Once those are
+    /// exhausted, playback reaches a terminal truncation point: no host remains
+    /// to supply the missing frame, and inputs arriving from an already-removed
+    /// host are rejected as unknown sources. A host that leaves before the
+    /// spectator ever synchronized produces this error immediately, because no
+    /// surviving host can deliver `Synchronized`. This is not a transient wait — unlike
     /// [`PredictionThreshold`](Self::PredictionThreshold), retrying cannot make
     /// progress. Stop the spectator and start a fresh session to resume
     /// spectating.

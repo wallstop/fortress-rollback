@@ -3540,7 +3540,8 @@ impl<T: Config> P2PSession<T> {
         // run endpoint poll and get events from players and spectators. This will trigger additional packets to be sent.
         self.pending_events.clear();
         let mut connect_status_nudge_sent = false;
-        for endpoint in self.player_reg.remotes.values_mut() {
+        let mut staging_failed = false;
+        'remotes: for endpoint in self.player_reg.remotes.values_mut() {
             let handles = endpoint.handles(); // Returns Arc<[PlayerHandle]>, cheap to clone
             let addr = endpoint.peer_addr();
             for event in endpoint.poll(&self.local_connect_status) {
@@ -3551,37 +3552,47 @@ impl<T: Config> P2PSession<T> {
                         ViolationKind::InternalError,
                         "failed to reserve endpoint event staging"
                     );
-                    return;
+                    staging_failed = true;
+                    break 'remotes;
                 }
                 self.pending_events
                     .push_back((event, handles.clone(), addr.clone()));
             }
             connect_status_nudge_sent |= endpoint.connect_status_nudge_sent_seen();
         }
+        if !staging_failed {
+            'spectators: for endpoint in self.player_reg.spectators.values_mut() {
+                let handles = endpoint.handles(); // Returns Arc<[PlayerHandle]>, cheap to clone
+                let addr = endpoint.peer_addr();
+                for event in endpoint.poll(&self.local_connect_status) {
+                    // reserve-in-loop: see the remote-endpoint staging guard above.
+                    if self.pending_events.try_reserve(1).is_err() {
+                        report_violation!(
+                            ViolationSeverity::Error,
+                            ViolationKind::InternalError,
+                            "failed to reserve spectator event staging"
+                        );
+                        staging_failed = true;
+                        break 'spectators;
+                    }
+                    self.pending_events
+                        .push_back((event, handles.clone(), addr.clone()));
+                }
+            }
+        }
         if connect_status_nudge_sent {
             self.record_sometimes_state(SOMETIMES_CONNECT_STATUS_NUDGE_SENT);
         }
-        for endpoint in self.player_reg.spectators.values_mut() {
-            let handles = endpoint.handles(); // Returns Arc<[PlayerHandle]>, cheap to clone
-            let addr = endpoint.peer_addr();
-            for event in endpoint.poll(&self.local_connect_status) {
-                // reserve-in-loop: see the remote-endpoint staging guard above.
-                if self.pending_events.try_reserve(1).is_err() {
-                    report_violation!(
-                        ViolationSeverity::Error,
-                        ViolationKind::InternalError,
-                        "failed to reserve spectator event staging"
-                    );
-                    return;
-                }
-                self.pending_events
-                    .push_back((event, handles.clone(), addr.clone()));
-            }
-        }
 
-        // handle all events locally
+        // handle all events locally. Events already staged before an allocation
+        // failure must still reach `handle_event`; the unstaged event cannot be
+        // preserved, so halt the session instead of continuing with a gap.
         while let Some((event, handles, addr)) = self.pending_events.pop_front() {
             self.handle_event(event, handles, addr);
+        }
+        if staging_failed {
+            self.enter_fail_closed_disconnect_state_at(self.confirmed_frame());
+            return;
         }
 
         // D14 graceful-drop orchestration runs after endpoint messages/events
@@ -14038,6 +14049,7 @@ mod tests {
 
         let mut previous_serve_frame: Option<Frame> = None;
         let mut max_send_queue = 0_usize;
+        let mut sampled_queue = 0_usize;
         for cycle in 0_u32..12 {
             // Open the next serve after the previous cycle's backoff.
             host.player_reg
@@ -14094,16 +14106,26 @@ mod tests {
             for _ in 0..backoff {
                 advance_host_and_save(&mut host);
             }
-            if let Ok(stats) = host.network_stats(handle) {
-                max_send_queue = max_send_queue.max(stats.send_queue_len);
-            }
+            let pending = host
+                .player_reg
+                .remotes
+                .get(&addr)
+                .expect("reserved endpoint")
+                .pending_output_len_for_tests();
+            max_send_queue = max_send_queue.max(pending);
+            sampled_queue = sampled_queue.saturating_add(1);
         }
 
         // The abandoned joiner's send queue never accumulates across retry
-        // windows: each abort clears it, so its high-water mark is bounded by
-        // the largest single backoff window, not by the number of cycles.
+        // windows: each abort clears it and the backoff window withholds new
+        // simulation inputs, so the high-water mark stays far below the default
+        // 128-entry limit instead of growing with the number of cycles.
+        assert_eq!(
+            sampled_queue, 12,
+            "every retry window must be sampled (non-vacuous queue bound)"
+        );
         assert!(
-            max_send_queue <= 257,
+            max_send_queue <= 32,
             "timed-out serves must not accumulate pending output across cycles; got {max_send_queue}"
         );
     }

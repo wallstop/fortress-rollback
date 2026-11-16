@@ -750,10 +750,11 @@ impl<T: Config> SpectatorSession<T> {
     ///   In this case, you either need to start the session or wait for synchronization between clients.
     /// - Returns [`PredictionThreshold`] while waiting for host inputs, as long as at
     ///   least one host is still connected.
-    /// - Returns [`SpectatorStreamEnded`] once every host has disconnected and the
-    ///   next frame's inputs were not received before the final host left. The
-    ///   buffered prefix has been fully drained; later packets from a removed
-    ///   host are treated as unknown sources and cannot resume playback.
+    /// - Returns [`SpectatorStreamEnded`] once every host has disconnected and no
+    ///   host remains to complete synchronization or supply the next frame. The
+    ///   buffered prefix is drained first when the session was already running;
+    ///   later packets from a removed host are treated as unknown sources and
+    ///   cannot resume playback.
     ///
     /// [`RequestVec`]: crate::RequestVec
     /// [`NotSynchronized`]: FortressError::NotSynchronized
@@ -771,6 +772,17 @@ impl<T: Config> SpectatorSession<T> {
 
         if let Some(err) = self.spectator_divergence_error() {
             return Err(err);
+        }
+
+        // A host can send `Goodbye` after its sync binding but before the
+        // session ever sees `Synchronized`. Once that last host is removed no
+        // future host can complete synchronization, so report the terminal
+        // truncation here rather than returning `NotSynchronized` forever. A
+        // running spectator still falls through to drain any buffered frames.
+        if self.hosts.is_empty() && self.state != SessionState::Running {
+            return Err(FortressError::SpectatorStreamEnded {
+                frame: self.current_frame.try_add(1)?,
+            });
         }
 
         if self.state != SessionState::Running {
@@ -4741,10 +4753,14 @@ mod tests {
             .start_spectator_session(host, socket)
             .expect("spectator session");
         session.hosts[0].force_running_for_tests();
-        session.state = SessionState::Running;
 
         session.poll_remote_clients();
         assert_eq!(session.num_hosts(), 0);
+        assert_eq!(
+            session.current_state(),
+            SessionState::Synchronizing,
+            "the host left before this spectator ever synchronized"
+        );
 
         // The host's final input arrives in a later poll, after its slot was
         // removed. It cannot be attributed to a host anymore.
