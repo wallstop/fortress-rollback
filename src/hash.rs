@@ -39,6 +39,28 @@
 //!
 //! Note: FNV-1a is NOT cryptographically secure and should not be used for
 //! security-sensitive applications. For game state checksums, this is fine.
+//!
+//! # Cross-Platform Integers
+//!
+//! `std::hash::Hasher`'s default integer writers encode with `to_ne_bytes`, so
+//! a scalar `usize` field is four bytes on 32-bit targets (such as browser
+//! `wasm32-unknown-unknown`) and eight bytes on 64-bit targets. Slice and
+//! collection length prefixes have the same problem, because `Hash for [T]`
+//! calls `write_length_prefix`, which routes through `write_usize`.
+//! [`DeterministicHasher`] overrides every multi-byte integer writer with a
+//! fixed-width little-endian encoding (`usize`/`isize` canonicalize to 64 bits),
+//! matching the codec's `with_little_endian().with_fixed_int_encoding()` wire
+//! policy.
+//!
+//! The overrides do not cover primitive slice *elements*. Std's
+//! `Hash::hash_slice` specialization for primitive integers writes the
+//! elements' native memory bytes straight through [`Hasher::write`],
+//! bypassing the integer writers. A `[usize]`/`[isize]` element is therefore
+//! still four bytes on `wasm32` and eight natively, and multi-byte elements use
+//! native byte order. For a state checksum that must match across targets, hash
+//! canonical bytes instead of relying on derived `Hash` for machine-width
+//! primitive collections; [`crate::checksum::compute_checksum`] serializes with
+//! the fixed-width little-endian codec.
 
 use std::hash::{Hash, Hasher};
 
@@ -52,6 +74,14 @@ const FNV_PRIME: u64 = 0x0100_0000_01b3;
 ///
 /// This hasher produces consistent results across processes, platforms, and runs,
 /// making it suitable for rollback networking where all peers must agree on checksums.
+///
+/// Scalar integers and collection length prefixes use fixed-width little-endian
+/// encoding, with `usize`/`isize` canonicalized to 64 bits, so those values hash
+/// identically on 32-bit WASM and 64-bit little-endian native targets. Std's
+/// primitive slice `hash_slice` writes element bytes natively, so collections of
+/// `usize`/`isize` (or multi-byte elements on big-endian targets) are not covered;
+/// use [`compute_checksum`](crate::checksum::compute_checksum) for cross-target
+/// state checksums.
 ///
 /// # Example
 ///
@@ -104,12 +134,89 @@ impl Hasher for DeterministicHasher {
             self.state = self.state.wrapping_mul(FNV_PRIME);
         }
     }
+
+    // The `Hasher` defaults encode integers with `to_ne_bytes`, so a scalar
+    // `usize` hashes 4 bytes on 32-bit targets (browser
+    // `wasm32-unknown-unknown`) and 8 bytes on 64-bit native targets. Slice and
+    // collection `Hash` impls length-prefix through `write_usize`, so the
+    // pointer width alone makes a scalar or a length prefix hash differently in
+    // a browser than natively. Pin every integer writer to fixed-width
+    // little-endian bytes, matching the codec's
+    // `with_little_endian().with_fixed_int_encoding()` wire policy. The
+    // canonical width for `usize`/`isize` is 64 bits, mirroring bincode's
+    // fixed-int encoding. Primitive slice elements are outside this override:
+    // std's `Hash::hash_slice` writes their native memory bytes directly.
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.write(&i.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.write(&i.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.write(&i.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        self.write(&i.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        // Widen to the canonical 64-bit width. `try_from` keeps the conversion
+        // total on a hypothetical wider target instead of silently truncating.
+        self.write(&u64::try_from(i).unwrap_or(u64::MAX).to_le_bytes());
+    }
+
+    #[inline]
+    fn write_i16(&mut self, i: i16) {
+        self.write(&i.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_i32(&mut self, i: i32) {
+        self.write(&i.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_i64(&mut self, i: i64) {
+        self.write(&i.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_i128(&mut self, i: i128) {
+        self.write(&i.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_isize(&mut self, i: isize) {
+        // Sign-extend to the canonical 64-bit width (see `write_usize`).
+        let widened = i64::try_from(i).unwrap_or(if i.is_negative() { i64::MIN } else { i64::MAX });
+        self.write(&widened.to_le_bytes());
+    }
 }
 
 /// Computes a deterministic FNV-1a hash of the given value.
 ///
 /// This is a convenience function that creates a [`DeterministicHasher`],
 /// hashes the value, and returns the result.
+///
+/// # Portability
+///
+/// Scalar integers (including `usize`/`isize`) and slice/collection length
+/// prefixes hash identically on 32-bit WASM and 64-bit little-endian native
+/// targets. Primitive slice *elements* are hashed by the standard library as
+/// native memory bytes, so a collection of `usize`/`isize` elements (and
+/// multi-byte elements on big-endian targets) can still differ. For state
+/// checksums that must match across targets, prefer
+/// [`compute_checksum`](crate::checksum::compute_checksum), which serializes
+/// with the fixed-width little-endian codec.
 ///
 /// # Example
 ///
@@ -269,6 +376,64 @@ mod tests {
         let mut hasher = DeterministicHasher::new();
         hasher.write(b"foobar");
         assert_eq!(hasher.finish(), 0x8594_4171_f739_67e8);
+    }
+
+    #[test]
+    fn integer_writers_match_fixed_width_little_endian_bytes() {
+        let mut expected = DeterministicHasher::new();
+        expected.write(&0x0102u16.to_le_bytes());
+        expected.write(&0x0102_0304u32.to_le_bytes());
+        expected.write(&0x0102_0304_0506_0708u64.to_le_bytes());
+        expected.write(&0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10u128.to_le_bytes());
+        expected.write(&7u64.to_le_bytes());
+        expected.write(&u64::try_from(usize::MAX).unwrap_or(u64::MAX).to_le_bytes());
+        expected.write(&(-0x0102i16).to_le_bytes());
+        expected.write(&(-0x0102_0304i32).to_le_bytes());
+        expected.write(&(-0x0102_0304_0506_0708i64).to_le_bytes());
+        expected.write(&(-9i64).to_le_bytes());
+        expected.write(&i64::try_from(isize::MIN).unwrap_or(i64::MIN).to_le_bytes());
+
+        let mut actual = DeterministicHasher::new();
+        actual.write_u16(0x0102);
+        actual.write_u32(0x0102_0304);
+        actual.write_u64(0x0102_0304_0506_0708);
+        actual.write_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
+        actual.write_usize(7);
+        actual.write_usize(usize::MAX);
+        actual.write_i16(-0x0102);
+        actual.write_i32(-0x0102_0304);
+        actual.write_i64(-0x0102_0304_0506_0708);
+        actual.write_isize(-9);
+        actual.write_isize(isize::MIN);
+
+        assert_eq!(
+            actual.finish(),
+            expected.finish(),
+            "integer writers must emit fixed-width little-endian bytes"
+        );
+    }
+
+    #[test]
+    fn fnv1a_hash_is_independent_of_pointer_width() {
+        // The constants are the native (64-bit little-endian) values and are
+        // asserted again from the browser WASM lane, so a 32-bit build that
+        // falls back to `to_ne_bytes` for `usize`/`isize`/slice lengths is
+        // detected as a cross-target checksum divergence.
+        assert_eq!(
+            fnv1a_hash(&[1u8, 2, 3]),
+            0x01ef_76d4_29b1_1552,
+            "slice length prefix must be a fixed-width u64"
+        );
+        assert_eq!(
+            fnv1a_hash(&7usize),
+            0x4bd7_a317_074c_5b62,
+            "usize must hash as a fixed-width u64"
+        );
+        assert_eq!(
+            fnv1a_hash(&(-9isize)),
+            0x2ee4_949c_2c7d_0345,
+            "isize must hash as a fixed-width i64"
+        );
     }
 }
 

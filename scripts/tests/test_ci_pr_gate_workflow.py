@@ -146,6 +146,16 @@ def test_pr_gate_compiles_the_cfg_kani_tree_without_running_proofs() -> None:
         assert "; true" not in step.get("run", "")
 
 
+def test_pr_gate_compiles_the_browser_runtime_test_crate() -> None:
+    jobs = _load(PR_GATE)["jobs"]
+    runs = [step.get("run", "").strip() for step in jobs["wasm-check"]["steps"]]
+
+    assert (
+        "cargo check -p wasm-browser-smoke --target wasm32-unknown-unknown --lib --tests"
+        in runs
+    ), "the PR gate must compile the browser runtime tests it relies on"
+
+
 def test_kani_compile_gate_path_detection_fails_closed() -> None:
     jobs = _load(PR_GATE)["jobs"]
     changes = jobs["changes"]

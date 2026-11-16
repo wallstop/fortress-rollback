@@ -132,6 +132,7 @@ fn spawn_enemy(state: &mut GameState, rng: &mut SeededRng) {
 **Implementation:**
 
 - ✅ The bincode-compatible codec is configured with `standard().with_little_endian().with_fixed_int_encoding()` (fixed-size integers are an explicit override of the format's variable-int default, ensuring identical serialized bytes across platforms)
+- ✅ `hash::DeterministicHasher` writes scalar integers and collection length prefixes as fixed-width little-endian bytes (`usize`/`isize` canonicalize to 64 bits), so derived `Hash` values match on 32-bit browser WASM and 64-bit little-endian native targets. Std hashes primitive slice *elements* as native memory bytes, so collections of `usize`/`isize` are outside this guarantee; use `compute_checksum` for state checksums
 - ✅ Input types require `Serialize + Deserialize`
 - ✅ No platform-specific serialization
 
@@ -444,7 +445,8 @@ proptest! {
 | x86_64 macOS   | ✅ Expected         | Same architecture                 |
 | aarch64 Linux  | ⚠️ Test Required    | Different float rounding possible |
 | aarch64 macOS  | ⚠️ Test Required    | M1/M2 chips                       |
-| WASM           | ⚠️ Test Required    | Browser differences possible      |
+| WASM (browser) | ✅ Verified         | Captured 4,096-frame replay and machine-width hash/checksum parity run in Chromium on every merge queue; tab-suspension and timeout behavior covered in the browser lane |
+| WASM (Emscripten) | ✅ Verified     | The same replay and machine-width parity checks run in the Godot web-export lane |
 
 ### Cross-Platform Testing
 
@@ -467,9 +469,10 @@ cargo run --example replay -- verify session.inputs checksums.txt
 | Issue                | Affected        | Mitigation             |
 | -------------------- | --------------- | ---------------------- |
 | Float representation | All             | Use fixed-point math   |
-| Endianness           | Big-endian rare | bincode handles this   |
-| Integer sizes        | Historic        | Rust guarantees sizes  |
-| Alignment            | Embedded        | Not typically an issue |
+| Endianness           | Big-endian rare | The codec and `hash::DeterministicHasher` encode fixed-width little-endian bytes |
+| Pointer width        | 32-bit WASM vs 64-bit native | The codec encodes `usize` as a fixed 64-bit integer, and `hash::DeterministicHasher` canonicalizes scalar `usize`/`isize` values and collection length prefixes to 64 bits |
+| Primitive integer collections | All | Std hashes slice elements as native memory bytes; use `compute_checksum`/the codec for cross-target state containing `Vec<usize>`/`Vec<isize>` or other multi-byte integer collections |
+| Alignment            | Embedded        | Fields are explicitly serialized; never hash or transmit raw struct memory |
 
 ---
 
@@ -481,6 +484,7 @@ cargo run --example replay -- verify session.inputs checksums.txt
 - ✅ No system time in game logic
 - ✅ No RNG in game logic
 - ✅ Stable serialization (bincode)
+- ✅ Fixed-width little-endian integer encoding for wire data and scalar/length-prefix hashing
 - ✅ No uninitialized memory (safe Rust)
 
 ### User Must Ensure
