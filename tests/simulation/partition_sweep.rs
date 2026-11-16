@@ -2735,15 +2735,16 @@ fn healed_bisection_components(n: usize, split: usize) -> Vec<usize> {
 
 /// CAP matrix heal/reflap row: a symmetric partition that outlives the
 /// disconnect timeout must not resume as two live confirmed histories after
-/// the link heals. Neither even split (2/2 at N=4, 4/4 at N=8) can form a
-/// strict survivor majority of the agreed membership, so both components fail
-/// closed at their shared cut. The heal is proven to fire (`NetworkResumed`),
-/// so the terminal state is not a vacuous "the partition never healed".
+/// the link heals. Neither the 1/1 shell nor an even split (2/2 at N=4, 4/4 at
+/// N=8) can form a strict survivor majority of the agreed membership, so both
+/// components fail closed at their shared cut. The heal is proven to fire
+/// (`NetworkResumed`), so the terminal state is not a vacuous "the partition
+/// never healed".
 #[test]
 fn healed_symmetric_partition_without_survivor_quorum_stays_failed_closed() {
     const HEAL_CONFIRM_ALLOWANCE: i32 = 2;
 
-    for (n, split) in [(4, 2), (8, 4)] {
+    for (n, split) in [(2, 1), (4, 2), (8, 4)] {
         let schedule = disruption_schedule(n, healed_bisection_events(n, split));
         let component = healed_bisection_components(n, split);
         let mut options = disruption_options(component.clone());
