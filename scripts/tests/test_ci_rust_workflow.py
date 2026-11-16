@@ -804,5 +804,11 @@ def test_cross_arch_runtime_executes_arm_and_32_bit_usize_targets() -> None:
 
     runs = [step.get("run", "") for step in job["steps"]]
     assert any(
-        "cargo nextest run" in run and "--target" in run for run in runs
-    ), "the cross-architecture matrix must run nextest under each target"
+        "cargo nextest run" in run
+        and "--profile ci-cross-arch" in run
+        and "--target ${{ matrix.target }}" in run
+        for run in runs
+    ), (
+        "the cross-architecture matrix must run nextest under each matrix "
+        "target with the emulation-sized profile"
+    )
