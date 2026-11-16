@@ -792,9 +792,17 @@ def test_cross_arch_runtime_executes_arm_and_32_bit_usize_targets() -> None:
     assert entries["i686-32bit"]["target"] == "i686-unknown-linux-gnu"
 
     # i686 has the same 32-bit `usize` as wasm32; keep the deterministic suite
-    # while excluding the nightly simulation and multi-process tiers.
-    assert "not test(simulation::)" in entries["i686-32bit"]["filter"]
-    assert "not test(network::multi_process::)" in entries["i686-32bit"]["filter"]
+    # while excluding the nightly simulation and multi-process tiers. The one
+    # simulation row that must run is the pinned cross-target trace digest,
+    # which folds the session/protocol mesh into a single x86_64 reference.
+    for lane in ("aarch64-qemu", "i686-32bit"):
+        filter_text = entries[lane]["filter"]
+        assert "not test(simulation::)" in filter_text
+        assert (
+            "test(smoke_traces_match_checked_in_cross_architecture_digests)"
+            in filter_text
+        ), f"{lane} must execute the pinned cross-architecture trace digest"
+        assert "not test(network::multi_process::)" in filter_text
 
     env = job["env"]
     assert env["CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER"].startswith(

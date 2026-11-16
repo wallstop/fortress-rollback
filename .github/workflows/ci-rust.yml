@@ -878,7 +878,11 @@ jobs:
   #
   # Property tests are excluded from the QEMU lane because proptest's
   # many-thousand-case loops take longer than nextest's per-test budget under
-  # emulation; they already run on the native matrix.
+  # emulation; they already run on the native matrix. The simulation suite is
+  # excluded because its nightly shards are release-mode multi-thousand-step
+  # loops, except for the pinned cross-architecture trace-digest test, which
+  # folds the whole session/protocol/simulation stack into one value and must
+  # match the x86_64 reference on both lanes.
   cross-arch-runtime:
     name: Cross-Arch Runtime (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -891,13 +895,17 @@ jobs:
             target: aarch64-unknown-linux-gnu
             packages: qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross
             filter: >-
-              not test(simulation::) and not test(network::multi_process::)
+              (not test(simulation::) or
+              test(smoke_traces_match_checked_in_cross_architecture_digests))
+              and not test(network::multi_process::)
               and not test(network::compression::property_tests::)
           - name: i686-32bit
             target: i686-unknown-linux-gnu
             packages: gcc-i686-linux-gnu libc6-dev-i386-cross libc6-i386 lib32gcc-s1
             filter: >-
-              not test(simulation::) and not test(network::multi_process::)
+              (not test(simulation::) or
+              test(smoke_traces_match_checked_in_cross_architecture_digests))
+              and not test(network::multi_process::)
 
     env:
       # Same GCC-override contract as `arm64-cross`: the checked-in

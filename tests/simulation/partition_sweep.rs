@@ -2005,8 +2005,9 @@ fn divergence_frame_uses_minimum_and_checksum_only_stays_unknown() {
 
 /// CAP matrix row 1: a symmetric two-component partition under
 /// `ContinueWithout` must fail **closed** on every component at the same
-/// certified cut, never keep confirming into two silent histories. Both the
-/// even bisection (2/2) and the odd singleton isolation (2/1) are covered.
+/// certified cut, never keep confirming into two silent histories. The 1v1
+/// shell, the even bisection (2/2), and the odd singleton isolation (2/1) are
+/// all covered.
 ///
 /// This is the component-scoped counterpart to the single-history oracle: the
 /// global live-peer minimum cannot describe a partition, so each component's
@@ -2025,8 +2026,10 @@ fn symmetric_partition_components_fail_closed_without_fork() {
 
     // Even peer counts bisect into two equal components; odd peer counts
     // isolate a singleton, so the majority component has two independent
-    // survivors. Both shapes must fail closed today.
-    for component in [vec![0, 0, 1, 1], vec![0, 0, 1]] {
+    // survivors. The two-player shell is the minimal 1/1 case: both peers are
+    // singleton components and neither can certify a survivor majority. Every
+    // shape must fail closed today.
+    for component in [vec![0, 1], vec![0, 0, 1, 1], vec![0, 0, 1]] {
         let case = SweepCase::base(component.len(), ScenarioKind::PermanentContinue);
         check_partition_components_fail_closed(case, component, PARTITION_CONFIRM_ALLOWANCE);
     }

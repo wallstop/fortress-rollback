@@ -839,6 +839,40 @@ fn same_schedule_produces_identical_trace() {
     );
 }
 
+/// Cross-architecture identity: a whole-mesh trace must fold to the same
+/// digest on every supported target, not only across two runs on one host.
+///
+/// The trace digest covers the schema-stable JSON of confirmed inputs, session
+/// state, game-state checksums, event streams, and simulated wire statistics,
+/// so pinning it turns the `cross-arch-runtime` CI lanes into an end-to-end
+/// check of the real session, protocol, and network-simulation stack against
+/// the x86_64 reference. The constants were captured on x86_64 Linux and
+/// verified to match natively on i686 and under qemu-aarch64 before being
+/// checked in; changing simulation behavior intentionally requires updating
+/// them together with the trace contract.
+#[test]
+fn smoke_traces_match_checked_in_cross_architecture_digests() {
+    const EXPECTED: [(u64, u64, [i32; 3]); 3] = [
+        (7, 0x04bf_5f66_ede9_cbfd, [578, 579, 579]),
+        (0x5EED_CAFE, 0xa4a1_7ae9_7683_cb78, [515, 516, 515]),
+        (41, 0x44f4_0316_7976_508a, [556, 555, 556]),
+    ];
+
+    for (seed, expected_hash, expected_confirmed) in EXPECTED {
+        let schedule = generate(seed, SimConfig::smoke(3));
+        let report = run(&schedule, &RunOptions::default());
+        report.expect_pass(&schedule);
+        assert_eq!(
+            report.trace_hash, expected_hash,
+            "seed {seed} trace digest diverged from the checked-in x86_64 reference"
+        );
+        assert_eq!(
+            report.final_confirmed, expected_confirmed,
+            "seed {seed} confirmed-frame evidence changed"
+        );
+    }
+}
+
 /// Negative control (real divergence): corrupting one peer's simulated state
 /// mid-run must trip BOTH detection layers — the oracle's recorded-state
 /// comparison and the library's in-band desync detector.
