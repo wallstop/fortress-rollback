@@ -120,7 +120,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ~0.74 µs locally). Serving a spectator now serializes the ordered confirmed
   inputs directly instead of rebuilding a handle-keyed map every frame, and
   built-in UDP and Tokio adapters no longer reserve a four-message receive batch
-  on polls that decode no datagram.
+  on polls that decode no datagram. `poll_remote_clients` now hands its
+  gossip-nudge confirmation fold to `advance_frame` when no endpoint event or
+  disconnect propagation changed a folding input, so an idle/steady advance
+  performs one mesh fold instead of two.
 - **Pre-existing:** a drop-time scoped-observer failure now reports its real `file:line`
   location instead of a non-line label, so diagnostic consumers and the violation-site census can
   parse it.

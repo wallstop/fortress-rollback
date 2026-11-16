@@ -352,6 +352,17 @@ where
     /// Per-poll endpoint events staged before handling, retained across polls so
     /// the idle/steady network path does not allocate a fresh queue each tick.
     pending_events: VecDeque<(Event<T>, Arc<[PlayerHandle]>, T::Address)>,
+    /// The most recent mesh `confirmed_frame` fold from this poll, reusable by
+    /// [`advance_frame`](Self::advance_frame) when no input/status state changed
+    /// between the nudge decision and the advance fold.
+    ///
+    /// `poll_remote_clients` already needs the fold for the gossip-liveness
+    /// nudge. Endpoint events and disconnect propagation invalidate this cache,
+    /// so a reused value is exactly the fold the advance would recompute.
+    confirmed_frame_cache: Option<Frame>,
+    /// Test-only count of actual `confirmed_frame` mesh folds.
+    #[cfg(test)]
+    confirmed_frame_folds: std::sync::atomic::AtomicU64,
     /// Contains all local inputs not yet sent into the system, indexed by player handle.
     /// This should have inputs for every local player before calling `advance_frame`.
     local_inputs: Vec<Option<PlayerInput<T::Input>>>,
@@ -3022,6 +3033,9 @@ impl<T: Config> P2PSession<T> {
             player_reg: players,
             event_queue,
             pending_events: VecDeque::new(),
+            confirmed_frame_cache: None,
+            #[cfg(test)]
+            confirmed_frame_folds: std::sync::atomic::AtomicU64::new(0),
             local_inputs,
             desync_detection,
             local_checksum_history: BTreeMap::new(),
@@ -3147,7 +3161,9 @@ impl<T: Config> P2PSession<T> {
         // Apply propagated disconnect knowledge before the state gate. Under
         // Halt, a remote-reported drop must fail closed on the detecting call
         // itself instead of advancing one extra frame.
-        self.update_player_disconnects();
+        if self.update_player_disconnects() {
+            self.confirmed_frame_cache = None;
+        }
 
         // session is not running and synchronized
         if self.state != SessionState::Running {
@@ -3257,8 +3273,13 @@ impl<T: Config> P2PSession<T> {
             requests.push(self.sync_layer.save_current_state());
         }
 
-        // find the confirmed frame for which we received all inputs
-        let confirmed_frame = self.confirmed_frame();
+        // find the confirmed frame for which we received all inputs. Reuse the
+        // poll-time mesh fold when no endpoint event or disconnect propagation
+        // mutated a folding input since it was computed.
+        let confirmed_frame = self
+            .confirmed_frame_cache
+            .take()
+            .unwrap_or_else(|| self.confirmed_frame());
 
         // check game consistency and roll back, if necessary
         if !lockstep {
@@ -3513,7 +3534,8 @@ impl<T: Config> P2PSession<T> {
         // (the release condition in `remote_slot_confirmed_bound`) becomes
         // unreachable. Computed before the endpoint poll below so the flag is
         // live on the poll that follows a detection; cleared the poll after
-        // the mesh agrees. Allocation-free.
+        // Allocation-free.
+        self.confirmed_frame_cache = None;
         let nudge_needed = self.connect_status_nudge_needed();
         for remote_endpoint in self.player_reg.remotes.values_mut() {
             // A reserved hot-join endpoint (the host↔joiner channel) is
@@ -3588,6 +3610,10 @@ impl<T: Config> P2PSession<T> {
         // failure must still reach `handle_event`; the unstaged event cannot be
         // preserved, so halt the session instead of continuing with a gap.
         while let Some((event, handles, addr)) = self.pending_events.pop_front() {
+            // Any event may mutate a fold input (inputs advance a slot's
+            // receipt, disconnects change connectivity); the cached poll fold
+            // is only reusable when this pass handled nothing.
+            self.confirmed_frame_cache = None;
             self.handle_event(event, handles, addr);
         }
         if staging_failed {
@@ -3600,6 +3626,16 @@ impl<T: Config> P2PSession<T> {
         // report, backfill, ready, or commit produced here is transmitted on
         // this same application poll.
         self.poll_coordinated_drop();
+        // Coordinated-drop processing can converge/re-freeze slots without
+        // going through `handle_event`; only reuse the poll fold when no drop
+        // state exists at all.
+        if self.coordinated_drop.active.is_some()
+            || !self.coordinated_drop.queued.is_empty()
+            || !self.coordinated_drop.deferred_prepares.is_empty()
+            || !self.coordinated_drop.committed.is_empty()
+        {
+            self.confirmed_frame_cache = None;
+        }
 
         // emit network stats telemetry for each running remote endpoint
         if let Some(telemetry) = &self.telemetry {
@@ -3658,6 +3694,10 @@ impl<T: Config> P2PSession<T> {
         // and drains are cheap no-ops on sessions that never receive N-peer
         // traffic (2-peer hosts/joiners, the coordinator itself).
         self.poll_npeer_survivor();
+        // Hot-join orchestration can open/commit/abort serves and mutate connect
+        // status outside the ordinary event pass; keep the advance fold exact by
+        // dropping the poll cache in this feature configuration.
+        self.confirmed_frame_cache = None;
     }
 
     /// Aborts an in-flight hot-join serve for `handle`, performing **all**
@@ -8223,6 +8263,9 @@ impl<T: Config> P2PSession<T> {
         // is a cheap `Option` check (no push), so it adds no cost to the common
         // path; nested under a driver method's scope it is a harmless re-push.
         let _violation_scope = self.scoped_violation_observer();
+        #[cfg(test)]
+        self.confirmed_frame_folds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut confirmed_frame = Frame::new(i32::MAX);
 
         // The double-failure-relay fold-membership-asymmetry gate is
@@ -11667,7 +11710,7 @@ impl<T: Config> P2PSession<T> {
     /// otherwise capped, fully-acked survivors are gossip-mute and mesh
     /// agreement can never be reached. Allocation-free; called once per
     /// [`Self::poll_remote_clients`].
-    fn connect_status_nudge_needed(&self) -> bool {
+    fn connect_status_nudge_needed(&mut self) -> bool {
         let drop_awaiting_agreement =
             self.local_connect_status
                 .iter()
@@ -11680,7 +11723,14 @@ impl<T: Config> P2PSession<T> {
                         && !self.player_reg.is_local_player(handle)
                         && self.remote_slot_confirmed_bound(handle, status).is_some()
                 });
-        drop_awaiting_agreement || self.gossip_holds_confirmation_below_receipts()
+        if drop_awaiting_agreement {
+            return true;
+        }
+        let nudge = self.gossip_holds_confirmation_below_receipts();
+        // `gossip_holds_confirmation_below_receipts` stores the fold it
+        // computed; `poll_remote_clients` clears it when an event mutates a
+        // folding input.
+        nudge
     }
 
     /// Cold-start / catch-up gossip hold (the no-drop sibling of the
@@ -11734,14 +11784,11 @@ impl<T: Config> P2PSession<T> {
     /// inert there. In lockstep (`max_prediction == 0`) leg 1 is satisfied
     /// whenever confirmation stalls at all, which is exactly the intended
     /// carrier semantics there.
-    fn gossip_holds_confirmation_below_receipts(&self) -> bool {
-        // Leg 1 ("the prediction window is exhausted") is exactly what the
-        // previous `advance_frame` recorded. Skipping the fold here while the
-        // window still has room is safe: `gap` can only grow as frames advance,
-        // so a non-exhausted window cannot satisfy the condition now. Lockstep
-        // (`max_prediction == 0`) keeps the fold unconditional — every stall is
-        // an exhausted window there.
+    fn gossip_holds_confirmation_below_receipts(&mut self) -> bool {
         let confirmed = self.confirmed_frame();
+        // Reuse this exact fold in `advance_frame` when no polling event
+        // mutated a folding input in between.
+        self.confirmed_frame_cache = Some(confirmed);
         let gap = self
             .sync_layer
             .current_frame()
@@ -11910,7 +11957,12 @@ impl<T: Config> P2PSession<T> {
 
     /// Check if players are registered as disconnected for earlier frames on other remote players in comparison to our local assumption.
     /// Disconnect players that are disconnected for other players and update the frame they disconnected
-    fn update_player_disconnects(&mut self) {
+    /// Applies mesh-propagated disconnect knowledge.
+    ///
+    /// Returns `true` when any status/endpoint state relevant to
+    /// `confirmed_frame` was mutated, so the caller can invalidate a cached
+    /// poll-time confirmation fold.
+    fn update_player_disconnects(&mut self) -> bool {
         // All-local (and all-remotes-gone) sessions have no peer gossip to fold
         // and local slots can never be disconnected through this path. This is
         // the only exact early-out: any live coordinated-drop state must still
@@ -11921,8 +11973,9 @@ impl<T: Config> P2PSession<T> {
             && self.coordinated_drop.queued.is_empty()
             && self.coordinated_drop.committed.is_empty()
         {
-            return;
+            return false;
         }
+        let mut changed = false;
 
         // Lazily captured immediately before the first mutation. One update
         // can apply several endpoint folds, so every later failure must retain
@@ -11975,7 +12028,10 @@ impl<T: Config> P2PSession<T> {
             if let Some(fence) = self.coordinated_drop.committed.get(&handle) {
                 if let Some(status) = self.local_connect_status.get_mut(handle_idx) {
                     if status.disconnected {
-                        status.last_frame = fence.cut;
+                        if status.last_frame != fence.cut {
+                            status.last_frame = fence.cut;
+                            changed = true;
+                        }
                         continue;
                     }
                 }
@@ -12109,6 +12165,7 @@ impl<T: Config> P2PSession<T> {
                             confirmed_before_disconnects = Some(self.confirmed_frame());
                         }
                         self.converge_reserved_slot_freeze(handle, queue_min_confirmed);
+                        changed = true;
                         continue;
                     }
                     let Some(PlayerType::Remote(addr)) = self.player_reg.handles.get(&handle)
@@ -12160,6 +12217,7 @@ impl<T: Config> P2PSession<T> {
             };
             let confirmed_ceiling =
                 *confirmed_before_disconnects.get_or_insert_with(|| self.confirmed_frame());
+            changed = true;
             if let Err(e) = self.disconnect_player_with_policy(
                 representative,
                 Some(overrides),
@@ -12182,6 +12240,7 @@ impl<T: Config> P2PSession<T> {
                 self.enter_fail_closed_disconnect_state_at(confirmed_ceiling);
             }
         }
+        changed
     }
 
     /// Gather average frame advantage from each remote player endpoint and return the maximum.
@@ -15900,6 +15959,34 @@ mod tests {
         let session = create_local_only_session();
         // Initially, confirmed frame is NULL (no frames confirmed yet)
         assert_eq!(session.confirmed_frame(), Frame::NULL);
+    }
+
+    #[test]
+    #[cfg(not(feature = "hot-join"))]
+    fn advance_frame_reuses_the_poll_confirmation_fold_when_no_state_changed() {
+        let mut session = create_two_player_session();
+        session.state = SessionState::Running;
+        let folds_before = session
+            .confirmed_frame_folds
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        session
+            .add_local_input(PlayerHandle::new(0), 1_u8)
+            .expect("queue local input");
+        session.advance_frame().expect("idle advance succeeds");
+
+        assert_eq!(
+            session
+                .confirmed_frame_folds
+                .load(std::sync::atomic::Ordering::Relaxed)
+                - folds_before,
+            1,
+            "the poll-time fold must be reused instead of recomputed by advance"
+        );
+        assert!(
+            session.confirmed_frame_cache.is_none(),
+            "the cached fold is consumed by the advance"
+        );
     }
 
     #[test]
