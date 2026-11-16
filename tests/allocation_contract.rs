@@ -745,10 +745,11 @@ fn warmed_hot_paths_obey_allocation_contracts() {
     // status gossip, and request construction. The switchable socket counts
     // submission but deliberately excludes adapter buffering and cloning. Its
     // allocation contract is bounded rather than zero: one input buffer stays
-    // retained until acknowledgment, and compression/status temporaries are
-    // released after submission. The byte ceilings also prevent the empty
-    // graceful-drop poll from restoring its former 28 KiB reservation.
-    for (players, operation_ceiling, byte_ceiling) in [(2, 4, 96), (4, 4, 112), (16, 5, 500)] {
+    // retained until acknowledgment, the delta scratch is reused across sends,
+    // and compression/status temporaries are released after submission. The
+    // byte ceilings also prevent the empty graceful-drop poll from restoring its
+    // former 28 KiB reservation.
+    for (players, operation_ceiling, byte_ceiling) in [(2, 3, 64), (4, 3, 84), (16, 4, 440)] {
         let first = warmed_networked_p2p_send_stats(players);
         for repetition in 1..3 {
             assert_eq!(

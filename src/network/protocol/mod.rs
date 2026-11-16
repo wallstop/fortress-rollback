@@ -25,7 +25,9 @@ use crate::frame_info::PlayerInput;
 use crate::hash::DeterministicHasher;
 use crate::metrics::{MessageKindCounts, PeerMetrics};
 use crate::network::codec;
-use crate::network::compression::{decode_with_max_len, try_encode};
+#[cfg(test)]
+use crate::network::compression::try_encode;
+use crate::network::compression::{decode_with_max_len, try_encode_with_scratch};
 use crate::network::messages::{
     ChecksumReport, ConnectionStatus, DropAbort, DropBackfill, DropCommit, DropPrepare, DropReport,
     FloorReply, FloorRequest, Goodbye, Input, InputAck, Message, MessageBody, MessageHeader,
@@ -417,6 +419,10 @@ where
 
     // input compression
     pending_output: VecDeque<InputBytes>,
+    /// Reusable XOR-delta scratch for [`Self::send_pending_output_with_decoded_byte_cap`]
+    /// and the connect-status nudge. Cleared per encode and kept across sends so
+    /// the intermediate delta buffer is not reallocated every packet.
+    encode_scratch: Vec<u8>,
     last_acked_input: InputBytes,
     max_prediction: usize,
     recv_inputs: BTreeMap<Frame, InputBytes>,
@@ -1000,6 +1006,7 @@ impl<T: Config> UdpProtocol<T> {
 
             // input compression
             pending_output: VecDeque::new(),
+            encode_scratch: Vec::new(),
             last_acked_input,
             max_prediction,
             recv_inputs,
@@ -2065,14 +2072,18 @@ impl<T: Config> UdpProtocol<T> {
                 return;
             }
 
-            // encode all pending inputs to a byte buffer
-            body.bytes = match try_encode(
-                &self.last_acked_input.bytes,
-                self.pending_output
-                    .iter()
-                    .take(batch_len)
-                    .map(|gi| &gi.bytes),
-            ) {
+            // encode all pending inputs to a byte buffer, reusing this
+            // endpoint's delta scratch so only the queued RLE output allocates.
+            let encoded = {
+                let reference = self.last_acked_input.bytes.as_slice();
+                let pending = &self.pending_output;
+                try_encode_with_scratch(
+                    reference,
+                    pending.iter().take(batch_len).map(|gi| &gi.bytes),
+                    &mut self.encode_scratch,
+                )
+            };
+            body.bytes = match encoded {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     report_violation!(
@@ -2220,9 +2231,10 @@ impl<T: Config> UdpProtocol<T> {
         if !self.last_acked_input.frame.is_valid() {
             return false;
         }
-        let bytes = match try_encode(
+        let bytes = match try_encode_with_scratch(
             &self.last_acked_input.bytes,
             std::iter::once(&self.last_acked_input.bytes),
+            &mut self.encode_scratch,
         ) {
             Ok(bytes) => bytes,
             Err(err) => {

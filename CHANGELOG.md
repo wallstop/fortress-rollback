@@ -80,9 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pre-existing:** per-frame network hot paths no longer allocate per-packet receive staging.
   Decoded input frames and their per-player input vectors stay inline for up to four entries, the
   per-packet connect-status snapshot is reused while gossip is unchanged, and
-  `P2PSession::poll_remote_clients` retains its event-staging queue across polls. A warmed
-  one-frame receive poll drops from 8 to 6 allocation operations (about 256 fewer bytes) at 2-16
-  players.
+  `P2PSession::poll_remote_clients` retains its event-staging queue across polls. Network sends
+  also reuse an endpoint-local XOR-delta scratch buffer instead of allocating the intermediate
+  delta buffer per packet. A warmed one-frame receive poll drops from 8 to 6 allocation operations
+  (about 256 fewer bytes) at 2-16 players, and a warmed networked send drops from 4 to 3 operations
+  at 2-4 players (5 to 4 at 16); encoded wire bytes and event ordering are unchanged.
 
 ### Changed
 
