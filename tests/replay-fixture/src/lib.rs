@@ -145,6 +145,12 @@ pub const EXPECTED_USIZE_HASH: u64 = 0x4bd7_a317_074c_5b62;
 /// Captured on a 64-bit little-endian host. The 32-bit fallback is
 /// `0x8ddb761e8e5b67d9`.
 pub const EXPECTED_ISIZE_HASH: u64 = 0x2ee4_949c_2c7d_0345;
+/// Native FNV-1a of the `u32` slice `[1, 0x12345678]`.
+///
+/// Fixed-width primitive slice elements are hashed by std as native memory
+/// bytes; this closes the common little-endian case where the four-byte
+/// elements match across 32-bit and 64-bit targets.
+pub const EXPECTED_U32_SLICE_HASH: u64 = 0x6593_21e6_beec_9d26;
 /// Native checksum of [`machine_width_state`].
 ///
 /// The state contains `usize`, `isize`, and `Vec` fields, so this catches both
@@ -179,9 +185,16 @@ pub fn machine_width_state() -> MachineWidthState {
 ///
 /// This is the Rust-versus-WASM-browser guard for the difference that pointer
 /// width introduces: `Hasher`'s default integer writers encode through
-/// `to_ne_bytes`, so `#[derive(Hash)]` states containing `usize`, `isize`, or
-/// collections would otherwise checksum differently on a 32-bit browser build
-/// than on a 64-bit native build.
+/// `to_ne_bytes`, so scalar `usize`/`isize` fields and collection length
+/// prefixes would otherwise checksum differently on a 32-bit browser build than
+/// on a 64-bit native build.
+///
+/// Primitive slice *elements* are outside this guard: std's `hash_slice`
+/// specialization writes them as native memory bytes, so `[usize]`/`[isize]`
+/// element payloads still differ on 32-bit targets. The `u32` slice check below
+/// pins the common fixed-width little-endian collection case, and
+/// [`machine_width_state`] pins the serializer path that callers should use for
+/// states containing machine-width collections.
 ///
 /// # Errors
 ///
@@ -204,6 +217,13 @@ pub fn check_machine_width_parity() -> Result<(), String> {
     if isize_hash != EXPECTED_ISIZE_HASH {
         return Err(format!(
             "isize hash {isize_hash:#018x} differs from native {EXPECTED_ISIZE_HASH:#018x}"
+        ));
+    }
+    let u32_slice_hash = fortress_rollback::hash::fnv1a_hash(&[1u32, 0x1234_5678]);
+    if u32_slice_hash != EXPECTED_U32_SLICE_HASH {
+        return Err(format!(
+            "u32 slice hash {u32_slice_hash:#018x} differs from native \
+             {EXPECTED_U32_SLICE_HASH:#018x}"
         ));
     }
     let checksum = fortress_rollback::checksum::compute_checksum(&machine_width_state())

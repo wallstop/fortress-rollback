@@ -85,15 +85,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delta buffer per packet. A warmed one-frame receive poll drops from 8 to 6 allocation operations
   (about 256 fewer bytes) at 2-16 players, and a warmed networked send drops from 4 to 3 operations
   at 2-4 players (5 to 4 at 16); encoded wire bytes and event ordering are unchanged.
-- **Pre-existing:** `DeterministicHasher` now writes every integer as fixed-width little-endian
-  bytes, so `fnv1a_hash` over a `#[derive(Hash)]` value containing `usize`, `isize`, slices, or
-  collections is identical on 32-bit browser WASM and 64-bit native hosts. `Hasher`'s default
-  writers use `to_ne_bytes`, which made a slice length prefix four bytes on `wasm32` and eight
-  bytes on 64-bit targets (and flipped every integer on big-endian targets). `usize` and `isize`
-  canonicalize to 64 bits, matching the codec's fixed-int wire encoding, so 64-bit little-endian
-  hosts keep their previous hash values; hashes recorded from a 32-bit or big-endian build for
-  machine-width or collection values change once. `compute_checksum` was already fixed-width and
-  is unchanged.
+- **Pre-existing:** `DeterministicHasher` now writes every scalar integer and every
+  slice/collection length prefix as fixed-width little-endian bytes, so `fnv1a_hash` over a
+  `#[derive(Hash)]` value with `usize`, `isize`, or collection-length fields is identical on
+  32-bit browser WASM and 64-bit native hosts. `Hasher`'s default writers use `to_ne_bytes`,
+  which made `usize`/`isize` four bytes on `wasm32` and eight bytes on 64-bit targets (and
+  flipped every integer on big-endian targets). `usize` and `isize` canonicalize to 64 bits,
+  matching the codec's fixed-int wire encoding, so 64-bit little-endian hosts keep their
+  previous hash values; hashes recorded from a 32-bit or big-endian build for machine-width
+  scalars or collection lengths change once. Std hashes primitive slice *elements* as native
+  memory bytes, so `Vec<usize>`/`Vec<isize>` element payloads (and multi-byte elements on
+  big-endian hosts) still differ across targets; use `checksum::compute_checksum` for
+  cross-target state checksums. `compute_checksum` itself was already fixed-width and is
+  unchanged.
 
 ### Changed
 
