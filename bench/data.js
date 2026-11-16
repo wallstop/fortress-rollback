@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794787172570,
+  "lastUpdate": 1794800196685,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "0370e8a7dd71e59d6f72d89d14feeebec6f7a382",
-          "message": "perf: close the open hardening and usability backlog (#304)\n\n## Summary\n\nThis branch closes the complete paginated open-issue set in\ngameplay-impact order:\n\n- removes measured P2P and spectator hot-path overhead while preserving\nunknown-source diagnostics;\n- replaces fragmented onboarding with one runnable first-session path\nand short route maps;\n- reduces the crates.io archive from 91 to 58 files and from 1,091,787\nto 914,854 compressed bytes;\n- audits all four authoritative Cargo workspaces in hosted\nvulnerability, deny-policy, license, and freshness jobs;\n- type-checks all 58 production Python modules with strict, pinned mypy\nat the Python 3.10 floor.\n\nIt also raises the docs tooling floor to the latest compatible\npymdown-extensions 11.0.2.\n\n## Measured results\n\n- All-local N=2 P2P callgrind: 743,107,916 → 627,307,916 instructions\n(-15.58%).\n- Warm spectator polling: zero allocations for one- and four-host rows.\n- Per-packet connection-status fan-out: zero clone allocations at\nN=2/4/16.\n- Published archive: 36.26% fewer files, 11.57% fewer unpacked bytes,\n16.21% fewer compressed bytes.\n- Strict mypy: 34 initial diagnostics across 15 files → zero issues in\n58 files.\n- Strict pyright comparison: 495 errors on the same scope, so one\nchecker is maintained.\n\n## Verification\n\n- Latest `main` head `2363992`: all 16 workflow groups successful.\n- Strict Clippy: `tokio,json` and `hot-join,tokio,json` matrices pass.\n- Nextest: 2,903 default and 3,161 hot-join tests pass.\n- Rustdoc: 169 pass, 54 configured ignores.\n- Python: 2,098 tests pass; Ruff and strict mypy pass.\n- Package clean-room verification and all 1,953 packaged library tests\npass.\n- All four Cargo locks pass RustSec and cargo-deny policy; all\ncompatible lock resolutions are current.\n- MkDocs strict build, Markdownlint, wiki validation, actionlint, and\nagent preflight pass.\n- Main-thread adversarial review found and fixed the package fixture\nomission, global license-exception noise, cargo-deny config resolution,\npassive contributor prose, and one stale release packaging assertion; no\nfindings remain.\n\n## Dependency disposition\n\nAll compatible Cargo, npm, docs, and release-tooling dependencies are\ncurrent. The only newer Cargo packages exceed the Rust 1.86 MSRV:\nbincode-next 3.1.1 requires Rust 1.90, and serial_test 4.0.1 requires\nRust 1.93.1.\n\nCloses #297\nCloses #299\nCloses #300\nCloses #302\nCloses #303\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes core P2P/protocol event handling and crates.io publish\ncontents, though allocation contracts and expanded supply-chain CI\nreduce regression risk.\n> \n> **Overview**\n> This PR tightens **runtime networking**, **consumer packaging**,\n**supply-chain CI**, **Python tooling**, and **onboarding docs** in one\npass.\n> \n> **Performance:** Input events now carry `peer_connect_status` as a\nshared `Arc<[ConnectionStatus]>` so one packet does not clone an\nN-player status vector per player. All-local `P2PSession` polls skip\nendpoint work after socket accounting (unknown-source diagnostics stay).\nSpectator polls reuse constructor-reserved scratch for disconnect\nbatches instead of allocating each idle tick. Allocation contracts and a\nnew `p2p_all_local` benchmark lock in zero- or bounded-allocation\nbehavior on warmed paths.\n> \n> **crates.io:** `Cargo.toml` switches from a long `exclude` list to an\nanchored **`include`** allowlist (sources, licenses, README, one wire\ngolden test) so published tarballs stay small and self-testable; README\nlinks are adjusted for crates.io.\n> \n> **CI / supply chain:** Security and scheduled freshness jobs run in a\n**four-workspace matrix** (root, fuzz, loom, godot-emscripten) with\n`cargo audit`, workspace-scoped `cargo deny`, and **lockfile-scoped\nlicense exceptions** (NCSA/MPL test-only deps). Freshness reports are\nrequired; version lag stays advisory. Quality CI adds **blocking strict\nmypy** (Python 3.10 floor, pinned 2.3.1) plus a matching pre-commit hook\nfor production `scripts/`.\n> \n> **Docs:** README and docs home become short route maps; new **Getting\nStarted** is the single runnable `SyncTestSession` path (MkDocs/wiki nav\nupdated). User guide quick-start defers to that guide.\n> \n> **Tests:** New contracts cover CI security matrices, package payload,\nPython typing gate, and docs onboarding shape.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\n579a4098729acf5121631f667076b3d623ca971d. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
-          "timestamp": "2026-08-24T18:08:57-07:00",
-          "tree_id": "c6565a10cf05f80062f2ac98d0fd475db5fa96c8",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/0370e8a7dd71e59d6f72d89d14feeebec6f7a382"
-        },
-        "date": 1787620651392,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 51402,
-            "range": "± 231",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 41034,
-            "range": "± 263",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1406,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1601,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3138,
-            "range": "± 272",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2894,
             "range": "± 253",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4e6c2e534778e53b538c743bf1f812e822f3506c",
+          "message": "fix: bound hot-join pauses, truncate ended spectators, trim receive staging (#435)\n\n## Summary\n\nCloses #433, #434, and #432.\n\n### Spectator terminal truncation (#434)\n\n`FortressError::SpectatorStreamEnded { frame }` is the explicit terminal\nstate for a spectator whose\nlast host disconnected before the next frame's input arrived. The\nspectator still drains every frame\nreceived before the `Goodbye`; a final input arriving in a later poll\nfrom the removed host is\nrejected as an unknown source. Exhaustive error matches need the new arm\n(breaking).\nRed/green: new\n`spectator_late_final_input_after_host_removal_reports_terminal_truncation`;\nthe two\nall-hosts-drained tests now assert `SpectatorStreamEnded` at the exact\ntruncation frame.\n\n### Hot-join pause bound (#433)\n\nEach timed-out serve records a per-handle retry floor. The next serve\nmay open only after the host\nhas advanced `1, 2, 4, ...` frames (cap 256), so a peer that syncs but\nnever acks cannot keep the\nhost paused in a near-continuous duty cycle. The backoff is shared by\nthe 2-peer and N-peer serve\npaths, cleared on successful join or a fresh endpoint era, and only\nduring the backoff window are\nsimulation inputs withheld from the abandoned reserved endpoint\n(preventing its `pending_output`\noverflow from resetting the budget). Normal reserved-slot input traffic\nis unchanged.\nRed/green:\n`hot_join_timed_out_serves_are_bounded_by_exponential_backoff` drives 12\nforced timeout\nwindows and asserts exact `1,2,4,...,256` progress between serves,\nblocked immediate re-requests,\nand a single-window send-queue high-water bound.\n\n### Receive staging (#432)\n\n- Decoded input frames and per-player input vectors use `SmallVec`\ninline storage for the common\n  `<=4` case (fallible heap growth above it).\n- Consecutive packets reuse the connect-status `Arc<[ConnectionStatus]>`\nwhile gossip is unchanged.\n- `P2PSession::poll_remote_clients` retains its event-staging queue\nacross polls.\n- Warmed one-Input receive poll measured: **8 -> 6 allocation ops** and\n**1408 -> 1152 bytes** at\nN=2 (N=4 1424->1168, N=16 1520->1264). `tests/allocation_contract.rs`\nnow enforces 6 ops / 1280\n  bytes and tightens the send byte ceilings to 96/112/500.\n- The suggested `confirmed_frame` gating was implemented and measured,\nthen rejected: it shifted the\n`4p-loss15-rtt200-4b` deterministic sweep baseline from 7119.4 to 7500.7\nbytes/player/sec for a\n  sub-microsecond fold saving. The sweep is green after reverting it.\n\n## Verification\n\n```text\ncargo fmt --all -- --check                         clean\ncargo clippy --workspace --all-targets --features tokio,json,hot-join -- -D warnings  clean\ncargo nextest run --workspace --features tokio,json,hot-join --no-fail-fast            3504 passed, 76 skipped\ncargo tfull                                                                            3214 passed, 75 skipped\ncargo nextest run --test sessions -E 'test(hot_join)' --features tokio,json,hot-join   43 passed\ncargo nextest run --test allocation_contract --features tokio,json                     pass\npython3 scripts/ci/agent-preflight.py --full --auto-fix                                all checks passed\npython3 scripts/hooks/check-changelog-unreleased.py                                    pass\npython3 scripts/hooks/check-plan-hygiene.py                                            pass\n```\n\nChangelog entries cover the breaking error variant, the hot-join\navailability fix, and the receive\nallocation reduction. `PLAN.md` keeps only the measured-rejected\nfold/send-encode follow-up.\n\n\n### Send-side scratch reuse (#432 continuation, `f673d6c`)\n\n`compression::try_delta_encode_into` backs a doc-hidden\n`try_encode_with_scratch`; `UdpProtocol`\nnow owns the XOR-delta scratch used by both pending-input sends and\nconnect-status nudges. Only the\nqueued RLE output allocates per packet. A new test proves the scratch\npath is byte-identical to\n`try_encode` and does not reallocate once warm. Warmed networked send\nallocation contract:\nN=2 **4 ops/66 B -> 3/58**, N=4 **4/90 -> 3/78**, N=16 **5/482 ->\n4/422**; ceilings tightened to\n3/64, 3/84, 4/440. `sweep_pr_gate` remains green, confirming unchanged\nwire traffic. `PLAN.md` now\ntracks only the measured-rejected confirmation-fold sharing follow-up.\n\n\n### Confirmation-fold sharing (#432 completion, `2dfb7fe`)\n\n`poll_remote_clients` already computes the mesh `confirmed_frame` fold\nfor the gossip-liveness\nnudge. `advance_frame` now reuses that exact value when no endpoint\nevent or disconnect propagation\nchanged a folding input; event handling, live coordinated-drop state,\nand hot-join orchestration\ninvalidate the cache, and `update_player_disconnects` reports whether it\nmutated status. A test-only\nfold counter plus\n`advance_frame_reuses_the_poll_confirmation_fold_when_no_state_changed`\nproves an\nidle advance performs **one mesh fold instead of two**. `sweep_pr_gate`\nremains byte-identical.\n`PLAN.md` is now empty.",
+          "timestamp": "2026-11-16T03:24:30Z",
+          "tree_id": "435a67dc69b3154f427229b35cd73b476ace902f",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/4e6c2e534778e53b538c743bf1f812e822f3506c"
+        },
+        "date": 1794800195592,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 37586,
+            "range": "± 466",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24615,
+            "range": "± 214",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1246,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2768,
+            "range": "± 165",
             "unit": "ns/iter"
           }
         ]
