@@ -1255,6 +1255,21 @@ pub enum FortressError {
         /// The player whose input differed between hosts.
         player: PlayerHandle,
     },
+    /// Every host feeding a spectator has disconnected, and the next frame's
+    /// inputs never arrived before the final host was removed.
+    ///
+    /// A spectator keeps advancing through frames whose inputs were received
+    /// before the last host's `Goodbye`/disconnect. Once those are exhausted,
+    /// playback reaches a terminal truncation point: no host remains to supply
+    /// the missing frame, and inputs arriving from an already-removed host are
+    /// rejected as unknown sources. This is not a transient wait — unlike
+    /// [`PredictionThreshold`](Self::PredictionThreshold), retrying cannot make
+    /// progress. Stop the spectator and start a fresh session to resume
+    /// spectating.
+    SpectatorStreamEnded {
+        /// The first frame that could not be completed after every host left.
+        frame: Frame,
+    },
     /// An invalid frame number was provided. Frames must be non-negative and within valid ranges.
     InvalidFrame {
         /// The frame that was invalid.
@@ -1401,6 +1416,13 @@ impl Display for FortressError {
                     f,
                     "Spectator hosts diverged for player {} at frame {}.",
                     player, frame
+                )
+            },
+            Self::SpectatorStreamEnded { frame } => {
+                write!(
+                    f,
+                    "All spectator hosts disconnected; the input stream is truncated at frame {}.",
+                    frame
                 )
             },
             Self::InvalidFrame { frame, reason } => {

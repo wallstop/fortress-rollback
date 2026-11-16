@@ -349,6 +349,9 @@ where
 
     /// Contains all events to be forwarded to the user.
     event_queue: VecDeque<FortressEvent<T>>,
+    /// Per-poll endpoint events staged before handling, retained across polls so
+    /// the idle/steady network path does not allocate a fresh queue each tick.
+    pending_events: VecDeque<(Event<T>, Arc<[PlayerHandle]>, T::Address)>,
     /// Contains all local inputs not yet sent into the system, indexed by player handle.
     /// This should have inputs for every local player before calling `advance_frame`.
     local_inputs: Vec<Option<PlayerInput<T::Input>>>,
@@ -545,6 +548,16 @@ where
     /// so every genuine new attempt carries a strictly higher frame.
     /// Bounded: at most one entry per player handle.
     npeer_closed_attempt_frames: BTreeMap<PlayerHandle, Frame>,
+    /// Per-handle serve-retry backoff. A serve that times out records the frame
+    /// before which no new serve for that handle may open. The delay grows
+    /// exponentially with consecutive timeouts, so a peer that can drive the
+    /// handshake but never completes it cannot keep the host paused in a
+    /// near-continuous duty cycle: each aborted window must be repaid with
+    /// host progress (frames advanced solo) before the next attempt.
+    ///
+    /// Cleared on a successful join. Bounded: at most one entry per reserved
+    /// handle.
+    serve_retry: BTreeMap<PlayerHandle, ServeRetry>,
 }
 
 #[cfg(feature = "hot-join")]
@@ -563,6 +576,7 @@ impl<T: Config> Default for HotJoinState<T> {
             npeer_next_serve_min_frame: Frame::NULL,
             pending_reactivation: None,
             npeer_closed_attempt_frames: BTreeMap::new(),
+            serve_retry: BTreeMap::new(),
         }
     }
 }
@@ -610,6 +624,68 @@ impl<T: Config> HotJoinState<T> {
                 .iter()
                 .all(|handle| self.reserved_slots.contains(handle))
     }
+
+    /// Returns `true` when any handle owned by `endpoint` is still inside a
+    /// timed-out serve's retry backoff (its next serve may not open yet).
+    ///
+    /// Used to withhold simulation inputs from a reserved endpoint only during
+    /// that bounded window: the abandoned joiner cannot consume them, and
+    /// sending would fill its `pending_output` before the retry can open.
+    /// Normal reserved-slot traffic outside a backoff window is unchanged.
+    fn endpoint_is_in_serve_backoff(&self, endpoint: &UdpProtocol<T>, saved_frame: Frame) -> bool {
+        endpoint
+            .handles()
+            .iter()
+            .any(|handle| !self.serve_retry_allows(*handle, saved_frame))
+    }
+
+    /// Whether a new serve for `handle` may open at `saved_frame`.
+    ///
+    /// Serves are gated only while a previous timeout's backoff refund is
+    /// outstanding. A peer that completes a join clears its retry entry; a peer
+    /// that never acks must let the host advance a growing number of frames
+    /// between aborted windows.
+    fn serve_retry_allows(&self, handle: PlayerHandle, saved_frame: Frame) -> bool {
+        self.serve_retry
+            .get(&handle)
+            .is_none_or(|retry| saved_frame >= retry.min_saved_frame)
+    }
+
+    /// Records one timed-out serve and schedules the next eligible frame.
+    ///
+    /// The delay doubles per consecutive timeout (1, 2, 4, ... frames) up to a
+    /// 256-frame cap, so cumulative paused time can never dominate long-run host
+    /// progress while still allowing a genuinely recovered peer to retry within
+    /// a bounded number of frames. The delay is expressed in frames, not polls:
+    /// the host only advances while unpaused, so stalled polls do not repay it.
+    fn record_serve_timeout(&mut self, handle: PlayerHandle, served_frame: Frame) {
+        let retry = self.serve_retry.entry(handle).or_insert(ServeRetry {
+            consecutive_timeouts: 0,
+            min_saved_frame: Frame::NULL,
+        });
+        retry.consecutive_timeouts = retry.consecutive_timeouts.saturating_add(1);
+        let shift = retry.consecutive_timeouts.saturating_sub(1).min(8);
+        let backoff_frames = 1_u32 << shift;
+        let delta = i32::try_from(backoff_frames).unwrap_or(i32::MAX);
+        retry.min_saved_frame =
+            safe_frame_add!(served_frame, delta, "hot-join serve retry backoff");
+    }
+
+    /// Clears the retry backoff after a join completes for `handle`.
+    fn clear_serve_retry(&mut self, handle: PlayerHandle) {
+        self.serve_retry.remove(&handle);
+    }
+}
+
+/// Per-handle hot-join serve retry state (see
+/// [`HotJoinState::serve_retry`](HotJoinState::serve_retry)).
+#[cfg(feature = "hot-join")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ServeRetry {
+    /// Consecutive timed-out serves since the last success or clean reset.
+    consecutive_timeouts: u32,
+    /// Earliest saved frame at which a new serve for the handle may open.
+    min_saved_frame: Frame,
 }
 
 /// Coordinator-side state for a single in-flight **N-peer** join serve
@@ -2945,6 +3021,7 @@ impl<T: Config> P2PSession<T> {
             disconnect_frame: Frame::NULL,
             player_reg: players,
             event_queue,
+            pending_events: VecDeque::new(),
             local_inputs,
             desync_detection,
             local_checksum_history: BTreeMap::new(),
@@ -2989,6 +3066,7 @@ impl<T: Config> P2PSession<T> {
                 npeer_next_serve_min_frame: Frame::NULL,
                 pending_reactivation: None,
                 npeer_closed_attempt_frames: BTreeMap::new(),
+                serve_retry: BTreeMap::new(),
             },
             #[cfg(feature = "hot-join")]
             hot_join_timing,
@@ -3277,6 +3355,19 @@ impl<T: Config> P2PSession<T> {
             .any(|input| input.frame == Frame::NULL)
         {
             for endpoint in self.player_reg.remotes.values_mut() {
+                // A timed-out serve's retry backoff is a bounded no-serve window:
+                // the abandoned joiner cannot consume simulation inputs, and
+                // sending them would fill `pending_output` before the retry opens.
+                // Outside that window, reserved-slot input traffic is unchanged
+                // (the joiner's handshake and any pre-commit bridging still work).
+                #[cfg(feature = "hot-join")]
+                if self
+                    .hot_join
+                    .endpoint_is_in_serve_backoff(endpoint, self.sync_layer.last_saved_frame())
+                {
+                    endpoint.send_all_messages(&mut self.socket);
+                    continue;
+                }
                 endpoint.send_input(self.local_inputs.as_slice(), &self.local_connect_status);
                 endpoint.send_all_messages(&mut self.socket);
             }
@@ -3447,13 +3538,23 @@ impl<T: Config> P2PSession<T> {
         self.drive_floor_round();
 
         // run endpoint poll and get events from players and spectators. This will trigger additional packets to be sent.
-        let mut events = VecDeque::new();
+        self.pending_events.clear();
         let mut connect_status_nudge_sent = false;
         for endpoint in self.player_reg.remotes.values_mut() {
             let handles = endpoint.handles(); // Returns Arc<[PlayerHandle]>, cheap to clone
             let addr = endpoint.peer_addr();
             for event in endpoint.poll(&self.local_connect_status) {
-                events.push_back((event, handles.clone(), addr.clone()))
+                // reserve-in-loop: one event per endpoint message/transition; retained capacity makes the steady path allocation-free.
+                if self.pending_events.try_reserve(1).is_err() {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InternalError,
+                        "failed to reserve endpoint event staging"
+                    );
+                    return;
+                }
+                self.pending_events
+                    .push_back((event, handles.clone(), addr.clone()));
             }
             connect_status_nudge_sent |= endpoint.connect_status_nudge_sent_seen();
         }
@@ -3464,12 +3565,22 @@ impl<T: Config> P2PSession<T> {
             let handles = endpoint.handles(); // Returns Arc<[PlayerHandle]>, cheap to clone
             let addr = endpoint.peer_addr();
             for event in endpoint.poll(&self.local_connect_status) {
-                events.push_back((event, handles.clone(), addr.clone()))
+                // reserve-in-loop: see the remote-endpoint staging guard above.
+                if self.pending_events.try_reserve(1).is_err() {
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::InternalError,
+                        "failed to reserve spectator event staging"
+                    );
+                    return;
+                }
+                self.pending_events
+                    .push_back((event, handles.clone(), addr.clone()));
             }
         }
 
         // handle all events locally
-        for (event, handles, addr) in std::mem::take(&mut events) {
+        while let Some((event, handles, addr)) = self.pending_events.pop_front() {
             self.handle_event(event, handles, addr);
         }
 
@@ -3698,6 +3809,19 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
 
+            // Serve-retry backoff: after a timed-out attempt, the host must make
+            // bounded forward progress before another serve for this handle may
+            // pause it again. Checked after the activation frame exists but before
+            // capturing the (potentially large) snapshot.
+            if !self.hot_join.serve_retry_allows(handle, activation_frame) {
+                trace!(
+                    "Deferring hot-join serve for slot {}: retry backoff has not elapsed at saved frame {}",
+                    handle,
+                    activation_frame
+                );
+                continue;
+            }
+
             let snapshot = match crate::sessions::hot_join::capture_snapshot_with_max_wire_bytes(
                 &self.sync_layer,
                 activation_frame,
@@ -3883,9 +4007,11 @@ impl<T: Config> P2PSession<T> {
                 endpoint.set_defer_input_processing(false);
             }
             // Join complete: retire the serve and the reservation, resume solo+peer
-            // advancing (the host unpauses once `joining` is empty).
+            // advancing (the host unpauses once `joining` is empty), and clear the
+            // retry backoff so a later rejoin of this slot is not delayed.
             self.hot_join.joining.remove(&handle);
             self.hot_join.reserved_slots.remove(&handle);
+            self.hot_join.clear_serve_retry(handle);
 
             self.enqueue_event(FortressEvent::PeerJoined { handle, addr });
         }
@@ -3909,6 +4035,11 @@ impl<T: Config> P2PSession<T> {
             .map(|(&handle, _)| handle)
             .collect();
         for handle in timed_out {
+            let served_frame = self
+                .hot_join
+                .joining
+                .get(&handle)
+                .map_or(Frame::NULL, |serve| serve.frame);
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
@@ -3916,6 +4047,10 @@ impl<T: Config> P2PSession<T> {
                 handle,
                 serve_timeout_polls
             );
+            // Charge this attempt's paused window to the slot's retry budget: the
+            // next serve opens only after the host has advanced an exponentially
+            // growing number of frames solo (1, 2, 4, ...).
+            self.hot_join.record_serve_timeout(handle, served_frame);
             // Single teardown path — removes the serve AND clears the joiner
             // endpoint's stale pending_output. See `abort_hot_join_serve`.
             self.abort_hot_join_serve(handle);
@@ -4008,6 +4143,16 @@ impl<T: Config> P2PSession<T> {
         let snapshot_frame = self.sync_layer.last_saved_frame();
         if snapshot_frame.is_null() {
             // Nothing saved yet; the joiner will re-send. Skip this poll.
+            return;
+        }
+        // Retry backoff (shared with the 2-peer serve): an N-peer attempt that
+        // timed out also demands growing host progress before the next pause.
+        if !self.hot_join.serve_retry_allows(handle, snapshot_frame) {
+            trace!(
+                "Deferring N-peer hot-join serve for slot {}: retry backoff has not elapsed at saved frame {}",
+                handle,
+                snapshot_frame
+            );
             return;
         }
         let mut local_handles = self.player_reg.local_player_handles_iter().peekable();
@@ -4426,15 +4571,18 @@ impl<T: Config> P2PSession<T> {
         // Phase-4 timeout: liveness bound only (never a safety lever) — abort
         // and let the joiner retry.
         if serve.polls_since_serve >= self.hot_join.serve_timeout_polls {
+            let served_frame = serve.snapshot_frame;
+            let handle = serve.handle;
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
                 "N-peer hot-join serve for slot {} timed out after {} polls (joiner_acked={}, pending survivor acks={}); aborting (slot stays reserved/frozen, coordinator resumes)",
-                serve.handle,
+                handle,
                 self.hot_join.serve_timeout_polls,
                 serve.joiner_acked,
                 serve.pending_acks.len()
             );
+            self.hot_join.record_serve_timeout(handle, served_frame);
             self.abort_npeer_serve(serve);
             return;
         }
@@ -4458,6 +4606,7 @@ impl<T: Config> P2PSession<T> {
 
         // Pre-commit frozen bound, read before the status flip below: needed
         // to arm the pre-activation serving floor.
+        self.hot_join.clear_serve_retry(handle);
         let frozen_bound = self
             .local_connect_status
             .get(handle.as_usize())
@@ -10033,6 +10182,11 @@ impl<T: Config> P2PSession<T> {
         for &handle in handles {
             if handle.is_valid_player_for(self.num_players) {
                 self.hot_join.reserved_slots.insert(handle);
+                // A re-armed endpoint implies the peer's protocol era is gone and
+                // the next attempt comes from a fresh session, so it starts with a
+                // clean retry budget rather than inheriting timed-out-attempt
+                // backoff.
+                self.hot_join.clear_serve_retry(handle);
             }
         }
     }
@@ -11570,6 +11724,12 @@ impl<T: Config> P2PSession<T> {
     /// whenever confirmation stalls at all, which is exactly the intended
     /// carrier semantics there.
     fn gossip_holds_confirmation_below_receipts(&self) -> bool {
+        // Leg 1 ("the prediction window is exhausted") is exactly what the
+        // previous `advance_frame` recorded. Skipping the fold here while the
+        // window still has room is safe: `gap` can only grow as frames advance,
+        // so a non-exhausted window cannot satisfy the condition now. Lockstep
+        // (`max_prediction == 0`) keeps the fold unconditional — every stall is
+        // an exhausted window there.
         let confirmed = self.confirmed_frame();
         let gap = self
             .sync_layer
@@ -12316,6 +12476,9 @@ impl<T: Config> P2PSession<T> {
                     for handle in player_handles.iter() {
                         self.abort_hot_join_serve(*handle);
                         self.abort_npeer_serve_for_handle(*handle);
+                        // A dead endpoint's next attempt is a fresh session; do
+                        // not make it inherit the timed-out attempt's backoff.
+                        self.hot_join.clear_serve_retry(*handle);
                     }
                     // Re-arm the dead endpoint back to the pristine reserved
                     // shape (chunk N5 fix round 1). The endpoint synchronized
@@ -13851,6 +14014,97 @@ mod tests {
                 .message
                 .contains("Skipping hot-join serve: activation frame")),
             "an out-of-window activation frame must be reported"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn hot_join_timed_out_serves_are_bounded_by_exponential_backoff() {
+        let addr = test_addr(9131);
+        let handle = PlayerHandle::new(1);
+        let mut host: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_reserved_player(addr, handle)
+            .expect("reserved slot")
+            .with_hot_join_serve_timeout_polls(2)
+            .expect("serve timeout")
+            .start_p2p_session_skip_hot_join_build_guards_for_test(DummySocket)
+            .expect("staged serving host");
+        host.poll_remote_clients();
+        advance_host_and_save(&mut host);
+
+        let mut previous_serve_frame: Option<Frame> = None;
+        let mut max_send_queue = 0_usize;
+        for cycle in 0_u32..12 {
+            // Open the next serve after the previous cycle's backoff.
+            host.player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("reserved endpoint")
+                .set_pending_join_request_for_test(1);
+            host.poll_hot_join_host();
+            let serve_frame = host
+                .hot_join
+                .joining
+                .get(&handle)
+                .map(|serve| serve.frame)
+                .expect("a serve opens once the retry backoff has elapsed");
+            if let Some(previous) = previous_serve_frame {
+                let expected_backoff = 1_i32 << (cycle - 1).min(8);
+                assert_eq!(
+                    serve_frame - previous,
+                    expected_backoff,
+                    "cycle {cycle} must require exactly {expected_backoff} advanced frame(s) \
+                     between timed-out serves (previous {previous}, current {serve_frame})"
+                );
+            }
+            previous_serve_frame = Some(serve_frame);
+
+            // Force the Phase-4 timeout for this serve.
+            host.hot_join
+                .joining
+                .get_mut(&handle)
+                .expect("open serve")
+                .polls_since_serve = host.hot_join.serve_timeout_polls;
+            host.poll_hot_join_host();
+            assert!(
+                host.hot_join.joining.is_empty(),
+                "cycle {cycle}: the timed-out serve must abort"
+            );
+
+            // An immediate re-request must NOT re-open the pause: it is drained
+            // while the backoff is outstanding.
+            host.player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("reserved endpoint")
+                .set_pending_join_request_for_test(1);
+            host.poll_hot_join_host();
+            assert!(
+                host.hot_join.joining.is_empty(),
+                "cycle {cycle}: a re-request before the backoff elapses must not re-open the serve"
+            );
+
+            // Repay the backoff with real host progress. The next cycle's open is
+            // the non-vacuity check that exactly this much progress suffices.
+            let backoff = 1_usize << cycle.min(8);
+            for _ in 0..backoff {
+                advance_host_and_save(&mut host);
+            }
+            if let Ok(stats) = host.network_stats(handle) {
+                max_send_queue = max_send_queue.max(stats.send_queue_len);
+            }
+        }
+
+        // The abandoned joiner's send queue never accumulates across retry
+        // windows: each abort clears it, so its high-water mark is bounded by
+        // the largest single backoff window, not by the number of cycles.
+        assert!(
+            max_send_queue <= 257,
+            "timed-out serves must not accumulate pending output across cycles; got {max_send_queue}"
         );
     }
 

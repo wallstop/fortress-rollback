@@ -10,6 +10,8 @@ _None._
 
 ## Future
 
-- Bound cumulative hot-join host pause across re-opened serves ([#433](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/433)): a peer that syncs but never acks must not hold the host paused indefinitely. Exit when a deterministic test bounds total stalled polls or enforces backoff.
-- Retain final spectator host inputs arriving after the Goodbye poll ([#434](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/434)): choose a bounded tombstone or an explicit terminal-truncation state. Exit with a deterministic later-poll test.
-- Remove duplicate per-frame confirmed folds and receive staging allocations ([#432](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/432)): exit with a benchmark plus tightened allocation contract and unchanged wire bytes.
+- Reduce the remaining per-frame confirmation folds and send-side encode temporaries
+  ([#432](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/432)): the receive
+  staging and poll-queue allocations are gone; the suggested `poll_remote_clients` fold gate was
+  measured and rejected because it shifted the loss-cell traffic baseline by +5% for a sub-µs
+  saving. Exit with a fold-sharing design that leaves the deterministic sweep bytes unchanged.

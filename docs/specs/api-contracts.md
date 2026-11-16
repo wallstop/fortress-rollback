@@ -806,7 +806,9 @@ remote-frame aging assumes symmetric one-way delay (`RTT/2`), so asymmetric path
 - May return multiple frames if catching up.
 - A failover spectator with no remaining hosts may still advance through
   already-buffered frames. After the buffered viewable frames drain,
-  `PredictionThreshold` is returned.
+  `SpectatorStreamEnded { frame }` is returned: no host remains to supply the
+  missing frame, and inputs arriving later from a removed host are rejected as
+  unknown sources.
 - For redundant hosts, unresolved frames use the highest-priority currently
   connected host by `start_spectator_session_multi` order as the canonical
   source. Lower-priority host snapshots are provisional while a higher-priority
@@ -825,8 +827,10 @@ remote-frame aging assumes symmetric one-way delay (`RTT/2`), so asymmetric path
 **Errors:**
 
 - `NotSynchronized` - not yet synchronized with host
-- `PredictionThreshold` - no viewable frame is available yet, or all cleanly
-  disconnected hosts have drained their buffered viewable frames
+- `PredictionThreshold` - no viewable frame is available yet while at least one
+  host remains connected
+- `SpectatorStreamEnded { frame }` - every host disconnected and the buffered
+  stream is exhausted before `frame` could be completed
 - `SpectatorDivergence { frame, player }` - connected redundant hosts disagreed
   on the same player/frame and the spectator has failed closed
 

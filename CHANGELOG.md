@@ -67,13 +67,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   datagram is decoded before that input within the same poll. Previously the host was tombstoned
   on the first `Goodbye` event and the already-drained input was skipped, leaving the spectator
   permanently stalled on `PredictionThreshold` for that frame.
+- **Pre-existing:** hot-join serve timeouts now refund their paused window with host progress.
+  After each timed-out serve, the next attempt for that slot requires an exponentially growing
+  number of frames to elapse (1, 2, 4, ... up to 256) before it may pause the host again, and
+  reserved slots are excluded from `send_input` so the abandoned joiner's queue no longer grows
+  during the backoff. A peer that can synchronize the joiner endpoint but never acks can no
+  longer hold the host paused in a near-continuous duty cycle.
 - **Pre-existing:** coordinated graceful-drop prepares now require exactly the current survivor
   set. A prepare that omitted (or invented) a running survivor is rejected instead of letting a
   single peer mint a survivor-quorum certificate for an uninvolved third slot, and stale-era
   prepares are rejected after membership changes.
+- **Pre-existing:** per-frame network hot paths no longer allocate per-packet receive staging.
+  Decoded input frames and their per-player input vectors stay inline for up to four entries, the
+  per-packet connect-status snapshot is reused while gossip is unchanged, and
+  `P2PSession::poll_remote_clients` retains its event-staging queue across polls. A warmed
+  one-frame receive poll drops from 8 to 6 allocation operations (about 256 fewer bytes) at 2-16
+  players.
 
 ### Changed
 
+- **Breaking:** `FortressError::SpectatorStreamEnded { frame }` is returned when a spectator has
+  no connected hosts left and the next frame's input never arrived before the final host was
+  removed. The spectator still drains every frame buffered before the disconnect, then reports
+  this explicit terminal state instead of retrying `PredictionThreshold` forever. Inputs arriving
+  from an already-removed host in a later poll are rejected as unknown sources. Exhaustive
+  `FortressError` matches need an arm for this variant; stop the session and start a fresh one to
+  resume spectating.
 - **Breaking:** the development-only `z3-verification` feature now uses `z3` 0.21 and requires
   Z3 4.13.3 or newer; Z3 5.1.0 is recommended so native enum definitions match the bindings. The
   existing `z3-verification-bundled` feature now uses upstream's supported vendored build path for
