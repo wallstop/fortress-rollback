@@ -7209,6 +7209,53 @@ mod tests {
     }
 
     #[test]
+    fn spectator_at_the_catchup_threshold_advances_at_normal_speed() {
+        // The contract is "more than max_frames_behind" triggers catch-up. At
+        // the exact boundary a larger catchup_speed must not apply, so one call
+        // advances exactly one (normal-speed) frame.
+        let mut session =
+            create_test_spectator_session_with_config(2, 60, 2, 3).expect("spectator session");
+        session.state = SessionState::Running;
+        session.current_frame = Frame::NULL;
+        session.last_recv_frame = Frame::new(1);
+        for frame in [Frame::new(0), Frame::new(1)] {
+            let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+            session.inputs[buffer_index][0] = PlayerInput::new(frame, frame.as_i32() as u8);
+            session.inputs[buffer_index][1] =
+                PlayerInput::new(frame, frame.as_i32().saturating_add(10) as u8);
+        }
+
+        let requests = session.advance_frame().expect("boundary advance succeeds");
+
+        assert_eq!(session.current_frame(), Frame::new(0));
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| matches!(request, FortressRequest::AdvanceFrame { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn spectator_zero_catchup_with_a_live_host_returns_ok_empty_while_behind() {
+        // Compatibility contract: while at least one host remains, zero
+        // catch-up means "attempt no advance while behind", even though the
+        // same session drains buffered frames once every host has left.
+        let mut session =
+            create_test_spectator_session_with_config(2, 60, 0, 0).expect("spectator session");
+        session.state = SessionState::Running;
+        session.current_frame = Frame::NULL;
+        session.last_recv_frame = Frame::new(40);
+
+        let requests = session
+            .advance_frame()
+            .expect("a host-present zero catch-up call must be a compatibility no-op");
+        assert!(requests.is_empty());
+        assert_eq!(session.current_frame(), Frame::NULL);
+    }
+
+    #[test]
     fn spectator_all_hosts_dropped_with_catchup_disabled_drains_then_reports_terminal_truncation() {
         // `catchup_speed == 0` deliberately skips catch-up advances while a
         // host remains, but the terminal drain must still deliver the buffered
