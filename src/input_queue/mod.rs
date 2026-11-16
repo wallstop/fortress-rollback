@@ -3535,15 +3535,18 @@ mod input_queue_tests {
     #[test]
     fn try_with_queue_length_reports_allocation_failure_for_impossible_length() {
         let err = InputQueue::<TestConfig>::try_with_queue_length(0, usize::MAX).unwrap_err();
+        // The error reports the requested element count through a `u64`, which
+        // is `usize::MAX` on 64-bit targets and `u32::MAX` on 32-bit targets.
+        let expected = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
 
         assert!(matches!(
             err,
             FortressError::InvalidRequestStructured {
                 kind: InvalidRequestKind::AllocationFailed {
                     context: "input_queue.inputs",
-                    requested_elements: u64::MAX,
+                    requested_elements,
                 }
-            }
+            } if requested_elements == expected
         ));
     }
 

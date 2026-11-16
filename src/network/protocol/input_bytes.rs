@@ -719,15 +719,17 @@ mod tests {
         let Err(error) = InputBytes::zeroed::<OneByteInputConfig>(usize::MAX) else {
             panic!("oversized zeroed input buffer unexpectedly succeeded");
         };
+        // `usize::MAX` is 32-bit on 32-bit targets; the diagnostic widens it.
+        let expected = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
 
         assert!(matches!(
             error,
             FortressError::InvalidRequestStructured {
                 kind: crate::InvalidRequestKind::AllocationFailed {
                     context: "input_bytes.zeroed",
-                    requested_elements: u64::MAX,
+                    requested_elements,
                 }
-            }
+            } if requested_elements == expected
         ));
     }
 

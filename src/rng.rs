@@ -814,10 +814,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn test_gen_range_usize_large() {
         let mut rng = Pcg32::seed_from_u64(42);
 
-        // Test with a range larger than u32::MAX
+        // Test with a range larger than u32::MAX. A 32-bit `usize` cannot even
+        // represent `large_start`, so this range is 64-bit-only.
         let large_start: usize = (u32::MAX as usize) + 1000;
         let large_end: usize = large_start + 1000;
 

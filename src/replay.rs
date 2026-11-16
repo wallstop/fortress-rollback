@@ -1033,7 +1033,14 @@ mod tests {
 
         // The byte bound fired before any large reservation was attempted.
         assert!(err.contains("frames"), "message was: {err}");
-        assert!(err.contains("exceeds"), "message was: {err}");
+        // On 64-bit targets the element-count x minimum-length product does
+        // not overflow and reports "exceeds the 0 remaining byte(s)"; on
+        // 32-bit targets that product overflows and reports "overflows the
+        // byte bound". Both reject the frame count before allocating.
+        assert!(
+            err.contains("exceeds") || err.contains("overflows"),
+            "message was: {err}"
+        );
     }
 
     #[test]

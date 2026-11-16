@@ -779,3 +779,36 @@ def test_emscripten_dependency_check_quotes_configured_cargo_binary(
 
     assert result.returncode == 0, result.stderr
     assert "free of browser-only JS bridge crates" in result.stdout
+
+
+def test_cross_arch_runtime_executes_arm_and_32_bit_usize_targets() -> None:
+    """The runtime parity lanes must actually execute, not only cross-compile."""
+    workflow = _load_ci_rust_workflow()
+    job = workflow["jobs"]["cross-arch-runtime"]
+    entries = {entry["name"]: entry for entry in job["strategy"]["matrix"]["include"]}
+
+    assert set(entries) == {"aarch64-qemu", "i686-32bit"}
+    assert entries["aarch64-qemu"]["target"] == "aarch64-unknown-linux-gnu"
+    assert entries["i686-32bit"]["target"] == "i686-unknown-linux-gnu"
+
+    # i686 has the same 32-bit `usize` as wasm32; keep the deterministic suite
+    # while excluding the nightly simulation and multi-process tiers.
+    assert "not test(simulation::)" in entries["i686-32bit"]["filter"]
+    assert "not test(network::multi_process::)" in entries["i686-32bit"]["filter"]
+
+    env = job["env"]
+    assert env["CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER"].startswith(
+        "qemu-aarch64"
+    )
+    assert env["CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER"] == "i686-linux-gnu-gcc"
+
+    runs = [step.get("run", "") for step in job["steps"]]
+    assert any(
+        "cargo nextest run" in run
+        and "--profile ci-cross-arch" in run
+        and "--target ${{ matrix.target }}" in run
+        for run in runs
+    ), (
+        "the cross-architecture matrix must run nextest under each matrix "
+        "target with the emulation-sized profile"
+    )

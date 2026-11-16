@@ -130,11 +130,12 @@ use std::sync::{Arc, Mutex};
 
 use fortress_rollback::{
     DesyncDetection, FortressEvent, Frame, Message, NonBlockingSocket, PlayerHandle, PlayerType,
-    SessionBuilder, SessionState,
+    ProtocolConfig, SessionBuilder, SessionState,
 };
 
 use crate::common::reorder_socket::create_reorder_mesh_triple;
 use crate::common::stubs::{GameStub, StateStub, StubConfig, StubInput};
+use crate::common::test_clock::TestClock;
 
 /// A [`NonBlockingSocket`] wrapper that defers every outbound message by a fixed
 /// number of "release ticks". Messages are NEVER dropped: each is stored with a
@@ -1399,16 +1400,27 @@ fn run_reorder_choreography(base_port: u16) -> ReorderOutcome {
 
     let ([sock_a, sock_b, sock_c], links) = create_reorder_mesh_triple(addrs);
 
+    // The protocol's retry, keepalive, quality-report, and pending-output
+    // timers all read the injected clock. Without one, a slow or contended
+    // host changes which messages are retransmitted on which poll, and the
+    // "pure function of the choreography" determinism guard fails across
+    // architectures (observed under aarch64 QEMU). Time advances only when
+    // `pump` says so.
+    let clock = TestClock::new();
     let build = |local: usize, sock| {
         let mut b = SessionBuilder::<InjConfig>::new()
             .with_num_players(3)
             .unwrap()
             .with_max_prediction_window(MAX_PREDICTION)
+            .with_protocol_config(ProtocolConfig {
+                protocol_rng_seed: Some(0x0003_6001 + u64::try_from(local).unwrap_or(0)),
+                clock: Some(clock.as_protocol_clock()),
+                ..ProtocolConfig::default()
+            })
             .with_desync_detection_mode(DesyncDetection::On { interval: INTERVAL })
             // The held links carry no traffic for a handful of iterations of
-            // wall-clock time; push the (wall-clock-based) disconnect and
-            // notify timers out of reach so a slow CI machine cannot turn the
-            // pure-reordering choreography into a disconnect.
+            // virtual time; push the disconnect and notify timers out of reach
+            // so the pure-reordering choreography can never disconnect.
             .with_disconnect_timeout(std::time::Duration::from_secs(3600))
             .with_disconnect_notify_delay(std::time::Duration::from_secs(3600));
         for (h, addr) in addrs.iter().enumerate() {
@@ -1430,6 +1442,7 @@ fn run_reorder_choreography(base_port: u16) -> ReorderOutcome {
             for s in sessions.iter_mut() {
                 s.poll_remote_clients();
             }
+            clock.advance(std::time::Duration::from_millis(16));
         }
     };
 
