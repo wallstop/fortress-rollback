@@ -7209,6 +7209,24 @@ mod tests {
     }
 
     #[test]
+    fn spectator_zero_catchup_with_a_live_host_returns_ok_empty_while_behind() {
+        // Compatibility contract: while at least one host remains, zero
+        // catch-up means "attempt no advance while behind", even though the
+        // same session drains buffered frames once every host has left.
+        let mut session =
+            create_test_spectator_session_with_config(2, 60, 0, 0).expect("spectator session");
+        session.state = SessionState::Running;
+        session.current_frame = Frame::NULL;
+        session.last_recv_frame = Frame::new(40);
+
+        let requests = session
+            .advance_frame()
+            .expect("a host-present zero catch-up call must be a compatibility no-op");
+        assert!(requests.is_empty());
+        assert_eq!(session.current_frame(), Frame::NULL);
+    }
+
+    #[test]
     fn spectator_all_hosts_dropped_with_catchup_disabled_drains_then_reports_terminal_truncation() {
         // `catchup_speed == 0` deliberately skips catch-up advances while a
         // host remains, but the terminal drain must still deliver the buffered
