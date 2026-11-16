@@ -873,13 +873,16 @@ impl<T: Config> SpectatorSession<T> {
         // Once every host has disconnected there is no source left for the missing
         // frame: a final input that arrives in a later poll is rejected as an unknown
         // source after the host slot is removed. Report the terminal truncation
-        // explicitly instead of wedging callers on PredictionThreshold forever.
+        // explicitly instead of wedging callers on PredictionThreshold forever. This
+        // outranks the catch-up-disabled compatibility behavior: `catchup_speed == 0`
+        // makes no advance attempt while behind, so without this check a drained
+        // session would return Ok(empty) on every call forever.
+        if self.hosts.is_empty() && requests.is_empty() {
+            return Err(FortressError::SpectatorStreamEnded {
+                frame: self.current_frame.try_add(1)?,
+            });
+        }
         if frames_to_advance > 0 && requests.is_empty() {
-            if self.hosts.is_empty() {
-                return Err(FortressError::SpectatorStreamEnded {
-                    frame: self.current_frame.try_add(1)?,
-                });
-            }
             return Err(FortressError::PredictionThreshold);
         }
 
@@ -7194,6 +7197,25 @@ mod tests {
         assert!(matches!(
             session.advance_frame(),
             Err(FortressError::SpectatorStreamEnded { frame }) if frame == Frame::new(2)
+        ));
+    }
+
+    #[test]
+    fn spectator_all_hosts_dropped_with_catchup_disabled_reports_terminal_truncation() {
+        // `catchup_speed == 0` deliberately skips catch-up advances while
+        // behind, but it must not turn the drained-host terminal state into an
+        // infinite Ok(empty) stream: no future host can supply the missing
+        // frame.
+        let mut session =
+            create_test_spectator_session_with_config(2, 60, 10, 0).expect("spectator session");
+        session.state = SessionState::Running;
+        session.hosts.clear();
+        session.current_frame = Frame::NULL;
+        session.last_recv_frame = Frame::new(40);
+
+        assert!(matches!(
+            session.advance_frame(),
+            Err(FortressError::SpectatorStreamEnded { frame }) if frame == Frame::new(0)
         ));
     }
 

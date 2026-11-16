@@ -3630,7 +3630,8 @@ exact structured error for invalid spectator configuration. The compatibility
 `start_spectator_session*` methods map startup errors to `None`.
 `catchup_speed == 0` is allowed for compatibility. If catch-up mode is
 triggered with zero speed, no frame is attempted and `advance_frame` returns
-`Ok(<empty>)`.
+`Ok(<empty>)` while at least one host remains. Once every host has left, that
+terminal drain instead reports `SpectatorStreamEnded { frame }`.
 
 When `enable_rewind` is true, each spectator advance emits a `SaveGameState`
 immediately before the matching `AdvanceFrame`, and `seek_to_frame(frame)` can
