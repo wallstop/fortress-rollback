@@ -2005,8 +2005,9 @@ fn divergence_frame_uses_minimum_and_checksum_only_stays_unknown() {
 
 /// CAP matrix row 1: a symmetric two-component partition under
 /// `ContinueWithout` must fail **closed** on every component at the same
-/// certified cut, never keep confirming into two silent histories. Both the
-/// even bisection (2/2) and the odd singleton isolation (2/1) are covered.
+/// certified cut, never keep confirming into two silent histories. The 1v1
+/// shell, the even bisection (2/2), and the odd singleton isolation (2/1) are
+/// all covered.
 ///
 /// This is the component-scoped counterpart to the single-history oracle: the
 /// global live-peer minimum cannot describe a partition, so each component's
@@ -2025,8 +2026,10 @@ fn symmetric_partition_components_fail_closed_without_fork() {
 
     // Even peer counts bisect into two equal components; odd peer counts
     // isolate a singleton, so the majority component has two independent
-    // survivors. Both shapes must fail closed today.
-    for component in [vec![0, 0, 1, 1], vec![0, 0, 1]] {
+    // survivors. The two-player shell is the minimal 1/1 case: both peers are
+    // singleton components and neither can certify a survivor majority. Every
+    // shape must fail closed today.
+    for component in [vec![0, 1], vec![0, 0, 1, 1], vec![0, 0, 1]] {
         let case = SweepCase::base(component.len(), ScenarioKind::PermanentContinue);
         check_partition_components_fail_closed(case, component, PARTITION_CONFIRM_ALLOWANCE);
     }
@@ -2080,15 +2083,13 @@ fn check_partition_components_fail_closed(case: SweepCase, component: Vec<usize>
         "every component must fail closed, got {:?}",
         evidence.final_states
     );
-    assert_eq!(
-        report
-            .peer_event_counts
-            .get(&EventKind::Disconnected)
-            .copied()
-            .unwrap_or(0),
-        0,
-        "a failed-closed partition must not invent a peer removal"
-    );
+    for kind in [EventKind::Disconnected, EventKind::PeerDropped] {
+        assert_eq!(
+            report.peer_event_counts.get(&kind).copied().unwrap_or(0),
+            0,
+            "a failed-closed partition must not emit {kind:?} without survivor quorum"
+        );
+    }
     assert!(
         typed_safe_failure_diagnostics_hold(
             &report,
@@ -2732,15 +2733,16 @@ fn healed_bisection_components(n: usize, split: usize) -> Vec<usize> {
 
 /// CAP matrix heal/reflap row: a symmetric partition that outlives the
 /// disconnect timeout must not resume as two live confirmed histories after
-/// the link heals. Neither even split (2/2 at N=4, 4/4 at N=8) can form a
-/// strict survivor majority of the agreed membership, so both components fail
-/// closed at their shared cut. The heal is proven to fire (`NetworkResumed`),
-/// so the terminal state is not a vacuous "the partition never healed".
+/// the link heals. Neither the 1/1 shell nor an even split (2/2 at N=4, 4/4 at
+/// N=8) can form a strict survivor majority of the agreed membership, so both
+/// components fail closed at their shared cut. The heal is proven to fire
+/// (`NetworkResumed`), so the terminal state is not a vacuous "the partition
+/// never healed".
 #[test]
 fn healed_symmetric_partition_without_survivor_quorum_stays_failed_closed() {
     const HEAL_CONFIRM_ALLOWANCE: i32 = 2;
 
-    for (n, split) in [(4, 2), (8, 4)] {
+    for (n, split) in [(2, 1), (4, 2), (8, 4)] {
         let schedule = disruption_schedule(n, healed_bisection_events(n, split));
         let component = healed_bisection_components(n, split);
         let mut options = disruption_options(component.clone());
