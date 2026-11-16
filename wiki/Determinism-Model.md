@@ -442,7 +442,7 @@ proptest! {
 | -------------- | ------------------ | --------------------------------- |
 | x86_64 Linux   | ✅ Verified         | Primary development platform      |
 | x86_64 Windows | ✅ Verified         | Workspace suite (minus nightly simulation and multi-process tiers) plus the native replay fixture runs on every main/merge-queue CI run |
-| x86_64 macOS   | ✅ Verified         | Workspace suite (minus nightly simulation and multi-process tiers) plus the native replay fixture runs on every main/merge-queue CI run |
+| x86_64 macOS   | ⚠️ Test Required    | No Intel macOS CI lane: `macos-latest` is Apple silicon (the aarch64 row below covers it) |
 | i686 Linux     | ✅ Verified         | Full workspace suite (minus nightly simulation and multi-process tiers) runs natively with a 32-bit `usize` on every main/merge-queue CI run, pinning pointer-width hashing, checksums, and allocation diagnostics |
 | aarch64 Linux  | ✅ Verified         | Full workspace suite (minus proptest-heavy property tests and nightly simulation/multi-process tiers) runs under QEMU on every main/merge-queue CI run; integer-only replay, hash, and checksum parity confirmed |
 | aarch64 macOS  | ✅ Verified         | Workspace suite (minus nightly simulation and multi-process tiers) plus the native replay fixture runs natively on GitHub's arm64 `macos-latest` runner (Apple silicon) on every main/merge-queue CI run |
@@ -452,10 +452,12 @@ proptest! {
 ### Cross-Platform Testing
 
 To verify cross-platform determinism, record a match once with replay recording enabled, then
-replay it with validation on the second target. The replay stores every confirmed input plus the
-checksum the recording peer observed, so a `FortressEvent::ReplayDesync` on the second target
-identifies the first divergent frame. See the [Match Replay System](Replay#validation-mode)
-for the recording and validation loops.
+replay it with validation on the second target. The replay stores every confirmed input and the
+checksum the recording peer observed for each frame that had one. A `FortressEvent::ReplayDesync`
+identifies a divergent frame only when that frame has a recorded checksum; frames without one are
+not compared. Check checksum coverage and `metadata.skipped_frames` before treating playback as a
+complete determinism check. See the [Match Replay System](Replay#validation-mode) for the
+recording and validation loops.
 
 The repository keeps this comparison running in CI rather than relying on manual review:
 

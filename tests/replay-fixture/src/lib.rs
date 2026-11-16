@@ -263,6 +263,11 @@ pub fn check_compression_parity() -> Result<(), String> {
         digest = digest_bytes(digest, &encoded);
         let decoded = fortress_rollback::__internal::decode(&reference, &encoded)
             .map_err(|error| format!("{label} compression failed to decode: {error}"))?;
+        if decoded != batch {
+            return Err(format!(
+                "{label} decoded frame boundaries or payload differ from the input batch"
+            ));
+        }
         for frame in decoded {
             digest = digest_bytes(digest, &frame);
         }

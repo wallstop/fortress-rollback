@@ -2083,15 +2083,13 @@ fn check_partition_components_fail_closed(case: SweepCase, component: Vec<usize>
         "every component must fail closed, got {:?}",
         evidence.final_states
     );
-    assert_eq!(
-        report
-            .peer_event_counts
-            .get(&EventKind::Disconnected)
-            .copied()
-            .unwrap_or(0),
-        0,
-        "a failed-closed partition must not invent a peer removal"
-    );
+    for kind in [EventKind::Disconnected, EventKind::PeerDropped] {
+        assert_eq!(
+            report.peer_event_counts.get(&kind).copied().unwrap_or(0),
+            0,
+            "a failed-closed partition must not emit {kind:?} without survivor quorum"
+        );
+    }
     assert!(
         typed_safe_failure_diagnostics_hold(
             &report,
