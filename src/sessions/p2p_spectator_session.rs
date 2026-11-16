@@ -748,9 +748,18 @@ impl<T: Config> SpectatorSession<T> {
     /// # Errors
     /// - Returns [`NotSynchronized`] if the session is not yet ready to accept input.
     ///   In this case, you either need to start the session or wait for synchronization between clients.
+    /// - Returns [`PredictionThreshold`] while waiting for host inputs, as long as at
+    ///   least one host is still connected.
+    /// - Returns [`SpectatorStreamEnded`] once every host has disconnected and no
+    ///   host remains to complete synchronization or supply the next frame. The
+    ///   buffered prefix is drained first when the session was already running;
+    ///   later packets from a removed host are treated as unknown sources and
+    ///   cannot resume playback.
     ///
     /// [`RequestVec`]: crate::RequestVec
     /// [`NotSynchronized`]: FortressError::NotSynchronized
+    /// [`PredictionThreshold`]: FortressError::PredictionThreshold
+    /// [`SpectatorStreamEnded`]: FortressError::SpectatorStreamEnded
     #[must_use = "FortressRequests must be processed to advance the game state"]
     pub fn advance_frame(&mut self) -> FortressResult<RequestVec<T>> {
         let _violation_scope = self.scoped_violation_observer();
@@ -763,6 +772,17 @@ impl<T: Config> SpectatorSession<T> {
 
         if let Some(err) = self.spectator_divergence_error() {
             return Err(err);
+        }
+
+        // A host can send `Goodbye` after its sync binding but before the
+        // session ever sees `Synchronized`. Once that last host is removed no
+        // future host can complete synchronization, so report the terminal
+        // truncation here rather than returning `NotSynchronized` forever. A
+        // running spectator still falls through to drain any buffered frames.
+        if self.hosts.is_empty() && self.state != SessionState::Running {
+            return Err(FortressError::SpectatorStreamEnded {
+                frame: self.current_frame.try_add(1)?,
+            });
         }
 
         if self.state != SessionState::Running {
@@ -849,7 +869,17 @@ impl<T: Config> SpectatorSession<T> {
         // Preserve the historical Ok(empty) result when no advance was even attempted
         // (e.g. catchup_speed == 0 while behind). Only surface "nothing available yet"
         // as PredictionThreshold when we actually tried to advance at least one frame.
+        //
+        // Once every host has disconnected there is no source left for the missing
+        // frame: a final input that arrives in a later poll is rejected as an unknown
+        // source after the host slot is removed. Report the terminal truncation
+        // explicitly instead of wedging callers on PredictionThreshold forever.
         if frames_to_advance > 0 && requests.is_empty() {
+            if self.hosts.is_empty() {
+                return Err(FortressError::SpectatorStreamEnded {
+                    frame: self.current_frame.try_add(1)?,
+                });
+            }
             return Err(FortressError::PredictionThreshold);
         }
 
@@ -4705,6 +4735,63 @@ mod tests {
     }
 
     #[test]
+    fn spectator_late_final_input_after_host_removal_reports_terminal_truncation() {
+        let host = test_addr(7320);
+        let messages = Arc::new(std::sync::Mutex::new(vec![(
+            host,
+            Message {
+                header: MessageHeader::new(1),
+                body: MessageBody::Goodbye(Goodbye { reason: 0 }),
+            },
+        )]));
+        let socket = QueuedReceiveSocket {
+            messages: Arc::clone(&messages),
+        };
+        let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
+            .with_num_players(2)
+            .expect("num_players")
+            .start_spectator_session(host, socket)
+            .expect("spectator session");
+        session.hosts[0].force_running_for_tests();
+
+        session.poll_remote_clients();
+        assert_eq!(session.num_hosts(), 0);
+        assert_eq!(
+            session.current_state(),
+            SessionState::Synchronizing,
+            "the host left before this spectator ever synchronized"
+        );
+
+        // The host's final input arrives in a later poll, after its slot was
+        // removed. It cannot be attributed to a host anymore.
+        messages.lock().expect("message queue lock").push((
+            host,
+            spectator_input_message(
+                Frame::new(0),
+                [11, 22],
+                vec![ConnectionStatus::default(); 2],
+            ),
+        ));
+        session.poll_remote_clients();
+        assert_eq!(session.metrics().unknown_source_packets, 1);
+        assert_eq!(session.last_recv_frame, Frame::NULL);
+
+        // The buffered prefix is exhausted and no host remains: report the
+        // truncation explicitly instead of the transient PredictionThreshold.
+        assert!(matches!(
+            session.advance_frame(),
+            Err(FortressError::SpectatorStreamEnded { frame }) if frame == Frame::new(0)
+        ));
+        assert!(
+            matches!(
+                session.advance_frame(),
+                Err(FortressError::SpectatorStreamEnded { frame }) if frame == Frame::new(0)
+            ),
+            "the terminal state must be stable across retries"
+        );
+    }
+
+    #[test]
     fn spectator_all_hosts_disconnect_with_conflict_latches_divergence() {
         let mut session: SpectatorSession<TestConfig> = deterministic_spectator_builder()
             .with_num_players(2)
@@ -7070,7 +7157,7 @@ mod tests {
     }
 
     #[test]
-    fn spectator_all_hosts_dropped_drains_buffered_frames_then_prediction_threshold() {
+    fn spectator_all_hosts_dropped_drains_buffered_frames_then_terminal_truncation() {
         let mut session = create_test_spectator_session().unwrap();
         session.state = SessionState::Running;
         session.hosts.clear();
@@ -7106,7 +7193,7 @@ mod tests {
 
         assert!(matches!(
             session.advance_frame(),
-            Err(FortressError::PredictionThreshold)
+            Err(FortressError::SpectatorStreamEnded { frame }) if frame == Frame::new(2)
         ));
     }
 
@@ -7146,7 +7233,7 @@ mod tests {
         }
         assert!(matches!(
             session.advance_frame(),
-            Err(FortressError::PredictionThreshold)
+            Err(FortressError::SpectatorStreamEnded { frame }) if frame == Frame::new(4)
         ));
     }
 

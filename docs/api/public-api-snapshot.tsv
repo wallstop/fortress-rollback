@@ -2,8 +2,8 @@
 # rustdoc-toolchain=nightly-2026-08-26
 # all-features-excludes=z3-verification,z3-verification-bundled (test/build-only)
 # generated-by=scripts/api/public_api_census.py
-# symbols=2750
-# textual-paths=2744
+# symbols=2756
+# textual-paths=2750
 path	kind	availability	documented	owner	usage-evidence	risk	disposition	alias-of	source
 fortress_rollback	module	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::BlankPrediction	struct	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/input_queue/prediction.rs
@@ -157,6 +157,8 @@ fortress_rollback::FortressError::SocketErrorStructured::kind	struct_field	no-de
 fortress_rollback::FortressError::SpectatorDivergence	variant	no-default+all-features	yes	core	public-data-shape	exhaustive-data-shape	keep-supported	-	src/error.rs
 fortress_rollback::FortressError::SpectatorDivergence::frame	struct_field	no-default+all-features	yes	core	public-data-shape	exhaustive-data-shape	keep-supported	-	src/error.rs
 fortress_rollback::FortressError::SpectatorDivergence::player	struct_field	no-default+all-features	yes	core	public-data-shape	exhaustive-data-shape	keep-supported	-	src/error.rs
+fortress_rollback::FortressError::SpectatorStreamEnded	variant	no-default+all-features	yes	core	public-data-shape	exhaustive-data-shape	keep-supported	-	src/error.rs
+fortress_rollback::FortressError::SpectatorStreamEnded::frame	struct_field	no-default+all-features	yes	core	public-data-shape	exhaustive-data-shape	keep-supported	-	src/error.rs
 fortress_rollback::FortressError::SpectatorTooFarBehind	variant	no-default+all-features	yes	core	public-data-shape	exhaustive-data-shape	keep-supported	-	src/error.rs
 fortress_rollback::FortressEvent	enum	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::FortressEvent::DesyncDetected	variant	no-default+all-features	yes	core	public-data-shape	exhaustive-data-shape	keep-supported	-	src/lib.rs
@@ -1157,6 +1159,8 @@ fortress_rollback::error::FortressError::SocketErrorStructured::kind	struct_fiel
 fortress_rollback::error::FortressError::SpectatorDivergence	variant	no-default+all-features	no	core	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorDivergence	src/error.rs
 fortress_rollback::error::FortressError::SpectatorDivergence::frame	struct_field	no-default+all-features	no	core	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorDivergence::frame	src/error.rs
 fortress_rollback::error::FortressError::SpectatorDivergence::player	struct_field	no-default+all-features	no	core	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorDivergence::player	src/error.rs
+fortress_rollback::error::FortressError::SpectatorStreamEnded	variant	no-default+all-features	no	core	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorStreamEnded	src/error.rs
+fortress_rollback::error::FortressError::SpectatorStreamEnded::frame	struct_field	no-default+all-features	no	core	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorStreamEnded::frame	src/error.rs
 fortress_rollback::error::FortressError::SpectatorTooFarBehind	variant	no-default+all-features	no	core	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorTooFarBehind	src/error.rs
 fortress_rollback::error::IndexOutOfBounds	alias	no-default+all-features	no	core	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::IndexOutOfBounds	src/error.rs
 fortress_rollback::error::IndexOutOfBounds::index	struct_field	no-default+all-features	no	core	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::IndexOutOfBounds::index	src/error.rs
@@ -1805,6 +1809,8 @@ fortress_rollback::prelude::FortressError::SocketErrorStructured::kind	struct_fi
 fortress_rollback::prelude::FortressError::SpectatorDivergence	variant	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorDivergence	src/error.rs
 fortress_rollback::prelude::FortressError::SpectatorDivergence::frame	struct_field	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorDivergence::frame	src/error.rs
 fortress_rollback::prelude::FortressError::SpectatorDivergence::player	struct_field	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorDivergence::player	src/error.rs
+fortress_rollback::prelude::FortressError::SpectatorStreamEnded	variant	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorStreamEnded	src/error.rs
+fortress_rollback::prelude::FortressError::SpectatorStreamEnded::frame	struct_field	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorStreamEnded::frame	src/error.rs
 fortress_rollback::prelude::FortressError::SpectatorTooFarBehind	variant	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressError::SpectatorTooFarBehind	src/error.rs
 fortress_rollback::prelude::FortressEvent	alias	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressEvent	src/prelude.rs
 fortress_rollback::prelude::FortressEvent::DesyncDetected	variant	no-default+all-features	yes	core	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::FortressEvent::DesyncDetected	src/lib.rs

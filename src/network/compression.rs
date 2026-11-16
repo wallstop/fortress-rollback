@@ -153,6 +153,27 @@ pub fn try_delta_encode<'a>(
     ref_bytes: &[u8],
     pending_input: impl Iterator<Item = &'a Vec<u8>>,
 ) -> Result<Vec<u8>, FortressError> {
+    let mut bytes = Vec::new();
+    try_delta_encode_into(ref_bytes, pending_input, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// Performs XOR delta encoding against a reference into a caller-owned buffer.
+///
+/// The scratch buffer is cleared first and keeps its capacity across calls, so
+/// the network send path can encode every packet without allocating a fresh
+/// delta buffer. The output bytes are identical to [`try_delta_encode`].
+///
+/// # Errors
+///
+/// Returns a structured [`FortressError`] when the reference is empty, an input
+/// width differs from the reference, or output allocation is refused.
+pub(crate) fn try_delta_encode_into<'a>(
+    ref_bytes: &[u8],
+    pending_input: impl Iterator<Item = &'a Vec<u8>>,
+    bytes: &mut Vec<u8>,
+) -> Result<(), FortressError> {
+    bytes.clear();
     if ref_bytes.is_empty() {
         report_violation!(
             ViolationSeverity::Error,
@@ -164,8 +185,6 @@ pub fn try_delta_encode<'a>(
         });
     }
 
-    let mut bytes = Vec::new();
-
     // Bind the iterator before reading its size hint (`size_hint` borrows it).
     // Each ACCEPTED input contributes exactly `ref_bytes.len()` bytes, so the
     // common case is a single allocation of `upper * ref_bytes.len()`. The hint
@@ -175,7 +194,7 @@ pub fn try_delta_encode<'a>(
     // can never make the output differ from pure incremental growth for any
     // iterator (honest or adversarial) -- see `try_reserve_hint`'s docs.
     let (_lower, upper) = pending_input.size_hint();
-    try_reserve_hint(&mut bytes, upper, ref_bytes.len());
+    try_reserve_hint(bytes, upper, ref_bytes.len());
 
     for input in pending_input {
         let input_bytes = input;
@@ -211,7 +230,21 @@ pub fn try_delta_encode<'a>(
             bytes.push(reference_byte ^ input_byte);
         }
     }
-    Ok(bytes)
+    Ok(())
+}
+
+/// [`try_encode`] with a caller-owned reusable XOR-delta scratch buffer.
+///
+/// The returned RLE output is still freshly allocated because it becomes the
+/// queued message body, but the intermediate delta buffer does not allocate per
+/// send once the scratch has warmed up.
+pub(crate) fn try_encode_with_scratch<'a>(
+    reference: &[u8],
+    pending_input: impl Iterator<Item = &'a Vec<u8>>,
+    scratch: &mut Vec<u8>,
+) -> Result<Vec<u8>, FortressError> {
+    try_delta_encode_into(reference, pending_input, scratch)?;
+    rle::try_encode(scratch)
 }
 
 /// Maps an RLE error to a `CompressionError`.
@@ -956,6 +989,36 @@ mod compression_tests {
             "expected capacity >= {}, got {}",
             expected.len(),
             encoded.capacity()
+        );
+    }
+
+    #[test]
+    fn try_encode_with_scratch_is_byte_identical_and_reuses_the_delta_buffer() {
+        let ref_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let inputs = [
+            vec![0x10, 0x20, 0x30, 0x40],
+            vec![0xFF, 0x00, 0xFF, 0x00],
+            vec![0x01, 0x02, 0x03, 0x04],
+        ];
+        let expected = try_encode(&ref_bytes, inputs.iter()).expect("reference encode");
+
+        let mut scratch = Vec::new();
+        let first = try_encode_with_scratch(&ref_bytes, inputs.iter(), &mut scratch)
+            .expect("scratch encode");
+        assert_eq!(first, expected, "scratch path must preserve the wire bytes");
+        let warmed_capacity = scratch.capacity();
+        assert!(
+            warmed_capacity > 0,
+            "the first encode must warm the scratch"
+        );
+
+        let second = try_encode_with_scratch(&ref_bytes, inputs.iter(), &mut scratch)
+            .expect("second scratch encode");
+        assert_eq!(second, expected);
+        assert_eq!(
+            scratch.capacity(),
+            warmed_capacity,
+            "a warmed scratch buffer must not reallocate"
         );
     }
 

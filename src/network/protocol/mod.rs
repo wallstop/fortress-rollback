@@ -25,7 +25,9 @@ use crate::frame_info::PlayerInput;
 use crate::hash::DeterministicHasher;
 use crate::metrics::{MessageKindCounts, PeerMetrics};
 use crate::network::codec;
-use crate::network::compression::{decode_with_max_len, try_encode};
+#[cfg(test)]
+use crate::network::compression::try_encode;
+use crate::network::compression::{decode_with_max_len, try_encode_with_scratch};
 use crate::network::messages::{
     ChecksumReport, ConnectionStatus, DropAbort, DropBackfill, DropCommit, DropPrepare, DropReport,
     FloorReply, FloorRequest, Goodbye, Input, InputAck, Message, MessageBody, MessageHeader,
@@ -48,6 +50,7 @@ use crate::{
 };
 use tracing::trace;
 
+use smallvec::SmallVec;
 use std::collections::vec_deque::Drain;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::TryFrom;
@@ -341,6 +344,13 @@ where
     peer_addr: T::Address,
     remote_conn_id: u32,
     peer_connect_status: Vec<ConnectionStatus>,
+    /// Last per-packet connect-status snapshot shared with decoded `Event::Input`s.
+    ///
+    /// Every input frame decoded from one packet observes the same immutable
+    /// status array. Keeping the most recent `Arc` and reusing it while the
+    /// incoming statuses are unchanged avoids a fresh allocation per packet in
+    /// steady state (status gossip is usually unchanged for long stretches).
+    peer_connect_status_snapshot: Option<Arc<[ConnectionStatus]>>,
 
     // ---- floor-round (double-failure-relay connected-relay reorder fix, S55) ----
     // A relay reports its per-slot pessimistic floor (the `min` over its own
@@ -409,6 +419,10 @@ where
 
     // input compression
     pending_output: VecDeque<InputBytes>,
+    /// Reusable XOR-delta scratch for [`Self::send_pending_output_with_decoded_byte_cap`]
+    /// and the connect-status nudge. Cleared per encode and kept across sends so
+    /// the intermediate delta buffer is not reallocated every packet.
+    encode_scratch: Vec<u8>,
     last_acked_input: InputBytes,
     max_prediction: usize,
     recv_inputs: BTreeMap<Frame, InputBytes>,
@@ -730,7 +744,7 @@ where
     I: Copy + Clone + PartialEq + Eq,
 {
     input_data: InputBytes,
-    player_inputs: Vec<PlayerInput<I>>,
+    player_inputs: SmallVec<[PlayerInput<I>; 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -978,6 +992,7 @@ impl<T: Config> UdpProtocol<T> {
             peer_addr,
             remote_conn_id: 0,
             peer_connect_status,
+            peer_connect_status_snapshot: None,
 
             // floor-round (double-failure-relay connected-relay reorder fix)
             round_floor,
@@ -991,6 +1006,7 @@ impl<T: Config> UdpProtocol<T> {
 
             // input compression
             pending_output: VecDeque::new(),
+            encode_scratch: Vec::new(),
             last_acked_input,
             max_prediction,
             recv_inputs,
@@ -1954,6 +1970,13 @@ impl<T: Config> UdpProtocol<T> {
             .saturating_sub(self.pending_output.len())
     }
 
+    /// Direct pending-output length for unit tests that must observe queue
+    /// growth without waiting for the public metrics sampling window.
+    #[cfg(all(test, feature = "hot-join"))]
+    pub(crate) fn pending_output_len_for_tests(&self) -> usize {
+        self.pending_output.len()
+    }
+
     fn pending_input_matches_reference_len(&self, input: &InputBytes, context: &str) -> bool {
         let reference_len = self.last_acked_input.bytes.len();
         if reference_len == 0 || input.bytes.len() != reference_len {
@@ -2049,14 +2072,18 @@ impl<T: Config> UdpProtocol<T> {
                 return;
             }
 
-            // encode all pending inputs to a byte buffer
-            body.bytes = match try_encode(
-                &self.last_acked_input.bytes,
-                self.pending_output
-                    .iter()
-                    .take(batch_len)
-                    .map(|gi| &gi.bytes),
-            ) {
+            // encode all pending inputs to a byte buffer, reusing this
+            // endpoint's delta scratch so only the queued RLE output allocates.
+            let encoded = {
+                let reference = self.last_acked_input.bytes.as_slice();
+                let pending = &self.pending_output;
+                try_encode_with_scratch(
+                    reference,
+                    pending.iter().take(batch_len).map(|gi| &gi.bytes),
+                    &mut self.encode_scratch,
+                )
+            };
+            body.bytes = match encoded {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     report_violation!(
@@ -2204,9 +2231,10 @@ impl<T: Config> UdpProtocol<T> {
         if !self.last_acked_input.frame.is_valid() {
             return false;
         }
-        let bytes = match try_encode(
+        let bytes = match try_encode_with_scratch(
             &self.last_acked_input.bytes,
             std::iter::once(&self.last_acked_input.bytes),
+            &mut self.encode_scratch,
         ) {
             Ok(bytes) => bytes,
             Err(err) => {
@@ -2778,6 +2806,22 @@ impl<T: Config> UdpProtocol<T> {
         }
     }
 
+    /// Returns the immutable snapshot shared by every input event decoded from
+    /// this packet, reusing the previous allocation while the statuses match.
+    fn packet_connect_status_snapshot(
+        &mut self,
+        statuses: &[ConnectionStatus],
+    ) -> Arc<[ConnectionStatus]> {
+        if let Some(cached) = self.peer_connect_status_snapshot.as_ref() {
+            if cached.as_ref() == statuses {
+                return Arc::clone(cached);
+            }
+        }
+        let snapshot: Arc<[ConnectionStatus]> = Arc::from(statuses);
+        self.peer_connect_status_snapshot = Some(Arc::clone(&snapshot));
+        snapshot
+    }
+
     fn on_input(&mut self, body: &Input) {
         // A hot-joiner defers ALL input processing until it has applied the
         // snapshot. Crucially this also defers the ack: acking now would let the
@@ -2883,7 +2927,7 @@ impl<T: Config> UdpProtocol<T> {
                 },
             };
 
-            let mut staged_frames = Vec::new();
+            let mut staged_frames: SmallVec<[StagedInputFrame<T::Input>; 4]> = SmallVec::new();
             if staged_frames.try_reserve(recv_inputs.len()).is_err() {
                 report_violation!(
                     ViolationSeverity::Error,
@@ -2968,12 +3012,10 @@ impl<T: Config> UdpProtocol<T> {
             if !staged_frames.is_empty() {
                 self.running_last_input_recv = self.now();
                 // Every event decoded from this packet observes the same immutable
-                // status snapshot. Allocate it once for the packet and share it
-                // across frames/players instead of cloning an N-player Vec into
-                // every per-player event. Keep this inside the progress branch:
-                // duplicate/nudge packets that stage no frames must not allocate.
-                let peer_connect_status: Arc<[ConnectionStatus]> =
-                    Arc::from(body.peer_connect_status.as_slice());
+                // status snapshot. Reuse the previous snapshot when unchanged, so
+                // steady-state status gossip does not allocate per packet.
+                let peer_connect_status =
+                    self.packet_connect_status_snapshot(&body.peer_connect_status);
                 for staged in staged_frames {
                     self.recv_inputs
                         .insert(staged.input_data.frame, staged.input_data);
@@ -10032,6 +10074,38 @@ mod tests {
             header: MessageHeader::new(HOT_JOIN_REMOTE_CONN_ID),
             body,
         });
+    }
+
+    #[test]
+    fn packet_connect_status_snapshot_is_reused_only_while_unchanged() {
+        let mut protocol = create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let statuses = vec![ConnectionStatus::default(); 2];
+
+        let first = protocol.packet_connect_status_snapshot(&statuses);
+        let second = protocol.packet_connect_status_snapshot(&statuses);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "an unchanged status array must reuse the cached snapshot"
+        );
+
+        let mut changed = statuses.clone();
+        changed[1].last_frame = Frame::new(3);
+        let third = protocol.packet_connect_status_snapshot(&changed);
+        assert!(
+            !Arc::ptr_eq(&first, &third),
+            "a changed status array must allocate a new snapshot"
+        );
+        assert_eq!(
+            first[1].last_frame,
+            Frame::NULL,
+            "previously emitted events must retain their original snapshot"
+        );
+
+        let fourth = protocol.packet_connect_status_snapshot(&changed);
+        assert!(
+            Arc::ptr_eq(&third, &fourth),
+            "the replacement snapshot is reused while it stays current"
+        );
     }
 
     #[test]

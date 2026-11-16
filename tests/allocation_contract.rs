@@ -397,6 +397,97 @@ fn warmed_networked_p2p_send_stats(num_players: usize) -> Stats {
     stats
 }
 
+fn warmed_networked_p2p_receive_stats(num_players: usize) -> Stats {
+    let (socket_a, socket_b, _drop_a, _sends_a) = switchable_socket_pair();
+    let addr_a = socket_a.local_addr;
+    let addr_b = socket_b.local_addr;
+    let remote_handle = PlayerHandle::new(num_players.saturating_sub(1));
+
+    let mut builder_a = SessionBuilder::new()
+        .with_num_players(num_players)
+        .expect("configure receive-contract player count")
+        .with_desync_detection_mode(DesyncDetection::Off);
+    let mut builder_b = SessionBuilder::new()
+        .with_num_players(num_players)
+        .expect("configure receive-contract player count")
+        .with_desync_detection_mode(DesyncDetection::Off);
+    for player in 0..num_players {
+        if player + 1 == num_players {
+            builder_a = builder_a
+                .add_remote_player(player, addr_b)
+                .expect("add receive-contract remote player to A");
+            builder_b = builder_b
+                .add_local_player(player)
+                .expect("add receive-contract local player to B");
+        } else {
+            builder_a = builder_a
+                .add_local_player(player)
+                .expect("add receive-contract local player to A");
+            builder_b = builder_b
+                .add_remote_player(player, addr_a)
+                .expect("add receive-contract remote player to B");
+        }
+    }
+    let mut session_a: P2PSession<AllocationConfig> = builder_a
+        .start_p2p_session(socket_a)
+        .expect("construct receive-contract session A");
+    let mut session_b: P2PSession<AllocationConfig> = builder_b
+        .start_p2p_session(socket_b)
+        .expect("construct receive-contract session B");
+
+    for _ in 0..64 {
+        session_a.poll_remote_clients();
+        session_b.poll_remote_clients();
+        if session_a.current_state() == SessionState::Running
+            && session_b.current_state() == SessionState::Running
+        {
+            break;
+        }
+    }
+    assert_eq!(session_a.current_state(), SessionState::Running);
+    assert_eq!(session_b.current_state(), SessionState::Running);
+
+    for _ in 0..4 {
+        for player in 0..num_players.saturating_sub(1) {
+            session_a
+                .add_local_input(PlayerHandle::new(player), 0)
+                .expect("add receive-contract warm-up input to A");
+        }
+        session_b
+            .add_local_input(remote_handle, 0)
+            .expect("add receive-contract warm-up input to B");
+        fulfill_save_requests(
+            session_a
+                .advance_frame()
+                .expect("advance receive-contract warm-up frame on A"),
+        );
+        fulfill_save_requests(
+            session_b
+                .advance_frame()
+                .expect("advance receive-contract warm-up frame on B"),
+        );
+        for _ in 0..4 {
+            session_a.poll_remote_clients();
+            session_b.poll_remote_clients();
+        }
+    }
+
+    // Stage exactly one B -> A Input packet outside the measured region.
+    session_b
+        .add_local_input(remote_handle, 0)
+        .expect("add receive-contract measured input to B");
+    fulfill_save_requests(
+        session_b
+            .advance_frame()
+            .expect("advance receive-contract measured frame on B"),
+    );
+    let ((), stats) = measure(|| {
+        session_a.poll_remote_clients();
+        black_box(());
+    });
+    stats
+}
+
 fn warmed_spectator_poll_stats(num_hosts: usize) -> Stats {
     let hosts: Vec<_> = (0..num_hosts)
         .map(|index| {
@@ -654,10 +745,11 @@ fn warmed_hot_paths_obey_allocation_contracts() {
     // status gossip, and request construction. The switchable socket counts
     // submission but deliberately excludes adapter buffering and cloning. Its
     // allocation contract is bounded rather than zero: one input buffer stays
-    // retained until acknowledgment, and compression/status temporaries are
-    // released after submission. The byte ceilings also prevent the empty
-    // graceful-drop poll from restoring its former 28 KiB reservation.
-    for (players, operation_ceiling, byte_ceiling) in [(2, 4, 128), (4, 4, 128), (16, 5, 512)] {
+    // retained until acknowledgment, the delta scratch is reused across sends,
+    // and compression/status temporaries are released after submission. The
+    // byte ceilings also prevent the empty graceful-drop poll from restoring its
+    // former 28 KiB reservation.
+    for (players, operation_ceiling, byte_ceiling) in [(2, 3, 64), (4, 3, 84), (16, 4, 440)] {
         let first = warmed_networked_p2p_send_stats(players);
         for repetition in 1..3 {
             assert_eq!(
@@ -671,6 +763,28 @@ fn warmed_hot_paths_obey_allocation_contracts() {
             first,
             operation_ceiling,
             byte_ceiling,
+        );
+    }
+
+    // A warmed receive poll that consumes one remote Input packet must not
+    // allocate per-frame staging containers: the decode staging frame and its
+    // per-player input vector stay inline for the common <=4 case, and the
+    // per-packet connect-status snapshot is reused while gossip is unchanged.
+    // Baseline before that change: 8 operations / 1408 bytes at N=2.
+    for players in [2, 4, 16] {
+        let first = warmed_networked_p2p_receive_stats(players);
+        for repetition in 1..3 {
+            assert_eq!(
+                warmed_networked_p2p_receive_stats(players),
+                first,
+                "warmed {players}-player networked P2P receive repetition {repetition}"
+            );
+        }
+        assert_allocation_ceiling(
+            &format!("warmed {players}-player networked P2P receive"),
+            first,
+            6,
+            1_280,
         );
     }
 

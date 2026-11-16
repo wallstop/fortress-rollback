@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+use smallvec::SmallVec;
+
 use crate::frame_info::PlayerInput;
 use crate::network::codec;
 use crate::report_violation;
@@ -321,10 +323,10 @@ impl InputBytes {
     pub fn try_to_player_inputs_exact<T: Config>(
         &self,
         num_players: usize,
-    ) -> Result<Vec<PlayerInput<T::Input>>, InputBytesDecodeError> {
+    ) -> Result<SmallVec<[PlayerInput<T::Input>; 4]>, InputBytesDecodeError> {
         let size = Self::player_input_byte_partition_size(self.bytes.len(), num_players)?;
 
-        let mut player_inputs = Vec::new();
+        let mut player_inputs = SmallVec::new();
         if player_inputs.try_reserve(num_players).is_err() {
             return Err(InputBytesDecodeError::AllocationFailed {
                 requested_players: num_players,
@@ -368,7 +370,7 @@ impl InputBytes {
     #[cfg(test)]
     pub fn to_player_inputs<T: Config>(&self, num_players: usize) -> Vec<PlayerInput<T::Input>> {
         match self.try_to_player_inputs_exact::<T>(num_players) {
-            Ok(player_inputs) => player_inputs,
+            Ok(player_inputs) => player_inputs.into_vec(),
             Err(err) => {
                 log_input_decode_error(err);
                 Vec::new()
