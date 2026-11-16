@@ -441,29 +441,36 @@ proptest! {
 | Platform       | Determinism Status | Notes                             |
 | -------------- | ------------------ | --------------------------------- |
 | x86_64 Linux   | ✅ Verified         | Primary development platform      |
-| x86_64 Windows | ✅ Expected         | Same architecture                 |
-| x86_64 macOS   | ✅ Expected         | Same architecture                 |
+| x86_64 Windows | ✅ Verified         | Workspace suite (minus nightly simulation and multi-process tiers) plus the native replay fixture runs on every PR and merge-queue CI run |
+| x86_64 macOS   | ✅ Verified         | Workspace suite (minus nightly simulation and multi-process tiers) plus the native replay fixture runs on every PR and merge-queue CI run |
 | i686 Linux     | ✅ Verified         | Full workspace suite (minus nightly simulation and multi-process tiers) runs natively with a 32-bit `usize` on every main/merge-queue CI run, pinning pointer-width hashing, checksums, and allocation diagnostics |
 | aarch64 Linux  | ✅ Verified         | Full workspace suite (minus proptest-heavy property tests and nightly simulation/multi-process tiers) runs under QEMU on every main/merge-queue CI run; integer-only replay, hash, and checksum parity confirmed |
-| aarch64 macOS  | ✅ Verified         | Full suite runs natively on GitHub's arm64 `macos-latest` runner (Apple silicon) |
+| aarch64 macOS  | ✅ Verified         | Workspace suite (minus nightly simulation and multi-process tiers) plus the native replay fixture runs natively on GitHub's arm64 `macos-latest` runner (Apple silicon) |
 | WASM (browser) | ✅ Verified         | Captured 4,096-frame replay and machine-width hash/checksum parity run in Chromium on every merge queue; tab-suspension and timeout behavior covered in the browser lane |
 | WASM (Emscripten) | ✅ Verified     | The same replay and machine-width parity checks run in the Godot web-export lane |
 
 ### Cross-Platform Testing
 
-To verify cross-platform determinism:
+To verify cross-platform determinism, record a match once with replay recording enabled, then
+replay it with validation on the second target. The replay stores every confirmed input plus the
+checksum the recording peer observed, so a `FortressEvent::ReplayDesync` on the second target
+identifies the first divergent frame. See the [Match Replay System](../replay.md#validation-mode)
+for the recording and validation loops.
 
-1. Run the same input sequence on both platforms
-2. Compare checksums at regular intervals
-3. Any mismatch indicates a determinism bug
+The repository keeps this comparison running in CI rather than relying on manual review:
 
-```bash
-# Machine A (x86_64)
-cargo run --example replay -- record session.inputs
-
-# Machine B (aarch64)
-cargo run --example replay -- verify session.inputs checksums.txt
-```
+- `tests/replay-fixture` replays a captured 4,096-frame two-peer schedule in Chromium and in the
+  Godot/Emscripten lane, comparing request-stream and state-checksum digests against native
+  constants.
+- `check_compression_parity` pins the XOR-delta plus RLE bytes that every session input packet
+  carries in Chromium and in the Godot/Emscripten lane against a native digest; replay playback
+  alone does not exercise that pipeline.
+- `smoke_traces_match_checked_in_cross_architecture_digests` folds a whole deterministic-simulation
+  trace (confirmed inputs, session states, game-state checksums, event streams, and simulated wire
+  statistics) into a digest pinned to the x86_64 reference, and executes natively on i686 and under
+  qemu-aarch64 in the `cross-arch-runtime` CI matrix.
+- `machine_width_state` pins fixed-width serialization and hashing of `usize`/`isize` fields and
+  collection length prefixes on 32-bit and 64-bit targets.
 
 ### Known Platform Differences
 

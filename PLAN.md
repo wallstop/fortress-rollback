@@ -6,11 +6,7 @@
 
 ## In progress
 
-- Cross-architecture runtime determinism lanes: execute the deterministic suite on
-  aarch64 (QEMU) and i686 (32-bit native) in `ci-rust.yml`, fix the test portability and
-  virtual-clock defects they expose, and record the verified platform status in
-  `docs/specs/determinism-model.md`. Exit: both lanes pass on main and the CI contract
-  tests stay green.
+_None._
 
 ## Future
 
