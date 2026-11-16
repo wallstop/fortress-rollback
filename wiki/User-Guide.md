@@ -1325,7 +1325,10 @@ nonempty and contain unique addresses; `try_start_spectator_session_multi`
 reports the empty or duplicate indices before constructing endpoints. When every
 host disconnects cleanly, the spectator may still advance through frames
 that were already buffered; after those buffered frames are no longer viewable,
-`advance_frame` returns `PredictionThreshold`.
+`advance_frame` returns the terminal `SpectatorStreamEnded { frame }`. The
+final host input is retained only when it was already decoded in the same poll
+as the `Goodbye`; inputs arriving in a later poll from the removed host are
+rejected as unknown sources, so restart the spectator to resume.
 
 **SpectatorConfig presets:**
 
@@ -3716,6 +3719,7 @@ Fortress Rollback uses `FortressError` for all error conditions. The enum is exh
 | `MismatchedChecksum { current_frame, mismatched_frames }` | Desync in SyncTestSession              | Debug non-determinism                                         |
 | `SpectatorTooFarBehind`                                   | Spectator can't catch up               | Reconnect spectator                                           |
 | `SpectatorDivergence { frame, player }`                   | Redundant spectator hosts disagreed    | Stop this spectator session; reconnect or inspect hosts       |
+| `SpectatorStreamEnded { frame }`                          | All hosts left; next input never arrived | Terminal truncation: stop and restart the spectator session |
 | `SerializationError { context }`                          | Serialization failed                   | Check input/state serialization                               |
 | `SocketError { context }`                                 | Network socket error                   | Check network, retry connection                               |
 | `InternalError { context }`                               | Library bug                            | Please report!                                                |
@@ -3739,6 +3743,12 @@ fn handle_error(error: FortressError) -> Action {
                 player, frame
             );
             Action::Fatal
+        }
+        // Terminal truncation: every host left before the next frame arrived.
+        // The buffered prefix has been drained; start a fresh spectator.
+        FortressError::SpectatorStreamEnded { frame } => {
+            eprintln!("Spectator stream ended at frame {}", frame);
+            Action::Reconnect
         }
         FortressError::SocketError { .. } => Action::Reconnect,
 

@@ -58,6 +58,33 @@ let spectator = match SessionBuilder::<GameConfig>::new()
 matches. Remove repeated addresses instead of relying on the former first-match
 routing behavior.
 
+Spectators now report the end of a host stream explicitly. Once every host has
+disconnected and the frames buffered before the final host's `Goodbye` have been
+drained, `advance_frame` returns the new terminal
+`FortressError::SpectatorStreamEnded { frame }` instead of `PredictionThreshold`.
+A final input arriving in a later poll from an already-removed host is rejected
+as an unknown source. Add the new arm to exhaustive `FortressError` matches and
+stop or reconnect the spectator rather than retrying:
+
+```rust
+match spectator.advance_frame() {
+    Ok(requests) => handle_requests(requests),
+    Err(FortressError::SpectatorStreamEnded { frame }) => {
+        eprintln!("spectator stream ended at frame {frame}");
+        // Tear down or rebuild the spectator session.
+    },
+    Err(FortressError::PredictionThreshold) => { /* still waiting for hosts */ },
+    Err(error) => return Err(error),
+}
+```
+
+Hot-join hosts also back off between timed-out serves. After a serve timeout,
+the same reserved slot can only open another serve once the host has advanced an
+exponentially growing number of frames (1, 2, 4, ... up to 256). This is
+transparent to a healthy joiner that completes the handshake, but a peer that
+repeatedly times out now retries less often; a permanently broken peer must
+still rebuild a fresh session to rejoin.
+
 The public-surface census also removed two unused aliases from the explicitly
 unstable `__internal` namespace. Replace them with the supported module paths:
 
