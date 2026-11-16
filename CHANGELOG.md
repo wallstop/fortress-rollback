@@ -92,8 +92,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no hosts left: either every host disconnected before the next frame's input arrived, or the last
   host left before the session ever synchronized. A running spectator still drains every frame
   buffered before the disconnect, then reports this explicit terminal state instead of retrying
-  `PredictionThreshold` (or `NotSynchronized`) forever. This includes sessions configured with
-  catch-up disabled (`catchup_speed == 0`), which make no advance attempt while behind. Inputs
+  `PredictionThreshold` (or `NotSynchronized`) forever. Once every host has left, the terminal drain
+  advances one buffered frame per call even when catch-up is disabled (`catchup_speed == 0`); while
+  a host remains, zero catch-up still attempts no advance. Inputs
   arriving from an already-removed host in a later poll are rejected as unknown sources. Exhaustive
   `FortressError` matches need an arm for this variant; stop the session and start a fresh one to
   resume spectating.

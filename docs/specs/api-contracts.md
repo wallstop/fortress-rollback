@@ -367,10 +367,11 @@ the notification delay is greater than the disconnect timeout.
 
 - `SpectatorConfig::buffer_size` must be greater than `0`
 - `SpectatorConfig::stream_delay` must be smaller than `buffer_size`
-- `SpectatorConfig::catchup_speed == 0` is accepted; if catch-up mode is
-  reached with zero speed, no frame is attempted and `advance_frame` returns
-  `Ok(<empty>)` while at least one host remains. Once every host has left, the
-  terminal `SpectatorStreamEnded { frame }` is returned instead.
+- `SpectatorConfig::catchup_speed == 0` is accepted; while at least one host
+  remains and catch-up mode is reached with zero speed, no frame is attempted
+  and `advance_frame` returns `Ok(<empty>)`. Once every host has left, the
+  terminal drain advances buffered frames even with zero catch-up speed, then
+  returns the terminal `SpectatorStreamEnded { frame }`.
 
 **Errors:** None (returns `Option`, not `Result`)
 

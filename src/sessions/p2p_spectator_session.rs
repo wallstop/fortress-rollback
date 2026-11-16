@@ -801,7 +801,15 @@ impl<T: Config> SpectatorSession<T> {
             Self::positive_frame_distance(viewable, self.current_frame).unwrap_or(0);
 
         let frames_to_advance = if effective_behind > self.max_frames_behind {
-            self.catchup_speed
+            // With no host left this is the terminal drain: deliver the
+            // buffered prefix before reporting SpectatorStreamEnded even when
+            // catch-up is disabled. While a host remains, a zero catch-up
+            // speed still means "do not advance while behind".
+            if self.hosts.is_empty() {
+                self.catchup_speed.max(1)
+            } else {
+                self.catchup_speed
+            }
         } else {
             NORMAL_SPEED
         };
@@ -7201,21 +7209,41 @@ mod tests {
     }
 
     #[test]
-    fn spectator_all_hosts_dropped_with_catchup_disabled_reports_terminal_truncation() {
-        // `catchup_speed == 0` deliberately skips catch-up advances while
-        // behind, but it must not turn the drained-host terminal state into an
-        // infinite Ok(empty) stream: no future host can supply the missing
-        // frame.
+    fn spectator_all_hosts_dropped_with_catchup_disabled_drains_then_reports_terminal_truncation() {
+        // `catchup_speed == 0` deliberately skips catch-up advances while a
+        // host remains, but the terminal drain must still deliver the buffered
+        // prefix before reporting the end: no future host can supply more, and
+        // returning Ok(empty) forever would wedge the caller.
         let mut session =
-            create_test_spectator_session_with_config(2, 60, 10, 0).expect("spectator session");
+            create_test_spectator_session_with_config(2, 60, 0, 0).expect("spectator session");
         session.state = SessionState::Running;
         session.hosts.clear();
         session.current_frame = Frame::NULL;
-        session.last_recv_frame = Frame::new(40);
+        session.last_recv_frame = Frame::new(2);
+        for frame in [Frame::new(0), Frame::new(1), Frame::new(2)] {
+            let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+            session.inputs[buffer_index][0] = PlayerInput::new(frame, frame.as_i32() as u8);
+            session.inputs[buffer_index][1] =
+                PlayerInput::new(frame, frame.as_i32().saturating_add(10) as u8);
+        }
+
+        for expected in [Frame::new(0), Frame::new(1), Frame::new(2)] {
+            let requests = session
+                .advance_frame()
+                .expect("the terminal drain must deliver buffered frames");
+            assert_eq!(session.current_frame(), expected);
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| matches!(request, FortressRequest::AdvanceFrame { .. }))
+                    .count(),
+                1
+            );
+        }
 
         assert!(matches!(
             session.advance_frame(),
-            Err(FortressError::SpectatorStreamEnded { frame }) if frame == Frame::new(0)
+            Err(FortressError::SpectatorStreamEnded { frame }) if frame == Frame::new(3)
         ));
     }
 
