@@ -129,6 +129,94 @@ pub fn input_for(frame: u32, player: u32) -> FixtureInput {
     }
 }
 
+/// Native FNV-1a of the length-prefixed slice `[1, 2, 3]`.
+///
+/// Captured on a 64-bit little-endian host. A 32-bit browser build that falls
+/// back to `Hasher`'s pointer-width default for the slice length prefix hashes
+/// `3usize` as four bytes instead of eight and reports `0x458ddd9f0d490432`.
+pub const EXPECTED_SLICE_HASH: u64 = 0x01ef_76d4_29b1_1552;
+/// Native FNV-1a of `7usize`.
+///
+/// Captured on a 64-bit little-endian host. The 32-bit fallback is
+/// `0x6d3572669b2cde42`.
+pub const EXPECTED_USIZE_HASH: u64 = 0x4bd7_a317_074c_5b62;
+/// Native FNV-1a of `-9isize`.
+///
+/// Captured on a 64-bit little-endian host. The 32-bit fallback is
+/// `0x8ddb761e8e5b67d9`.
+pub const EXPECTED_ISIZE_HASH: u64 = 0x2ee4_949c_2c7d_0345;
+/// Native checksum of [`machine_width_state`].
+///
+/// The state contains `usize`, `isize`, and `Vec` fields, so this catches both
+/// a pointer-width-dependent `Hash`/serializer path and a variable-width
+/// collection length prefix. Captured natively; browser and Emscripten lanes
+/// assert the same value.
+pub const EXPECTED_MACHINE_WIDTH_CHECKSUM: u128 = 0x4788_379b_63f1_3341;
+
+/// Application state whose serialized form depends on machine-width integers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineWidthState {
+    /// A `usize` field (four bytes on wasm32, eight bytes natively).
+    pub count: usize,
+    /// An `isize` field (four bytes on wasm32, eight bytes natively).
+    pub delta: isize,
+    /// A collection whose `Hash`/serialized length prefix is a machine `usize`.
+    pub values: Vec<u32>,
+}
+
+/// The fixed [`MachineWidthState`] used by the cross-target parity checks.
+#[must_use]
+pub fn machine_width_state() -> MachineWidthState {
+    MachineWidthState {
+        count: 7,
+        delta: -9,
+        values: vec![1, 0x1234_5678],
+    }
+}
+
+/// Verifies that machine-width-dependent hashing and state checksums match the
+/// checked-in native values on this target.
+///
+/// This is the Rust-versus-WASM-browser guard for the difference that pointer
+/// width introduces: `Hasher`'s default integer writers encode through
+/// `to_ne_bytes`, so `#[derive(Hash)]` states containing `usize`, `isize`, or
+/// collections would otherwise checksum differently on a 32-bit browser build
+/// than on a 64-bit native build.
+///
+/// # Errors
+///
+/// Returns a descriptive diagnostic when any value differs from the captured
+/// native reference.
+pub fn check_machine_width_parity() -> Result<(), String> {
+    let slice_hash = fortress_rollback::hash::fnv1a_hash(&[1u8, 2, 3]);
+    if slice_hash != EXPECTED_SLICE_HASH {
+        return Err(format!(
+            "slice hash {slice_hash:#018x} differs from native {EXPECTED_SLICE_HASH:#018x}"
+        ));
+    }
+    let usize_hash = fortress_rollback::hash::fnv1a_hash(&7usize);
+    if usize_hash != EXPECTED_USIZE_HASH {
+        return Err(format!(
+            "usize hash {usize_hash:#018x} differs from native {EXPECTED_USIZE_HASH:#018x}"
+        ));
+    }
+    let isize_hash = fortress_rollback::hash::fnv1a_hash(&(-9isize));
+    if isize_hash != EXPECTED_ISIZE_HASH {
+        return Err(format!(
+            "isize hash {isize_hash:#018x} differs from native {EXPECTED_ISIZE_HASH:#018x}"
+        ));
+    }
+    let checksum = fortress_rollback::checksum::compute_checksum(&machine_width_state())
+        .map_err(|error| format!("machine-width state failed to serialize: {error}"))?;
+    if checksum != EXPECTED_MACHINE_WIDTH_CHECKSUM {
+        return Err(format!(
+            "machine-width checksum {checksum:#034x} differs from native \
+             {EXPECTED_MACHINE_WIDTH_CHECKSUM:#034x}"
+        ));
+    }
+    Ok(())
+}
+
 /// Observable result of replaying the captured schedule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReplayEvidence {
@@ -568,6 +656,28 @@ mod tests {
             evidence.desyncs > 0,
             "checksum validation must detect a corrupted recorded checksum"
         );
+    }
+
+    #[test]
+    fn machine_width_hashing_matches_checked_in_native_constants() {
+        check_machine_width_parity().expect("native hashing must match the captured constants");
+    }
+
+    #[test]
+    fn machine_width_state_serializes_with_fixed_width_little_endian_fields() {
+        // This is the byte layout the checksum constant covers: a fixed-width
+        // `u64` for `usize`, a fixed-width `i64` for `isize`, and a fixed-width
+        // `u64` collection length. A variable-width or pointer-width encoding
+        // would change these bytes and therefore the checksum.
+        let encoded = fortress_rollback::network::codec::encode(&machine_width_state())
+            .expect("machine-width state serializes");
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&7u64.to_le_bytes());
+        expected.extend_from_slice(&(-9i64).to_le_bytes());
+        expected.extend_from_slice(&2u64.to_le_bytes());
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(&0x1234_5678u32.to_le_bytes());
+        assert_eq!(encoded, expected);
     }
 }
 

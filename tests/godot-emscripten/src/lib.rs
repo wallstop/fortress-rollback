@@ -259,6 +259,9 @@ fn mode() -> &'static str {
 }
 
 fn replay_evidence() -> Result<(u32, u64, String, String, u32), String> {
+    // Emscripten is also a 32-bit target, so the machine-width hashing and
+    // checksum difference is exercised here alongside the native replay.
+    fortress_replay_fixture::check_machine_width_parity()?;
     let evidence = fortress_replay_fixture::replay_fixture()?;
     if evidence.frames != EXPECTED_FRAMES {
         return Err(format!(

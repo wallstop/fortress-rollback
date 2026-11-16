@@ -55,6 +55,13 @@ mod tests {
         assert_eq!(evidence.requests, u64::from(EXPECTED_FRAMES) * 2);
     }
 
+    #[wasm_bindgen_test]
+    fn machine_width_hashing_matches_native_reference() {
+        fortress_replay_fixture::check_machine_width_parity().expect(
+            "browser hashing of usize/isize/collections must match the native reference constants",
+        );
+    }
+
     fn virtual_clock() -> (fortress_rollback::ClockFn, Arc<AtomicU64>) {
         let base = Instant::now();
         let offset_ms = Arc::new(AtomicU64::new(0));
