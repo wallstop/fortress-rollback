@@ -995,7 +995,7 @@ mod compression_tests {
     #[test]
     fn try_encode_with_scratch_is_byte_identical_and_reuses_the_delta_buffer() {
         let ref_bytes = vec![0x01, 0x02, 0x03, 0x04];
-        let inputs = vec![
+        let inputs = [
             vec![0x10, 0x20, 0x30, 0x40],
             vec![0xFF, 0x00, 0xFF, 0x00],
             vec![0x01, 0x02, 0x03, 0x04],
