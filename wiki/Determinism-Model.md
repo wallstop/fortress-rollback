@@ -452,12 +452,13 @@ proptest! {
 ### Cross-Platform Testing
 
 To verify cross-platform determinism, record a match once with replay recording enabled, then
-replay it with validation on the second target. The replay stores every confirmed input and the
-checksum the recording peer observed for each frame that had one. A `FortressEvent::ReplayDesync`
-identifies a divergent frame only when that frame has a recorded checksum; frames without one are
-not compared. Check checksum coverage and `metadata.skipped_frames` before treating playback as a
-complete determinism check. See the [Match Replay System](Replay#validation-mode) for the
-recording and validation loops.
+replay it with validation on the second target. The replay stores the confirmed inputs for each
+frame whose retrieval succeeded; a frame whose retrieval fails is recorded with default placeholder
+inputs and increments `metadata.skipped_frames`. It also stores the checksum the recording peer
+observed for each frame that had one. A `FortressEvent::ReplayDesync` identifies a divergent frame
+only when that frame has a recorded checksum; frames without one are not compared. Check checksum
+coverage and `metadata.skipped_frames` before treating playback as a complete determinism check.
+See the [Match Replay System](Replay#validation-mode) for the recording and validation loops.
 
 The repository keeps this comparison running in CI rather than relying on manual review:
 
