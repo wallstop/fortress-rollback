@@ -10109,6 +10109,26 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "hot-join")]
+    fn pending_output_len_for_tests_reports_each_queued_input() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        assert_eq!(protocol.pending_output_len_for_tests(), 0);
+
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![0_u8; 4],
+        });
+        assert_eq!(protocol.pending_output_len_for_tests(), 1);
+
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(1),
+            bytes: vec![0_u8; 4],
+        });
+        assert_eq!(protocol.pending_output_len_for_tests(), 2);
+    }
+
+    #[test]
     fn on_input_reuses_status_snapshot_across_unchanged_packets() {
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);

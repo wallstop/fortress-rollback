@@ -3473,6 +3473,16 @@ impl<T: Config> P2PSession<T> {
         Ok(requests)
     }
 
+    /// Whether live coordinated-drop orchestration may change input or status
+    /// state that [`Self::confirmed_frame`] folds. When true, a fold cached
+    /// earlier in a poll must not be reused by the advance.
+    fn coordinated_drop_may_change_confirmation(&self) -> bool {
+        self.coordinated_drop.active.is_some()
+            || !self.coordinated_drop.queued.is_empty()
+            || !self.coordinated_drop.deferred_prepares.is_empty()
+            || !self.coordinated_drop.committed.is_empty()
+    }
+
     /// Should be called periodically by your application to give Fortress Rollback a chance to do internal work.
     /// Fortress Rollback will receive packets, distribute them to corresponding endpoints, handle all occurring events and send all outgoing packets.
     pub fn poll_remote_clients(&mut self) {
@@ -3629,11 +3639,7 @@ impl<T: Config> P2PSession<T> {
         // Coordinated-drop processing can converge/re-freeze slots without
         // going through `handle_event`; only reuse the poll fold when no drop
         // state exists at all.
-        if self.coordinated_drop.active.is_some()
-            || !self.coordinated_drop.queued.is_empty()
-            || !self.coordinated_drop.deferred_prepares.is_empty()
-            || !self.coordinated_drop.committed.is_empty()
-        {
+        if self.coordinated_drop_may_change_confirmation() {
             self.confirmed_frame_cache = None;
         }
 
@@ -16128,6 +16134,128 @@ mod tests {
             session.confirmed_frame_cache,
             Some(Frame::new(50)),
             "outside the relay topology the fold is floor-independent"
+        );
+    }
+
+    #[test]
+    fn coordinated_drop_confirmation_invalidation_covers_every_live_state() {
+        let mut session = create_two_player_session();
+        let handle = PlayerHandle::new(1);
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: 0,
+        };
+
+        assert!(!session.coordinated_drop_may_change_confirmation());
+
+        session.coordinated_drop.queued.insert(handle);
+        assert!(
+            session.coordinated_drop_may_change_confirmation(),
+            "a queued removal can mutate confirmation folds"
+        );
+        session.coordinated_drop.queued.clear();
+
+        session
+            .coordinated_drop
+            .deferred_prepares
+            .push_back(DropPrepare {
+                operation,
+                targets: Vec::new(),
+                participants: Vec::new(),
+            });
+        assert!(
+            session.coordinated_drop_may_change_confirmation(),
+            "a deferred prepare can mutate confirmation folds"
+        );
+        session.coordinated_drop.deferred_prepares.clear();
+
+        session.coordinated_drop.committed.insert(
+            handle,
+            CoordinatedDropFence {
+                operation,
+                target_generation: 0,
+                cut: Frame::new(0),
+            },
+        );
+        assert!(
+            session.coordinated_drop_may_change_confirmation(),
+            "a committed fence can mutate confirmation folds"
+        );
+        session.coordinated_drop.committed.clear();
+
+        let now = session.coordinated_drop_now();
+        session.coordinated_drop.active = Some(CoordinatedDropAttempt {
+            operation,
+            target_addr: test_addr(8080),
+            targets: Vec::new(),
+            participants: Vec::new(),
+            local_participant: 0,
+            held_at: Frame::new(0),
+            phase: CoordinatedDropPhase::Ready,
+            reports: BTreeMap::new(),
+            ready: std::collections::BTreeSet::new(),
+            ready_transcripts: BTreeMap::new(),
+            committed_acks: std::collections::BTreeSet::new(),
+            cut: Some(Frame::new(0)),
+            cut_digest: Some(0),
+            pending_commit: None,
+            backfill_sent: false,
+            backfill_chunks: BTreeMap::new(),
+            relayed_backfill: BTreeMap::new(),
+            next_backfill_chunk: 0,
+            expected_backfill_chunks: None,
+            started_at: now,
+            last_broadcast_at: now,
+        });
+        assert!(
+            session.coordinated_drop_may_change_confirmation(),
+            "an active attempt can mutate confirmation folds"
+        );
+    }
+
+    #[test]
+    fn update_player_disconnects_reports_no_change_when_already_at_the_fence_cut() {
+        let mut session = create_two_player_session();
+        let handle = PlayerHandle::new(1);
+        let cut = Frame::new(5);
+        session.coordinated_drop.committed.insert(
+            handle,
+            CoordinatedDropFence {
+                operation: DropOperationId {
+                    coordinator: 0,
+                    coordinator_generation: 0,
+                    sequence: 1,
+                    target_set_digest: 0,
+                },
+                target_generation: 0,
+                cut,
+            },
+        );
+        session.local_connect_status[handle.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: cut,
+            epoch: 0,
+        };
+
+        assert!(
+            !session.update_player_disconnects(),
+            "a local receipt already at the fence cut must not report a mutation"
+        );
+
+        session.local_connect_status[handle.as_usize()].last_frame = Frame::new(3);
+        assert!(
+            session.update_player_disconnects(),
+            "a receipt below the fence cut must adopt it and report the mutation"
+        );
+        assert_eq!(
+            session.local_connect_status[handle.as_usize()].last_frame,
+            cut
+        );
+        assert!(
+            !session.update_player_disconnects(),
+            "the converged receipt must be stable"
         );
     }
 
