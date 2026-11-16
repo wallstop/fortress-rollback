@@ -1035,9 +1035,11 @@ pub struct SpectatorConfig {
     /// to catch up.
     ///
     /// Higher values catch up faster but may cause visual stuttering.
-    /// A value of `0` is allowed for compatibility: when catch-up mode is
-    /// triggered, the spectator advances no frames and `advance_frame` returns
-    /// `Ok(<empty>)`.
+    /// A value of `0` is allowed for compatibility: while at least one host
+    /// remains and catch-up mode is triggered, the spectator advances no
+    /// frames and `advance_frame` returns `Ok(<empty>)`. Once every host has
+    /// left, the terminal drain still advances buffered frames before
+    /// reporting [`FortressError::SpectatorStreamEnded`].
     ///
     /// Default: 1
     pub catchup_speed: usize,
@@ -1129,7 +1131,9 @@ impl SpectatorConfig {
     ///   [`buffer_size`](Self::buffer_size).
     ///
     /// [`catchup_speed`](Self::catchup_speed) may be `0` to preserve the
-    /// historical "no catch-up advance is attempted" behavior.
+    /// historical "no catch-up advance is attempted while a host remains"
+    /// behavior; the terminal drain after the last host leaves still advances
+    /// buffered frames.
     pub fn validate(&self) -> Result<(), FortressError> {
         if self.buffer_size == 0 {
             return Err(InvalidRequestKind::ZeroBufferSize.into());

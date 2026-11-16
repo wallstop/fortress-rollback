@@ -2043,11 +2043,13 @@ impl<T: Config> SessionBuilder<T> {
     /// emitted for it; observe [`SpectatorSession::num_hosts`] to track redundancy. When
     /// all hosts have dropped, already-buffered frames may still drain normally. Once no
     /// buffered frame is viewable, [`advance_frame`](SpectatorSession::advance_frame)
-    /// returns [`FortressError::PredictionThreshold`].
+    /// returns [`FortressError::SpectatorStreamEnded`].
     ///
     /// A [`SpectatorConfig::catchup_speed`] of `0` remains accepted for compatibility:
-    /// if catch-up mode is triggered, no frame is attempted and
-    /// [`advance_frame`](SpectatorSession::advance_frame) returns `Ok(<empty>)`.
+    /// while at least one host remains and catch-up mode is triggered, no frame is
+    /// attempted and [`advance_frame`](SpectatorSession::advance_frame) returns
+    /// `Ok(<empty>)`. The terminal drain after the last host leaves still advances
+    /// buffered frames before reporting the end of the stream.
     ///
     /// # Returns
     ///

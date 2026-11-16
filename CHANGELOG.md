@@ -92,9 +92,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no hosts left: either every host disconnected before the next frame's input arrived, or the last
   host left before the session ever synchronized. A running spectator still drains every frame
   buffered before the disconnect, then reports this explicit terminal state instead of retrying
-  `PredictionThreshold` (or `NotSynchronized`) forever. Inputs arriving from an already-removed
-  host in a later poll are rejected as unknown sources. Exhaustive `FortressError` matches need an
-  arm for this variant; stop the session and start a fresh one to resume spectating.
+  `PredictionThreshold` (or `NotSynchronized`) forever. Once every host has left, the terminal drain
+  advances one buffered frame per call even when catch-up is disabled (`catchup_speed == 0`); while
+  a host remains, zero catch-up still attempts no advance. Inputs
+  arriving from an already-removed host in a later poll are rejected as unknown sources. Exhaustive
+  `FortressError` matches need an arm for this variant; stop the session and start a fresh one to
+  resume spectating.
 - **Breaking:** the development-only `z3-verification` feature now uses `z3` 0.21 and requires
   Z3 4.13.3 or newer; Z3 5.1.0 is recommended so native enum definitions match the bindings. The
   existing `z3-verification-bundled` feature now uses upstream's supported vendored build path for

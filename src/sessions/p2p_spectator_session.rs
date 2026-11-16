@@ -801,7 +801,15 @@ impl<T: Config> SpectatorSession<T> {
             Self::positive_frame_distance(viewable, self.current_frame).unwrap_or(0);
 
         let frames_to_advance = if effective_behind > self.max_frames_behind {
-            self.catchup_speed
+            // With no host left this is the terminal drain: deliver the
+            // buffered prefix before reporting SpectatorStreamEnded even when
+            // catch-up is disabled. While a host remains, a zero catch-up
+            // speed still means "do not advance while behind".
+            if self.hosts.is_empty() {
+                self.catchup_speed.max(1)
+            } else {
+                self.catchup_speed
+            }
         } else {
             NORMAL_SPEED
         };
@@ -873,13 +881,16 @@ impl<T: Config> SpectatorSession<T> {
         // Once every host has disconnected there is no source left for the missing
         // frame: a final input that arrives in a later poll is rejected as an unknown
         // source after the host slot is removed. Report the terminal truncation
-        // explicitly instead of wedging callers on PredictionThreshold forever.
+        // explicitly instead of wedging callers on PredictionThreshold forever. This
+        // outranks the catch-up-disabled compatibility behavior: `catchup_speed == 0`
+        // makes no advance attempt while behind, so without this check a drained
+        // session would return Ok(empty) on every call forever.
+        if self.hosts.is_empty() && requests.is_empty() {
+            return Err(FortressError::SpectatorStreamEnded {
+                frame: self.current_frame.try_add(1)?,
+            });
+        }
         if frames_to_advance > 0 && requests.is_empty() {
-            if self.hosts.is_empty() {
-                return Err(FortressError::SpectatorStreamEnded {
-                    frame: self.current_frame.try_add(1)?,
-                });
-            }
             return Err(FortressError::PredictionThreshold);
         }
 
@@ -7194,6 +7205,45 @@ mod tests {
         assert!(matches!(
             session.advance_frame(),
             Err(FortressError::SpectatorStreamEnded { frame }) if frame == Frame::new(2)
+        ));
+    }
+
+    #[test]
+    fn spectator_all_hosts_dropped_with_catchup_disabled_drains_then_reports_terminal_truncation() {
+        // `catchup_speed == 0` deliberately skips catch-up advances while a
+        // host remains, but the terminal drain must still deliver the buffered
+        // prefix before reporting the end: no future host can supply more, and
+        // returning Ok(empty) forever would wedge the caller.
+        let mut session =
+            create_test_spectator_session_with_config(2, 60, 0, 0).expect("spectator session");
+        session.state = SessionState::Running;
+        session.hosts.clear();
+        session.current_frame = Frame::NULL;
+        session.last_recv_frame = Frame::new(2);
+        for frame in [Frame::new(0), Frame::new(1), Frame::new(2)] {
+            let buffer_index = frame.buffer_index(session.buffer_size).unwrap();
+            session.inputs[buffer_index][0] = PlayerInput::new(frame, frame.as_i32() as u8);
+            session.inputs[buffer_index][1] =
+                PlayerInput::new(frame, frame.as_i32().saturating_add(10) as u8);
+        }
+
+        for expected in [Frame::new(0), Frame::new(1), Frame::new(2)] {
+            let requests = session
+                .advance_frame()
+                .expect("the terminal drain must deliver buffered frames");
+            assert_eq!(session.current_frame(), expected);
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| matches!(request, FortressRequest::AdvanceFrame { .. }))
+                    .count(),
+                1
+            );
+        }
+
+        assert!(matches!(
+            session.advance_frame(),
+            Err(FortressError::SpectatorStreamEnded { frame }) if frame == Frame::new(3)
         ));
     }
 

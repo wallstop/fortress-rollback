@@ -10110,6 +10110,113 @@ mod tests {
 
     #[test]
     #[cfg(feature = "hot-join")]
+    fn pending_output_len_for_tests_reports_each_queued_input() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        assert_eq!(protocol.pending_output_len_for_tests(), 0);
+
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![0_u8; 4],
+        });
+        assert_eq!(protocol.pending_output_len_for_tests(), 1);
+
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(1),
+            bytes: vec![0_u8; 4],
+        });
+        assert_eq!(protocol.pending_output_len_for_tests(), 2);
+    }
+
+    #[test]
+    fn on_input_reuses_status_snapshot_across_unchanged_packets() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        complete_test_sync(&mut protocol);
+        protocol.event_queue.clear();
+        let reference = protocol
+            .recv_inputs
+            .get(&Frame::NULL)
+            .expect("blank reference input")
+            .bytes
+            .clone();
+        let first_frame = vec![0_u8; reference.len()];
+        let second_frame = vec![1_u8; reference.len()];
+        let statuses = vec![ConnectionStatus::default(); 2];
+
+        let take_snapshots = |protocol: &mut UdpProtocol<TestConfig>| {
+            protocol
+                .event_queue
+                .drain(..)
+                .filter_map(|event| match event {
+                    Event::Input {
+                        peer_connect_status,
+                        ..
+                    } => Some(peer_connect_status),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        protocol.on_input(&Input {
+            start_frame: Frame::new(0),
+            ack_frame: Frame::NULL,
+            bytes: crate::network::compression::encode(&reference, std::iter::once(&first_frame)),
+            peer_connect_status: statuses.clone(),
+        });
+        let first = take_snapshots(&mut protocol);
+        assert_eq!(first.len(), 1, "one handle is decoded per frame");
+
+        // A later packet carrying a new frame but the same gossip must not
+        // replace the snapshot: every event keeps sharing the first allocation.
+        protocol.on_input(&Input {
+            start_frame: Frame::new(1),
+            ack_frame: Frame::NULL,
+            bytes: crate::network::compression::encode(
+                &first_frame,
+                std::iter::once(&second_frame),
+            ),
+            peer_connect_status: statuses.clone(),
+        });
+        let second = take_snapshots(&mut protocol);
+        assert_eq!(second.len(), 1, "one handle is decoded per frame");
+        assert!(
+            Arc::ptr_eq(&first[0], &second[0]),
+            "an unchanged status array must reuse the cached snapshot across packets"
+        );
+
+        let mut changed = statuses;
+        changed[1].last_frame = Frame::new(5);
+        protocol.on_input(&Input {
+            start_frame: Frame::new(2),
+            ack_frame: Frame::NULL,
+            bytes: crate::network::compression::encode(
+                &second_frame,
+                std::iter::once(&second_frame),
+            ),
+            peer_connect_status: changed,
+        });
+        let third = take_snapshots(&mut protocol);
+        assert_eq!(third.len(), 1, "one handle is decoded per frame");
+        assert!(
+            !Arc::ptr_eq(&second[0], &third[0]),
+            "a changed status array must allocate a new snapshot"
+        );
+        assert_eq!(
+            first[0][1].last_frame,
+            Frame::NULL,
+            "earlier events retain the snapshot contents they were emitted with"
+        );
+        assert_eq!(
+            third[0][1].last_frame,
+            Frame::new(5),
+            "later events observe the changed status array"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
     fn handle_message_stores_join_request() {
         let mut protocol = running_protocol();
 

@@ -3473,6 +3473,16 @@ impl<T: Config> P2PSession<T> {
         Ok(requests)
     }
 
+    /// Whether live coordinated-drop orchestration may change input or status
+    /// state that [`Self::confirmed_frame`] folds. When true, a fold cached
+    /// earlier in a poll must not be reused by the advance.
+    fn coordinated_drop_may_change_confirmation(&self) -> bool {
+        self.coordinated_drop.active.is_some()
+            || !self.coordinated_drop.queued.is_empty()
+            || !self.coordinated_drop.deferred_prepares.is_empty()
+            || !self.coordinated_drop.committed.is_empty()
+    }
+
     /// Should be called periodically by your application to give Fortress Rollback a chance to do internal work.
     /// Fortress Rollback will receive packets, distribute them to corresponding endpoints, handle all occurring events and send all outgoing packets.
     pub fn poll_remote_clients(&mut self) {
@@ -3629,11 +3639,7 @@ impl<T: Config> P2PSession<T> {
         // Coordinated-drop processing can converge/re-freeze slots without
         // going through `handle_event`; only reuse the poll fold when no drop
         // state exists at all.
-        if self.coordinated_drop.active.is_some()
-            || !self.coordinated_drop.queued.is_empty()
-            || !self.coordinated_drop.deferred_prepares.is_empty()
-            || !self.coordinated_drop.committed.is_empty()
-        {
+        if self.coordinated_drop_may_change_confirmation() {
             self.confirmed_frame_cache = None;
         }
 
@@ -11238,6 +11244,17 @@ impl<T: Config> P2PSession<T> {
             for endpoint in self.player_reg.remotes.values_mut() {
                 endpoint.reset_floor_freshness();
             }
+            // A prune re-arms the post-prune fresh-ack round. In the relay
+            // topology a connected relay's round floor (or the incomplete-round
+            // hold cap) contributes to `confirmed_frame`, so a fold cached
+            // earlier in this poll (the gossip nudge in `poll_remote_clients`)
+            // was taken before the reset and must not be reused by the advance:
+            // it can exceed the re-armed hold. Outside the relay topology the
+            // fold never consumes round-floor state, so the cached fold stays
+            // valid.
+            if self.pessimistic_floor_relay_topology() {
+                self.confirmed_frame_cache = None;
+            }
         }
 
         // 2. Answer pending FloorRequests with our current pessimistic floors.
@@ -15986,6 +16003,259 @@ mod tests {
         assert!(
             session.confirmed_frame_cache.is_none(),
             "the cached fold is consumed by the advance"
+        );
+    }
+
+    #[test]
+    fn advance_frame_recomputes_confirmation_when_the_prune_rearms_the_floor_round() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        // Seed a completed round while every endpoint is still running, then
+        // prune B: the next poll's `drive_floor_round` detects the prune only
+        // after that poll's gossip nudge already folded the (still fresh) high
+        // round floors.
+        session.drive_floor_round();
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect_remote();
+        assert!(
+            session.pessimistic_floor_relay_topology(),
+            "pruned B with running C/D is the relay topology"
+        );
+
+        for _ in 0..120 {
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(50), SaveMode::EveryFrame);
+        let confirmed_before = session.sync_layer.last_confirmed_frame();
+
+        let high = Frame::new(100);
+        for handle in [
+            PlayerHandle::new(0),
+            PlayerHandle::new(1),
+            PlayerHandle::new(2),
+            d,
+        ] {
+            session.local_connect_status[handle.as_usize()] = ConnectionStatus {
+                disconnected: false,
+                last_frame: high,
+                epoch: 0,
+            };
+        }
+        for addr in [addr_c, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("running relay endpoint");
+            for handle in [
+                PlayerHandle::new(0),
+                PlayerHandle::new(1),
+                PlayerHandle::new(2),
+                d,
+            ] {
+                endpoint.set_peer_connect_status_for_tests(
+                    handle,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: high,
+                        epoch: 0,
+                    },
+                );
+                endpoint.set_round_floor_for_tests(handle, high);
+            }
+        }
+
+        // The nudge fold inside this advance runs with fresh relays (confirmed
+        // 100); the prune detection then resets every relay's freshness. The
+        // advance must use the post-reset hold (capped at the previously
+        // confirmed 50), not the pre-reset fold.
+        session
+            .add_local_input(PlayerHandle::new(0), 1_u8)
+            .expect("queue local input");
+        session.advance_frame().expect("advance succeeds");
+
+        assert!(
+            session.sync_layer.last_confirmed_frame() <= confirmed_before,
+            "confirmation must not advance past the re-armed post-prune floor hold: before={:?} after={:?}",
+            confirmed_before,
+            session.sync_layer.last_confirmed_frame()
+        );
+    }
+
+    #[test]
+    fn drive_floor_round_drops_the_cached_fold_only_in_the_pruned_relay_topology() {
+        // Relay topology: a prune re-arms the fresh-ack round, so a fold taken
+        // before the prune must be discarded.
+        let (mut session, addr_b, _addr_c, _addr_d) = build_abcd_live_session();
+        session.drive_floor_round();
+        session.confirmed_frame_cache = Some(Frame::new(100));
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect_remote();
+        session.drive_floor_round();
+        assert!(
+            session.pessimistic_floor_relay_topology(),
+            "pruned B with running C/D is the relay topology"
+        );
+        assert!(
+            session.confirmed_frame_cache.is_none(),
+            "a prune in the relay topology must drop the cached fold"
+        );
+
+        // Non-relay control: pruning down to one running remote cannot consume
+        // round-floor state, so the cached fold survives the prune.
+        let (mut session, addr_b, addr_c, _addr_d) = build_abcd_live_session();
+        session.drive_floor_round();
+        session.confirmed_frame_cache = Some(Frame::new(50));
+        for addr in [addr_b, addr_c] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("relay endpoint")
+                .disconnect_remote();
+        }
+        session.drive_floor_round();
+        assert!(
+            !session.pessimistic_floor_relay_topology(),
+            "one running remote is not the relay topology"
+        );
+        assert_eq!(
+            session.confirmed_frame_cache,
+            Some(Frame::new(50)),
+            "outside the relay topology the fold is floor-independent"
+        );
+    }
+
+    #[test]
+    fn coordinated_drop_confirmation_invalidation_covers_every_live_state() {
+        let mut session = create_two_player_session();
+        let handle = PlayerHandle::new(1);
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: 0,
+        };
+
+        assert!(!session.coordinated_drop_may_change_confirmation());
+
+        session.coordinated_drop.queued.insert(handle);
+        assert!(
+            session.coordinated_drop_may_change_confirmation(),
+            "a queued removal can mutate confirmation folds"
+        );
+        session.coordinated_drop.queued.clear();
+
+        session
+            .coordinated_drop
+            .deferred_prepares
+            .push_back(DropPrepare {
+                operation,
+                targets: Vec::new(),
+                participants: Vec::new(),
+            });
+        assert!(
+            session.coordinated_drop_may_change_confirmation(),
+            "a deferred prepare can mutate confirmation folds"
+        );
+        session.coordinated_drop.deferred_prepares.clear();
+
+        session.coordinated_drop.committed.insert(
+            handle,
+            CoordinatedDropFence {
+                operation,
+                target_generation: 0,
+                cut: Frame::new(0),
+            },
+        );
+        assert!(
+            session.coordinated_drop_may_change_confirmation(),
+            "a committed fence can mutate confirmation folds"
+        );
+        session.coordinated_drop.committed.clear();
+
+        let now = session.coordinated_drop_now();
+        session.coordinated_drop.active = Some(CoordinatedDropAttempt {
+            operation,
+            target_addr: test_addr(8080),
+            targets: Vec::new(),
+            participants: Vec::new(),
+            local_participant: 0,
+            held_at: Frame::new(0),
+            phase: CoordinatedDropPhase::Ready,
+            reports: BTreeMap::new(),
+            ready: std::collections::BTreeSet::new(),
+            ready_transcripts: BTreeMap::new(),
+            committed_acks: std::collections::BTreeSet::new(),
+            cut: Some(Frame::new(0)),
+            cut_digest: Some(0),
+            pending_commit: None,
+            backfill_sent: false,
+            backfill_chunks: BTreeMap::new(),
+            relayed_backfill: BTreeMap::new(),
+            next_backfill_chunk: 0,
+            expected_backfill_chunks: None,
+            started_at: now,
+            last_broadcast_at: now,
+        });
+        assert!(
+            session.coordinated_drop_may_change_confirmation(),
+            "an active attempt can mutate confirmation folds"
+        );
+    }
+
+    #[test]
+    fn update_player_disconnects_reports_no_change_when_already_at_the_fence_cut() {
+        let mut session = create_two_player_session();
+        let handle = PlayerHandle::new(1);
+        let cut = Frame::new(5);
+        session.coordinated_drop.committed.insert(
+            handle,
+            CoordinatedDropFence {
+                operation: DropOperationId {
+                    coordinator: 0,
+                    coordinator_generation: 0,
+                    sequence: 1,
+                    target_set_digest: 0,
+                },
+                target_generation: 0,
+                cut,
+            },
+        );
+        session.local_connect_status[handle.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: cut,
+            epoch: 0,
+        };
+
+        assert!(
+            !session.update_player_disconnects(),
+            "a local receipt already at the fence cut must not report a mutation"
+        );
+
+        session.local_connect_status[handle.as_usize()].last_frame = Frame::new(3);
+        assert!(
+            session.update_player_disconnects(),
+            "a receipt below the fence cut must adopt it and report the mutation"
+        );
+        assert_eq!(
+            session.local_connect_status[handle.as_usize()].last_frame,
+            cut
+        );
+        assert!(
+            !session.update_player_disconnects(),
+            "the converged receipt must be stable"
         );
     }
 
