@@ -142,15 +142,17 @@ mod tests {
             Ok(_) => panic!("usize::MAX prediction should fail before allocation"),
             Err(err) => err,
         };
+        // `usize::MAX` is 32-bit on 32-bit targets; the diagnostic widens it.
+        let expected = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
 
         assert!(matches!(
             err,
             FortressError::InvalidRequestStructured {
                 kind: crate::InvalidRequestKind::AllocationFailed {
                     context: "saved_states.states",
-                    requested_elements: u64::MAX,
+                    requested_elements,
                 }
-            }
+            } if requested_elements == expected
         ));
     }
 

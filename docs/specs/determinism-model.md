@@ -443,7 +443,8 @@ proptest! {
 | x86_64 Linux   | ✅ Verified         | Primary development platform      |
 | x86_64 Windows | ✅ Expected         | Same architecture                 |
 | x86_64 macOS   | ✅ Expected         | Same architecture                 |
-| aarch64 Linux  | ⚠️ Test Required    | Different float rounding possible |
+| i686 Linux     | ✅ Verified         | Full workspace suite (minus nightly simulation and multi-process tiers) runs natively with a 32-bit `usize` on every main/merge-queue CI run, pinning pointer-width hashing, checksums, and allocation diagnostics |
+| aarch64 Linux  | ✅ Verified         | Full workspace suite (minus proptest-heavy property tests and nightly simulation/multi-process tiers) runs under QEMU on every main/merge-queue CI run; integer-only replay, hash, and checksum parity confirmed |
 | aarch64 macOS  | ⚠️ Test Required    | M1/M2 chips                       |
 | WASM (browser) | ✅ Verified         | Captured 4,096-frame replay and machine-width hash/checksum parity run in Chromium on every merge queue; tab-suspension and timeout behavior covered in the browser lane |
 | WASM (Emscripten) | ✅ Verified     | The same replay and machine-width parity checks run in the Godot web-export lane |

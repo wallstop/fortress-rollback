@@ -863,3 +863,78 @@ jobs:
 
       - name: Build ARM64 release (verify full compilation)
         run: cross build --target aarch64-unknown-linux-gnu --release
+
+  # Runtime behavior on the architectures the cross-platform determinism
+  # contract covers. `arm64-cross` above proves the ARM64 build compiles; this
+  # matrix executes the deterministic suite on the two non-x86_64 shapes:
+  #
+  #   * aarch64 under qemu-user catches architecture-specific behavioral
+  #     drift (endianness is shared with x86_64, but scheduling, atomics, and
+  #     float-adjacent library paths differ).
+  #   * i686 runs the full suite with a 32-bit `usize`, the same pointer width
+  #     as `wasm32`. It is the native cross-check for machine-width hashing,
+  #     checksums, and allocation diagnostics that a browser-only test cannot
+  #     reproduce on a developer host.
+  #
+  # Property tests are excluded from the QEMU lane because proptest's
+  # many-thousand-case loops take longer than nextest's per-test budget under
+  # emulation; they already run on the native matrix.
+  cross-arch-runtime:
+    name: Cross-Arch Runtime (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: aarch64-qemu
+            target: aarch64-unknown-linux-gnu
+            packages: qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+            filter: >-
+              not test(simulation::) and not test(network::multi_process::)
+              and not test(network::compression::property_tests::)
+          - name: i686-32bit
+            target: i686-unknown-linux-gnu
+            packages: gcc-i686-linux-gnu libc6-dev-i386-cross libc6-i386 lib32gcc-s1
+            filter: >-
+              not test(simulation::) and not test(network::multi_process::)
+
+    env:
+      # Same GCC-override contract as `arm64-cross`: the checked-in
+      # `.cargo/config.toml` selects clang+lld for host development, while CI
+      # containers only guarantee GCC. Host build scripts stay on x86_64.
+      RUSTFLAGS: "-C link-arg=-Wl,--as-needed"
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+      CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER: i686-linux-gnu-gcc
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable snapshot
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-nextest
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-nextest
+
+      - name: Setup Rust cache
+        uses: ./.github/actions/setup-rust-cache
+        with:
+          cache-key: cross-arch-${{ matrix.target }}
+
+      - name: Install cross-architecture runtime support
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
+
+      - name: Run deterministic suite
+        run: >-
+          cargo nextest run --profile ci-cross-arch --target ${{ matrix.target }}
+          --workspace --features tokio,json
+          -E "${{ matrix.filter }}"

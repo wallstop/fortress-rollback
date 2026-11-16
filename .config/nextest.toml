@@ -122,3 +122,14 @@ slow-timeout = { period = "120s", terminate-after = 8 }
 
 [profile.ci-simulation-nightly.junit]
 path = "target/nextest/ci-simulation-nightly/junit.xml"
+
+# Cross-architecture runtime profile - used by ci-rust.yml's
+# `cross-arch-runtime` matrix (aarch64 under qemu-user and native i686).
+# QEMU makes the deterministic in-process chaos tables and desync
+# choreographies several times slower than native; the native 60s ceiling is
+# not a hang signal there. Keep zero retries and fail-fast off, but allow two
+# 120s periods before declaring a genuine hang.
+[profile.ci-cross-arch]
+retries = 0
+fail-fast = false
+slow-timeout = { period = "120s", terminate-after = 2 }

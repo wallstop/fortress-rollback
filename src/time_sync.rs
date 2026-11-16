@@ -583,15 +583,17 @@ mod sync_layer_tests {
             window_size: usize::MAX,
         })
         .unwrap_err();
+        // `usize::MAX` is 32-bit on 32-bit targets; the diagnostic widens it.
+        let expected = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
 
         assert!(matches!(
             err,
             FortressError::InvalidRequestStructured {
                 kind: crate::InvalidRequestKind::AllocationFailed {
                     context: "time_sync.local",
-                    requested_elements: u64::MAX,
+                    requested_elements,
                 }
-            }
+            } if requested_elements == expected
         ));
     }
 
