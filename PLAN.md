@@ -17,9 +17,3 @@ _None._
   because concurrent disjoint removals expose incompatible cuts. Exit: a deterministic
   majority-continues regression plus an asymmetric-timeout A/B/C-vs-E reconciliation test pass
   without forks, and the default plus `hot-join` D14 suites stay green.
-- Finish [issue #446](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/446): scan
-  every zero-assertion/ignored-result test and give each one a falsifiable assertion or delete it
-  if it duplicates a stronger test. Sessions 228-229 fixed the RLE truncation, TimeSync negative
-  frame, two empty P2P poll tests, the telemetry macro delivery tests, the reorder harvest
-  history, `SyncLayer::reset_prediction`, and the P2P builder outcome assertions. Exit: a
-  repo-wide assertion scan has no remaining vacuous tests.

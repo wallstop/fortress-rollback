@@ -2944,14 +2944,21 @@ mod tests {
 
     #[test]
     fn test_report_violation_to_macro_with_none() {
-        let observer: Option<Arc<dyn ViolationObserver>> = None;
+        let observer = Arc::new(CollectingObserver::new());
+        let _scope = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
+
+        let no_observer: Option<Arc<dyn ViolationObserver>> = None;
         report_violation_to!(
-            &observer,
+            &no_observer,
             ViolationSeverity::Warning,
             ViolationKind::FrameSync,
             "test message"
         );
-        // Falls back to TracingObserver, shouldn't panic
+
+        assert!(
+            observer.violations().is_empty(),
+            "an explicit None observer falls back to the tracing observer, not the thread observer"
+        );
     }
 
     // ==========================================
@@ -3127,20 +3134,43 @@ mod tests {
 
     #[test]
     fn test_debug_check_invariants_macro_ok() {
+        let observer = Arc::new(CollectingObserver::new());
+        let _scope = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
         let checker = TestCheckerOk;
-        // Should not report any violations
         debug_check_invariants!(checker);
         debug_check_invariants!(checker, "with context");
+        assert!(
+            observer.violations().is_empty(),
+            "a passing invariant check must not report a violation"
+        );
     }
 
     #[test]
     fn test_debug_check_invariants_macro_fail() {
+        let observer = Arc::new(CollectingObserver::new());
+        let _scope = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
         let checker = TestCheckerFail {
             message: "macro test",
         };
-        // Should report a violation via tracing (doesn't panic)
         debug_check_invariants!(checker);
         debug_check_invariants!(checker, "with context");
+
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 2);
+        for violation in &violations {
+            assert_eq!(violation.severity, ViolationSeverity::Critical);
+            assert_eq!(violation.kind, ViolationKind::Invariant);
+            assert!(
+                violation.message.contains("macro test"),
+                "message {:?} must carry the invariant text",
+                violation.message
+            );
+        }
+        assert!(
+            violations[1].message.contains("[context: with context]"),
+            "the context overload must include its context: {:?}",
+            violations[1].message
+        );
     }
 
     #[test]

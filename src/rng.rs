@@ -740,10 +740,15 @@ mod tests {
 
     #[test]
     fn test_random_value_can_call_random_recursively() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+
         struct RecursiveRandom;
 
         impl RandomValue for RecursiveRandom {
             fn random<R: Rng + ?Sized>(rng: &mut R) -> Self {
+                CALLS.fetch_add(1, Ordering::SeqCst);
                 let _outer = rng.next_u32();
                 let nested: u32 = random();
                 let _ = nested;
@@ -751,13 +756,33 @@ mod tests {
             }
         }
 
+        CALLS.store(0, Ordering::SeqCst);
         let _: RecursiveRandom = random();
+        // The nested call samples `u32`, so only the outer sample reaches this
+        // implementation. Reaching this assert at all proves the nested
+        // `random()` re-entered the thread-local generator without deadlocking
+        // the RefCell borrow.
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "the custom implementation must run exactly once"
+        );
     }
 
     #[test]
     fn test_seedable_from_entropy() {
-        // Just verify it doesn't panic
-        let _rng = Pcg32::from_entropy();
+        let mut rng = Pcg32::from_entropy();
+        let mut previous = rng.next_u32();
+        let mut saw_different = false;
+        for _ in 0..8 {
+            let next = rng.next_u32();
+            saw_different |= next != previous;
+            previous = next;
+        }
+        assert!(
+            saw_different,
+            "an entropy-seeded PCG must not emit a constant stream"
+        );
     }
 
     // Test that known seed produces expected sequence (golden test)
