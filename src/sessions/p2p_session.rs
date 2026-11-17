@@ -686,6 +686,26 @@ impl<T: Config> HotJoinState<T> {
     fn clear_serve_retry(&mut self, handle: PlayerHandle) {
         self.serve_retry.remove(&handle);
     }
+
+    /// Returns `true` when this session carries any hot-join orchestration
+    /// state that can open/commit/abort a serve or mutate connect status
+    /// outside the ordinary event pass.
+    ///
+    /// Such a mutation can invalidate the poll-time confirmed-frame fold, so
+    /// [`poll_hot_join`](P2PSession::poll_hot_join) must drop the cache. A
+    /// plain P2P session built with the feature compiled in has none of these
+    /// fields populated and keeps the single-fold reuse.
+    fn carries_orchestration_state(&self) -> bool {
+        !self.reserved_slots.is_empty()
+            || self.accept_hot_join
+            || self.joiner.is_some()
+            || !self.joining.is_empty()
+            || self.npeer.is_some()
+            || self.npeer_post.is_some()
+            || self.pending_reactivation.is_some()
+            || !self.npeer_closed_attempt_frames.is_empty()
+            || !self.serve_retry.is_empty()
+    }
 }
 
 /// Per-handle hot-join serve retry state (see
@@ -3706,16 +3726,7 @@ impl<T: Config> P2PSession<T> {
         // built with the feature compiled in must keep the single-fold reuse,
         // otherwise every hot-join-enabled build pays a second full mesh fold
         // per frame even though it never joins or serves.
-        let hot_join_may_mutate = !self.hot_join.reserved_slots.is_empty()
-            || self.hot_join.accept_hot_join
-            || self.hot_join.joiner.is_some()
-            || !self.hot_join.joining.is_empty()
-            || self.hot_join.npeer.is_some()
-            || self.hot_join.npeer_post.is_some()
-            || self.hot_join.pending_reactivation.is_some()
-            || !self.hot_join.npeer_closed_attempt_frames.is_empty()
-            || !self.hot_join.serve_retry.is_empty();
-        if hot_join_may_mutate {
+        if self.hot_join.carries_orchestration_state() {
             self.confirmed_frame_cache = None;
         }
     }
@@ -13625,6 +13636,99 @@ mod tests {
         assert_eq!(session.sync_layer.current_frame(), Frame::new(8));
     }
 
+    /// Builds an every-frame session that advanced through `advance_to` with a
+    /// real checkpoint only at `saved_frame` and confirmation at `confirmed`.
+    fn session_with_a_single_checkpoint(
+        advance_to: i32,
+        max_prediction: usize,
+        saved_frame: i32,
+        confirmed: i32,
+    ) -> P2PSession<TestConfig> {
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_max_prediction_window(max_prediction)
+            .with_save_mode(SaveMode::EveryFrame)
+            .with_input_queue_config(crate::InputQueueConfig { queue_length: 16 })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let local = PlayerHandle::new(0);
+
+        for frame_index in 0..=advance_to {
+            let frame = Frame::new(frame_index);
+            assert_eq!(
+                session
+                    .sync_layer
+                    .add_local_input(local, PlayerInput::new(frame, frame_index as u8)),
+                frame
+            );
+            if frame_index == saved_frame {
+                if let FortressRequest::SaveGameState { cell, frame } =
+                    session.sync_layer.save_current_state()
+                {
+                    cell.save(frame, Some(frame_index as u8), None);
+                }
+            }
+            if frame_index < advance_to {
+                session.sync_layer.advance_frame();
+            }
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(confirmed), SaveMode::EveryFrame);
+        session
+    }
+
+    #[test]
+    fn adjust_gamestate_retained_floor_sparse_search_edges() {
+        // The retained input floor is 6 in all three rows (confirmation 7).
+        // Every row leaves the first candidate target without a checkpoint and
+        // places the only loadable state one frame later.
+
+        // Equality: the target equals the retained floor. The target is NOT
+        // below the floor, so the sparse search must not run and the missing
+        // checkpoint fails closed.
+        let mut equal = session_with_a_single_checkpoint(8, 4, 7, 7);
+        let mut requests = RequestVec::<TestConfig>::new();
+        assert!(
+            equal
+                .adjust_gamestate(Frame::new(6), Frame::new(0), &mut requests)
+                .is_err(),
+            "a target exactly at the retained floor must not be treated as raised"
+        );
+
+        // Raised in-window target: first_incorrect (5) is above the prediction
+        // floor (4) but below the retained floor (6). Only the raised flag can
+        // select the sparse search here; it must advance to the loadable 7.
+        let mut raised = session_with_a_single_checkpoint(8, 4, 7, 7);
+        let mut requests = RequestVec::<TestConfig>::new();
+        raised
+            .adjust_gamestate(Frame::new(5), Frame::new(0), &mut requests)
+            .expect("an in-window raised target must search for a loadable checkpoint");
+        let loaded = requests
+            .iter()
+            .find_map(|request| match request {
+                FortressRequest::LoadGameState { frame, .. } => Some(*frame),
+                _ => None,
+            })
+            .expect("the rollback must load the later checkpoint");
+        assert_eq!(loaded, Frame::new(7));
+
+        // Above the floor: the target (7) is above the retained floor (6), so
+        // it must not be raised into a sparse search. With no checkpoint at 7
+        // the rollback fails closed instead of silently skipping to 8.
+        let mut above = session_with_a_single_checkpoint(9, 4, 8, 7);
+        let mut requests = RequestVec::<TestConfig>::new();
+        assert!(
+            above
+                .adjust_gamestate(Frame::new(7), Frame::new(0), &mut requests)
+                .is_err(),
+            "a target above the retained floor must not be raised"
+        );
+    }
+
     #[test]
     fn adjust_gamestate_reports_gossip_lowered_target_clamped_to_floor() {
         let observer = Arc::new(crate::telemetry::CollectingObserver::new());
@@ -15228,6 +15332,114 @@ mod tests {
             session.confirmed_frame_cache.is_some(),
             "a session with no hot-join state must reuse the poll fold in advance_frame"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn every_hot_join_orchestration_field_invalidates_the_poll_fold() {
+        let addr = test_addr(9501);
+        let snapshot = || StateSnapshot {
+            frame: Frame::new(1),
+            num_players: 2,
+            state_bytes: vec![0],
+            bridge_inputs: Vec::new(),
+            bridge_statuses: Vec::new(),
+            checksum: None,
+        };
+
+        fn assert_detected(label: &str, seed: impl FnOnce(&mut HotJoinState<TestConfig>)) {
+            let mut hot_join = HotJoinState::<TestConfig>::default();
+            assert!(
+                !hot_join.carries_orchestration_state(),
+                "{label}: a default state must keep the poll fold"
+            );
+            seed(&mut hot_join);
+            assert!(
+                hot_join.carries_orchestration_state(),
+                "{label}: every populated orchestration field must invalidate the fold"
+            );
+        }
+
+        assert_detected("reserved slot", |hot_join| {
+            hot_join.reserved_slots.insert(PlayerHandle::new(1));
+        });
+        assert_detected("host role", |hot_join| {
+            hot_join.accept_hot_join = true;
+        });
+        assert_detected("joiner role", |hot_join| {
+            hot_join.joiner = Some(JoinerState {
+                local_handle: PlayerHandle::new(1),
+                host_addr: addr,
+                npeer: false,
+                pending_requests: Vec::new(),
+                applied_frame: None,
+                ack_resends_remaining: 0,
+                buffered: None,
+                closed_attempt_snapshot_frame: Frame::NULL,
+                pending_backfill: std::collections::BTreeSet::new(),
+                torn_down: false,
+            });
+        });
+        assert_detected("in-flight serve", |hot_join| {
+            hot_join.joining.insert(
+                PlayerHandle::new(1),
+                JoinServe {
+                    addr,
+                    frame: Frame::new(1),
+                    snapshot: snapshot(),
+                    polls_since_serve: 0,
+                },
+            );
+        });
+        assert_detected("n-peer serve", |hot_join| {
+            hot_join.npeer = Some(NPeerServe {
+                handle: PlayerHandle::new(1),
+                joiner_addr: addr,
+                snapshot_frame: Frame::new(0),
+                activation_frame: Frame::new(1),
+                snapshot: None,
+                joiner_acked: false,
+                survivors: std::collections::BTreeSet::new(),
+                pending_acks: std::collections::BTreeSet::new(),
+                polls_since_serve: 0,
+            });
+        });
+        assert_detected("post-serve announcer", |hot_join| {
+            hot_join.npeer_post = Some(NPeerPostServe {
+                committed: true,
+                handle: PlayerHandle::new(1),
+                frame: Frame::new(1),
+                snapshot_frame: Frame::new(0),
+                joiner_addr: addr,
+                survivors: std::collections::BTreeSet::new(),
+                resends_left: 1,
+            });
+        });
+        assert_detected("pending reactivation", |hot_join| {
+            hot_join.pending_reactivation = Some(PendingReactivation {
+                handle: PlayerHandle::new(1),
+                frame: Frame::new(1),
+                coordinator_addr: addr,
+                joiner_addr: test_addr(9502),
+                pre_freeze_status: ConnectionStatus::default(),
+                pre_freeze_input: None,
+                reopened: false,
+            });
+        });
+        assert_detected("closed attempt high-water", |hot_join| {
+            hot_join
+                .npeer_closed_attempt_frames
+                .insert(PlayerHandle::new(1), Frame::new(1));
+        });
+        assert_detected("serve retry backoff", |hot_join| {
+            hot_join.serve_retry.insert(
+                PlayerHandle::new(1),
+                ServeRetry {
+                    consecutive_timeouts: 1,
+                    min_saved_frame: Frame::new(2),
+                },
+            );
+        });
     }
 
     #[test]

@@ -3132,6 +3132,44 @@ mod sync_layer_tests {
     }
 
     #[test]
+    #[cfg(feature = "hot-join")]
+    fn oldest_servable_input_frame_treats_an_empty_reactivation_window_as_no_floor() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        for frame_index in 0..=12i32 {
+            let frame = Frame::new(frame_index);
+            sync_layer.add_remote_input(
+                PlayerHandle::new(0),
+                PlayerInput::new(
+                    frame,
+                    TestInput {
+                        inp: frame_index as u8,
+                    },
+                ),
+            );
+            sync_layer.advance_frame();
+        }
+        sync_layer.set_last_confirmed_frame(Frame::new(10), SaveMode::EveryFrame);
+        assert_eq!(
+            sync_layer.oldest_retained_input_frame(),
+            Frame::new(9),
+            "the ring retains only the live tail"
+        );
+
+        // A floor whose frozen bound equals its activation frame serves an
+        // empty `(frozen_bound, activation_frame)` window. It must not lower
+        // the servable floor to `frozen_bound + 1`; only the retained ring
+        // bounds the target.
+        sync_layer
+            .set_reactivation_floor(PlayerHandle::new(0), Frame::new(5), Frame::new(5))
+            .expect("arm an empty reactivation floor");
+        assert_eq!(
+            sync_layer.oldest_servable_input_frame(&[ConnectionStatus::default(); 2]),
+            Frame::new(9),
+            "an empty reactivation window imposes no serving constraint"
+        );
+    }
+
+    #[test]
     fn test_check_simulation_consistency_no_errors() {
         let sync_layer = SyncLayer::<TestConfig>::new(2, 8);
         let result = sync_layer.check_simulation_consistency(Frame::NULL);
