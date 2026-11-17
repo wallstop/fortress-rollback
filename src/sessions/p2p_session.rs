@@ -16159,7 +16159,7 @@ mod tests {
             "a connected target may not accept an arbitrary future generation"
         );
 
-        let mut omitted_survivor = prepare.clone();
+        let mut omitted_survivor = prepare;
         omitted_survivor.participants = vec![1, 2, 4];
         assert!(
             !session.coordinated_drop_validate_prepare(&omitted_survivor),
