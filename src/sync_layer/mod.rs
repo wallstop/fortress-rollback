@@ -415,6 +415,7 @@ impl<T: Config> SyncLayer<T> {
     /// discarded frames down to `confirmed - 1`. A re-simulation must start no
     /// earlier than this shared retained floor. Empty queues do not constrain
     /// it; returns [`Frame::NULL`] when no queue retains an input.
+    #[cfg(test)]
     pub(crate) fn oldest_retained_input_frame(&self) -> Frame {
         let mut oldest: Option<Frame> = None;
         for queue in self.input_queues.iter() {
@@ -427,6 +428,55 @@ impl<T: Config> SyncLayer<T> {
                 continue;
             };
             oldest = Some(oldest.map_or(range.first, |current| current.max(range.first)));
+        }
+        oldest.unwrap_or(Frame::NULL)
+    }
+
+    /// Oldest frame every live queue can actually serve, including
+    /// pre-activation frames provided by a hot-join reactivation floor.
+    ///
+    /// `oldest_retained_input_frame` reports the oldest ring entry. A reopened
+    /// slot's ring begins at its
+    /// activation frame, but its [`ReactivationFloor`] can still serve the
+    /// frozen `(frozen_bound, activation_frame)` window exactly as the
+    /// pre-reopen simulation did. A rollback target inside that window is
+    /// servable and must not be raised merely because the ring's oldest entry
+    /// is newer. Queues with no retained range (empty/frozen) impose no
+    /// constraint here; `synchronized_inputs` serves them from frozen/default
+    /// semantics. `Frame::NULL` means no live queue constrains the target.
+    pub(crate) fn oldest_servable_input_frame(&self, connect_status: &[ConnectionStatus]) -> Frame {
+        let mut oldest: Option<Frame> = None;
+        for (index, queue) in self.input_queues.iter().enumerate() {
+            if queue.is_frozen() {
+                continue;
+            }
+            let Some(range) = queue.retained_input_range() else {
+                continue;
+            };
+            let mut first = range.first;
+            if let Some(status) = connect_status.get(index) {
+                if status.disconnected {
+                    // `synchronized_inputs` serves a disconnected slot from
+                    // its frozen value for every frame strictly above
+                    // `last_frame`, independent of the ring. Frames at or
+                    // below `last_frame` still need the retained ring. The
+                    // minimum servable frame is therefore whichever of those
+                    // two windows starts earlier.
+                    let frozen_first = status.last_frame.saturating_add(1);
+                    first = first.min(frozen_first);
+                }
+            }
+            #[cfg(feature = "hot-join")]
+            if let Some(floor) = self.reactivation_floors.get(index).and_then(Option::as_ref) {
+                // The floor serves frames in `(frozen_bound, activation_frame)`
+                // with the agreed frozen value, so a rollback target below the
+                // activation frame can still be servable even when the reopened
+                // ring begins at the activation frame.
+                if floor.frozen_bound < floor.activation_frame {
+                    first = first.min(floor.frozen_bound.saturating_add(1));
+                }
+            }
+            oldest = Some(oldest.map_or(first, |current| current.max(first)));
         }
         oldest.unwrap_or(Frame::NULL)
     }
@@ -1293,7 +1343,7 @@ impl<T: Config> SyncLayer<T> {
         let mut best = Frame::NULL;
         for cell in self.saved_states.states.iter() {
             let cell_frame = cell.frame();
-            if cell_frame.is_null() {
+            if cell_frame.is_null() || !cell.has_data() {
                 continue;
             }
             if cell_frame < lower_bound
@@ -1365,6 +1415,12 @@ impl<T: Config> SyncLayer<T> {
                 reason: InvalidFrameReason::WrongSavedFrame {
                     saved_frame: cell_frame,
                 },
+            });
+        }
+        if !cell.has_data() {
+            return Err(FortressError::InvalidFrameStructured {
+                frame: frame_to_load,
+                reason: InvalidFrameReason::MissingState,
             });
         }
         self.current_frame = frame_to_load;
@@ -1723,7 +1779,7 @@ impl<T: Config> SyncLayer<T> {
         #[cfg(kani)]
         let cell_frame = cell.0.borrow().frame;
 
-        (cell_frame == frame).then_some(cell)
+        (cell_frame == frame && cell.has_data()).then_some(cell)
     }
 
     /// Returns the latest saved frame.
@@ -2471,6 +2527,47 @@ mod sync_layer_tests {
         assert_eq!(sync_layer.current_frame(), Frame::new(0));
     }
 
+    #[test]
+    fn load_frame_rejects_a_cleared_but_frame_stamped_cell() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 4);
+        let request = sync_layer.save_current_state();
+        let FortressRequest::SaveGameState { cell, frame } = request else {
+            panic!("save_current_state must return a SaveGameState request");
+        };
+        cell.save(frame, Some(42u8), Some(12345));
+        sync_layer.advance_frame();
+        assert!(sync_layer.saved_state_by_frame(frame).is_some());
+        assert_eq!(
+            sync_layer.newest_saved_frame_in_range(frame, frame),
+            frame,
+            "the populated past frame must be selected by the checkpoint search"
+        );
+
+        // The public `GameStateCell::save` contract permits clearing a cell by
+        // saving `None`. The frame stamp remains, so a frame-only predicate
+        // would still hand this cell out as a rollback checkpoint and silently
+        // leave the caller's current state in place.
+        cell.save(frame, None, None);
+        assert!(
+            sync_layer.saved_state_by_frame(frame).is_none(),
+            "a cleared cell must not be selected as a loadable checkpoint"
+        );
+        assert!(
+            sync_layer
+                .newest_saved_frame_in_range(frame, frame)
+                .is_null(),
+            "a cleared cell must not bound a checkpoint range"
+        );
+        assert!(matches!(
+            sync_layer.load_frame(frame),
+            Err(FortressError::InvalidFrameStructured {
+                frame: loaded,
+                reason: InvalidFrameReason::MissingState,
+            }) if loaded == frame
+        ));
+        assert_eq!(sync_layer.current_frame(), Frame::new(1));
+    }
+
     /// Test that frame 0 rollback fails when outside prediction window.
     #[test]
     fn test_load_frame_zero_outside_prediction_window() {
@@ -2991,6 +3088,46 @@ mod sync_layer_tests {
             sync_layer.oldest_retained_input_frame(),
             Frame::new(13),
             "the floor must be the maximum of every live queue's retained start"
+        );
+    }
+
+    #[test]
+    fn oldest_servable_input_frame_accounts_for_disconnected_frozen_tails() {
+        let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
+        for frame_index in 0..=12i32 {
+            let frame = Frame::new(frame_index);
+            sync_layer.add_remote_input(
+                PlayerHandle::new(0),
+                PlayerInput::new(
+                    frame,
+                    TestInput {
+                        inp: frame_index as u8,
+                    },
+                ),
+            );
+            sync_layer.advance_frame();
+        }
+        sync_layer.set_last_confirmed_frame(Frame::new(10), SaveMode::EveryFrame);
+        assert_eq!(
+            sync_layer.oldest_retained_input_frame(),
+            Frame::new(9),
+            "the ring itself retains only the live tail"
+        );
+
+        let mut statuses = vec![ConnectionStatus::default(); 2];
+        statuses[0].disconnected = true;
+        statuses[0].last_frame = Frame::new(3);
+        assert_eq!(
+            sync_layer.oldest_servable_input_frame(&statuses),
+            Frame::new(4),
+            "a disconnected slot serves every frame above its last receipt from the frozen value"
+        );
+
+        statuses[0].disconnected = false;
+        assert_eq!(
+            sync_layer.oldest_servable_input_frame(&statuses),
+            Frame::new(9),
+            "a connected slot is bounded by its retained ring"
         );
     }
 

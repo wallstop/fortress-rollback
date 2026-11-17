@@ -423,7 +423,7 @@ fn input_window_boundary_schedule(heal_at: u32, include_loss: bool) -> Schedule 
 }
 
 #[cfg(feature = "hot-join")]
-fn clean_npeer_hot_join_schedule(n: usize) -> Schedule {
+pub(super) fn clean_npeer_hot_join_schedule(n: usize) -> Schedule {
     let hot_join_slot = n.saturating_sub(1);
     let mut config = SimConfig::smoke(n);
     config.steps = 900;

@@ -10,4 +10,15 @@ _None._
 
 ## Future
 
-_None._
+- Fix [issue #445](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/445): a
+  permanent strict-majority partition with two isolated peers fail-closes the whole majority.
+  Exit: a deterministic majority-continues regression plus an asymmetric-timeout A/B/C-vs-E
+  reconciliation test pass without forks, and the default plus `hot-join` D14 suites stay green.
+- Fix [issue #444](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/444): a
+  disconnected relay's fresh floor is ignored during a poll-only pause. Exit: a deterministic
+  scenario reproduces the stale-disconnected-relay race, the consumer folds the fresh floor for
+  that case without regressing the existing stale-high reorder tests, and the full default plus
+  hot-join suites pass.
+- Add the N>=8 warmed `advance_frame` benchmark and CI row from
+  [issue #443](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/443). Exit: N=8
+  and N=16 rows run in the benchmark gate with a documented budget or paired comparison.

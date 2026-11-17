@@ -309,6 +309,31 @@ impl<T> GameStateCell<T> {
         self.0.borrow().frame
     }
 
+    /// Returns whether the cell currently holds game-state data.
+    ///
+    /// A cell can be frame-stamped with `data == None` (an explicit clear via
+    /// [`save`](Self::save)), so checkpoint selection and `load_frame` must
+    /// require the data itself, not only the frame stamp.
+    #[cfg(all(not(loom), not(kani)))]
+    #[must_use]
+    pub(crate) fn has_data(&self) -> bool {
+        self.0.lock().data.is_some()
+    }
+
+    /// Returns whether the cell currently holds game-state data (loom version).
+    #[cfg(loom)]
+    #[must_use]
+    pub(crate) fn has_data(&self) -> bool {
+        self.0.lock().unwrap().data.is_some()
+    }
+
+    /// Returns whether the cell currently holds game-state data (Kani version).
+    #[cfg(kani)]
+    #[must_use]
+    pub(crate) fn has_data(&self) -> bool {
+        self.0.borrow().data.is_some()
+    }
+
     /// Returns the checksum for this saved state, if one was saved.
     ///
     /// Returns `None` if no state has been saved, or if the state was saved without a checksum.

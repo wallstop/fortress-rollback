@@ -3356,3 +3356,150 @@ fn ack_exposure_candidates_reject_healthy_liveness() {
         .expect("mutated isolated peer has remote endpoints");
     assert!(mutated_min > shared_prefix + 1);
 }
+
+/// CAP availability under independent frame clocks: a symmetric partition that
+/// heals before the disconnect timeout must not expel any peer, and the
+/// skew-gated 60 Hz frame model must still converge every survivor on one
+/// confirmed history afterward.
+///
+/// Every other partition row drives the lockstep model (one frame opportunity
+/// per outer step), so the interaction between real clock-rate drift and a
+/// transient partition is untested. Here each peer produces frames from its own
+/// rate-skewed clock, the network is severed across a 2/2 bisection for 1.2 s
+/// (below the 2 s disconnect timeout), and the heal must restore one Running
+/// mesh rather than triggering an automatic drop.
+#[test]
+fn skew_gated_partition_healed_before_timeout_keeps_one_history() {
+    use super::harness::run;
+    use super::harness::schedule::FrameModel;
+
+    const N: usize = 4;
+    const STEPS: u32 = 360;
+    const CUT_STEP: u32 = 80;
+    const HEAL_STEP: u32 = 160;
+    const MIN_FINAL_CONFIRMED: i32 = 200;
+
+    let mut events = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to && ((from < 2) != (to < 2)) {
+                events.push((
+                    CUT_STEP,
+                    ScheduleEvent::Block {
+                        from,
+                        to,
+                        blocked: true,
+                    },
+                ));
+                events.push((
+                    HEAL_STEP,
+                    ScheduleEvent::Block {
+                        from,
+                        to,
+                        blocked: false,
+                    },
+                ));
+            }
+        }
+    }
+    events.sort_by_key(|(step, _)| *step);
+    let mut schedule = disruption_schedule(N, events);
+    schedule.seed = 0xC0FF_EE01;
+    schedule.link_seed = 0xC0FF_EE02;
+    schedule.heal_at = HEAL_STEP;
+    schedule.config.steps = STEPS;
+    schedule.config.frame_model = FrameModel::SkewGated60Hz;
+    // Fastest skew is +500 ppm; at 15 ms per step this remains below the
+    // model's 16 ms at-most-one-opportunity bound.
+    schedule.config.clock_skew_ppm = vec![500, -500, 250, 0];
+    schedule.config.step_dt_ms = 15;
+
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+
+    // Premise: the bisection actually blocked every cross-component direction.
+    for (from, to) in [
+        (0usize, 2usize),
+        (0, 3),
+        (1, 2),
+        (1, 3),
+        (2, 0),
+        (2, 1),
+        (3, 0),
+        (3, 1),
+    ] {
+        assert!(
+            report
+                .blocked_drops_by_link
+                .get(&(from, to))
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "the symmetric partition must block {from}->{to}: {:?}",
+            report.blocked_drops_by_link
+        );
+    }
+    for kind in [EventKind::NetworkInterrupted, EventKind::NetworkResumed] {
+        assert!(
+            report.peer_event_counts.get(&kind).copied().unwrap_or(0) > 0,
+            "the partition and heal must surface {kind:?}: {:?}",
+            report.peer_event_counts
+        );
+    }
+
+    // Premise: individual clocks produced different frame-opportunity totals;
+    // otherwise the run would not be exercising rate drift.
+    let mut opportunities = report.frame_opportunities.clone();
+    opportunities.sort_unstable();
+    assert!(
+        opportunities.first() != opportunities.last(),
+        "the skewed peers must accumulate different opportunity totals: {:?}",
+        report.frame_opportunities
+    );
+
+    // A sub-timeout partition is an availability event, not a drop: every peer
+    // keeps Running, confirms well past the heal, and stays within the
+    // prediction window of every other peer.
+    let final_snapshot = report
+        .trace_tail
+        .last()
+        .expect("a completed run records end-of-step trace snapshots");
+    assert!(
+        final_snapshot
+            .session_states
+            .iter()
+            .all(|state| *state == TraceSessionState::Running),
+        "a healed sub-timeout partition must leave every peer Running: {:?}",
+        final_snapshot.session_states
+    );
+    for (peer, confirmed) in report.final_confirmed.iter().enumerate() {
+        assert!(
+            *confirmed >= MIN_FINAL_CONFIRMED,
+            "peer {peer} must keep confirming after the heal: {:?}",
+            report.final_confirmed
+        );
+    }
+    let lowest = report
+        .final_confirmed
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(i32::MIN);
+    let highest = report
+        .final_confirmed
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(i32::MAX);
+    assert!(
+        (highest - lowest) <= i32::try_from(schedule.config.max_prediction).unwrap_or(i32::MAX),
+        "skewed survivors must stay within the prediction window after healing: {:?}",
+        report.final_confirmed
+    );
+
+    let replay = run(&schedule, &RunOptions::default());
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the skew-gated partition row must reproduce its exact trace"
+    );
+}

@@ -93,7 +93,7 @@
 //! [`FortressRequest::SaveGameState`]: crate::FortressRequest::SaveGameState
 
 use crate::hash::DeterministicHasher;
-use crate::network::codec::{encode, CodecError};
+use crate::network::codec::{encode_single_pass, CodecError};
 use serde::Serialize;
 use std::hash::Hasher;
 
@@ -147,7 +147,7 @@ use std::hash::Hasher;
 ///
 /// [`GameStateCell::save`]: crate::GameStateCell::save
 pub fn compute_checksum<T: Serialize>(state: &T) -> Result<u128, ChecksumError> {
-    let bytes = encode(state)?;
+    let bytes = encode_single_pass(state)?;
     Ok(hash_bytes_fnv1a(&bytes))
 }
 
@@ -177,7 +177,7 @@ pub fn compute_checksum<T: Serialize>(state: &T) -> Result<u128, ChecksumError> 
 /// # Ok::<(), fortress_rollback::checksum::ChecksumError>(())
 /// ```
 pub fn compute_checksum_fletcher16<T: Serialize>(state: &T) -> Result<u128, ChecksumError> {
-    let bytes = encode(state).map_err(|e| {
+    let bytes = encode_single_pass(state).map_err(|e| {
         ChecksumError::serialization_failed(ChecksumAlgorithm::Fletcher16, e.to_string())
     })?;
     Ok(u128::from(fletcher16(&bytes)))
@@ -239,12 +239,24 @@ pub fn hash_bytes_fnv1a(bytes: &[u8]) -> u128 {
 #[inline]
 #[must_use]
 pub fn fletcher16(data: &[u8]) -> u16 {
+    // Defer the modulo reduction to one block at a time: `u32` accumulation
+    // over at most 4096 bytes (the standard Fletcher block bound is 5803 for
+    // an empty start) cannot overflow, and modular arithmetic makes the
+    // deferred reduction bit-identical to the per-byte form. This removes two
+    // integer divisions per input byte, which dominated the old loop.
+    const BLOCK: usize = 4096;
+
     let mut sum1: u16 = 0;
     let mut sum2: u16 = 0;
-
-    for &byte in data {
-        sum1 = (sum1 + u16::from(byte)) % 255;
-        sum2 = (sum2 + sum1) % 255;
+    for chunk in data.chunks(BLOCK) {
+        let mut block_sum1 = u32::from(sum1);
+        let mut block_sum2 = u32::from(sum2);
+        for &byte in chunk {
+            block_sum1 += u32::from(byte);
+            block_sum2 += block_sum1;
+        }
+        sum1 = u16::try_from(block_sum1 % 255).unwrap_or(0);
+        sum2 = u16::try_from(block_sum2 % 255).unwrap_or(0);
     }
 
     (sum2 << 8) | sum1
@@ -402,6 +414,39 @@ mod tests {
         assert_eq!(hash, u128::from(0xaf63_bc4c_8601_b62c_u64));
     }
 
+    #[test]
+    fn compute_checksum_serializes_the_state_exactly_once() {
+        use serde::Serializer;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountingState(Arc<AtomicUsize>);
+
+        impl Serialize for CountingState {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                serializer.serialize_u32(7)
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = CountingState(Arc::clone(&calls));
+        compute_checksum(&state).expect("counting state must serialize");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "checksum computation must not serialize the state twice"
+        );
+
+        calls.store(0, Ordering::Relaxed);
+        compute_checksum_fletcher16(&state).expect("counting state must serialize");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "Fletcher-16 checksum computation must not serialize the state twice"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Error type and Display tests
     // -------------------------------------------------------------------------
@@ -557,6 +602,22 @@ mod property_tests {
             let checksum1 = fletcher16(&data);
             let checksum2 = fletcher16(&data);
             prop_assert_eq!(checksum1, checksum2);
+        }
+
+        /// Property: block accumulation is bit-identical to the per-byte form,
+        /// including across the 4096-byte block boundaries.
+        #[test]
+        fn prop_fletcher16_matches_bytewise_reference(
+            data in proptest::collection::vec(any::<u8>(), 0..12_000)
+        ) {
+            let mut reference_sum1: u16 = 0;
+            let mut reference_sum2: u16 = 0;
+            for &byte in &data {
+                reference_sum1 = (reference_sum1 + u16::from(byte)) % 255;
+                reference_sum2 = (reference_sum2 + reference_sum1) % 255;
+            }
+            let reference = (reference_sum2 << 8) | reference_sum1;
+            prop_assert_eq!(fletcher16(&data), reference);
         }
 
         /// Property: fletcher16 components are bounded by mod-255 arithmetic

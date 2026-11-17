@@ -3701,9 +3701,23 @@ impl<T: Config> P2PSession<T> {
         // traffic (2-peer hosts/joiners, the coordinator itself).
         self.poll_npeer_survivor();
         // Hot-join orchestration can open/commit/abort serves and mutate connect
-        // status outside the ordinary event pass; keep the advance fold exact by
-        // dropping the poll cache in this feature configuration.
-        self.confirmed_frame_cache = None;
+        // status outside the ordinary event pass. Drop the poll cache only when
+        // this session actually carries hot-join state: an ordinary P2P session
+        // built with the feature compiled in must keep the single-fold reuse,
+        // otherwise every hot-join-enabled build pays a second full mesh fold
+        // per frame even though it never joins or serves.
+        let hot_join_may_mutate = !self.hot_join.reserved_slots.is_empty()
+            || self.hot_join.accept_hot_join
+            || self.hot_join.joiner.is_some()
+            || !self.hot_join.joining.is_empty()
+            || self.hot_join.npeer.is_some()
+            || self.hot_join.npeer_post.is_some()
+            || self.hot_join.pending_reactivation.is_some()
+            || !self.hot_join.npeer_closed_attempt_frames.is_empty()
+            || !self.hot_join.serve_retry.is_empty();
+        if hot_join_may_mutate {
+            self.confirmed_frame_cache = None;
+        }
     }
 
     /// Aborts an in-flight hot-join serve for `handle`, performing **all**
@@ -10667,22 +10681,23 @@ impl<T: Config> P2PSession<T> {
         // unchanged. (`window_floor` is computed once at the top of this function.) At or below the
         // floor the target may also be older than the oldest frame every live input queue still
         // retains, because confirmation discards through `confirmed - 1`; see below.
+        let retained_floor = self
+            .sync_layer
+            .oldest_servable_input_frame(&self.local_connect_status);
         let mut load_target = frame_to_load.max(window_floor);
-        if frame_to_load <= window_floor {
-            // The clamp target may itself be older than the shared retained
-            // input history: normal confirmation discards through
-            // `confirmed - 1`, which can sit above `window_floor`. Starting the
-            // re-simulation there would fail `SynchronizedInputsFailed`, leave
-            // `disconnect_frame` armed, and wedge every later advance. Raise the
-            // target to the oldest frame every live queue can still provide.
-            // This also covers a target exactly at the window floor: equality
-            // still leaves it below the confirmed discard edge when the
-            // session has confirmed past the prediction floor.
-            let retained_floor = self.sync_layer.oldest_retained_input_frame();
-            // `Frame::NULL` is below every non-negative target, so the `max`
-            // also encodes the "no retained input" no-op without a separate
-            // null check.
-            load_target = load_target.max(retained_floor);
+        // Normal confirmation discards through `confirmed - 1`, which can sit
+        // above `window_floor`. Starting a re-simulation below the oldest frame
+        // every live input queue still retains would fail
+        // `SynchronizedInputsFailed`, leave `disconnect_frame` armed, and wedge
+        // every later advance. Raise the target whenever it is below that
+        // retained floor — not only when the prediction-window clamp fired: a
+        // gossip-lowered disconnect target can be strictly inside the window
+        // and still below the discard edge. `Frame::NULL` is below every
+        // non-negative target, so the `max` also encodes the "no retained
+        // input" no-op without a separate null check.
+        let raised_to_retained_floor = load_target < retained_floor;
+        load_target = load_target.max(retained_floor);
+        if frame_to_load <= window_floor || raised_to_retained_floor {
             // Sparse save mode may not have a checkpoint at that exact frame;
             // advance to the first loadable one so the rollback still completes.
             // With no state at the raised floor the intervening frames cannot be
@@ -10702,26 +10717,42 @@ impl<T: Config> P2PSession<T> {
             }
         }
         if load_target > first_incorrect {
-            // Legitimate: the rollback target the disconnect convergence asked for fell below the
-            // live prediction window, so we re-simulate from the window floor instead. This is the
-            // gossip-lowered-disconnect-frame-outside-window residual, NOT the genuine sparse bug
-            // the Error above guards — log at Warning so it is not mistaken for a real defect.
-            // Fires once per gossip-lowering event, not per frame: `disconnect_frame` is cleared
-            // after this adjust (and `reset_prediction` runs below), so we are not re-entered for
-            // the same lowered target.
-            report_violation!(
-                ViolationSeverity::Warning,
-                ViolationKind::FrameSync,
-                "rollback target {} is below the prediction-window floor {} (current {}, \
-                 max_prediction {}); re-simulating from {}. Frames below {} cannot be \
-                 corrected for the gossip-lowered disconnect frame.",
-                frame_to_load,
-                window_floor,
-                current_frame,
-                self.max_prediction,
-                load_target,
-                load_target
-            );
+            // Legitimate: re-simulation starts later than the requested correction
+            // frame because that frame (or its inputs) is no longer available. This
+            // is the discard-before-convergence residual, NOT the genuine sparse bug
+            // the Error above guards — log at Warning so it is not mistaken for a real
+            // defect. Fires once per lowering event, not per frame: the disconnect
+            // frame is cleared after this adjust (and `reset_prediction` runs below),
+            // so we are not re-entered for the same lowered target.
+            if frame_to_load <= window_floor {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::FrameSync,
+                    "rollback target {} is below the prediction-window floor {} (current {}, \
+                     max_prediction {}); re-simulating from {}. Frames below {} cannot be \
+                     corrected for the gossip-lowered disconnect frame.",
+                    frame_to_load,
+                    window_floor,
+                    current_frame,
+                    self.max_prediction,
+                    load_target,
+                    load_target
+                );
+            } else {
+                report_violation!(
+                    ViolationSeverity::Warning,
+                    ViolationKind::FrameSync,
+                    "rollback target {} is below the oldest servable input frame {} \
+                     (current {}, max_prediction {}); re-simulating from {}. Frames below {} \
+                     cannot be corrected.",
+                    frame_to_load,
+                    retained_floor,
+                    current_frame,
+                    self.max_prediction,
+                    load_target,
+                    load_target
+                );
+            }
         }
 
         // If load_target >= current_frame, there's nothing to roll back to.
@@ -13469,6 +13500,70 @@ mod tests {
     }
 
     #[test]
+    fn adjust_gamestate_inside_window_target_below_retained_floor_stays_live() {
+        const MAX_PREDICTION: usize = 4;
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_max_prediction_window(MAX_PREDICTION)
+            .with_input_queue_config(crate::InputQueueConfig { queue_length: 16 })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let local = PlayerHandle::new(0);
+
+        for frame_index in 0..=8i32 {
+            let frame = Frame::new(frame_index);
+            assert_eq!(
+                session
+                    .sync_layer
+                    .add_local_input(local, PlayerInput::new(frame, frame_index as u8)),
+                frame
+            );
+            if let FortressRequest::SaveGameState { cell, frame } =
+                session.sync_layer.save_current_state()
+            {
+                cell.save(frame, Some(frame_index as u8), None);
+            }
+            if frame_index < 8 {
+                session.sync_layer.advance_frame();
+            }
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(8), SaveMode::EveryFrame);
+        assert_eq!(
+            session.sync_layer.oldest_retained_input_frame(),
+            Frame::new(7)
+        );
+
+        // The target (5) is strictly inside the prediction window (floor 4)
+        // but below the retained input edge (7). Raising only on the
+        // window-floor branch would leave it untouched, fail
+        // `SynchronizedInputsFailed` on the discarded frame, and wedge every
+        // later advance.
+        let mut requests = RequestVec::<TestConfig>::new();
+        session
+            .adjust_gamestate(Frame::new(5), Frame::new(0), &mut requests)
+            .expect("an in-window rollback below the retained floor must stay live");
+
+        let loaded = requests
+            .iter()
+            .find_map(|request| match request {
+                FortressRequest::LoadGameState { frame, .. } => Some(*frame),
+                _ => None,
+            })
+            .expect("the rollback must load a saved state");
+        assert_eq!(
+            loaded,
+            Frame::new(7),
+            "the in-window target must be raised to the retained input floor"
+        );
+        assert_eq!(session.sync_layer.current_frame(), Frame::new(8));
+    }
+
+    #[test]
     fn adjust_gamestate_advances_to_the_first_loadable_sparse_checkpoint() {
         const MAX_PREDICTION: usize = 4;
         let mut session: P2PSession<TestConfig> = SessionBuilder::new()
@@ -15122,6 +15217,17 @@ mod tests {
             .expect("Failed to add remote player")
             .start_p2p_session(DummySocket)
             .expect("Failed to create session")
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn hot_join_feature_does_not_clear_the_poll_fold_for_a_plain_session() {
+        let mut session = create_two_player_session();
+        session.poll_remote_clients();
+        assert!(
+            session.confirmed_frame_cache.is_some(),
+            "a session with no hot-join state must reuse the poll fold in advance_frame"
+        );
     }
 
     #[test]
@@ -17114,21 +17220,14 @@ mod tests {
     fn confirmed_inputs_for_frame_null_frame_handling() {
         let session = create_local_only_session();
 
-        // NULL frame (which is -1) - the behavior depends on whether it's treated as
-        // "before confirmed" or as an invalid frame. The function checks if frame > confirmed_frame,
-        // and since NULL (-1) <= any confirmed frame, it will try to fetch from the input queue.
-        // The input queue will then fail because frame -1 doesn't exist.
-        let result = session.confirmed_inputs_for_frame(Frame::NULL);
-        // This may succeed or fail depending on implementation details
-        // The key is that it doesn't panic and handles the edge case
-        match result {
-            Ok(_) => {
-                // If it somehow succeeds, that's fine - just verify behavior
-            },
-            Err(_) => {
-                // Expected - frame -1 is not in the queue
-            },
-        }
+        // `Frame::NULL` is -1. It must not wrap through the ring index and
+        // fabricate a blank confirmed input from an empty slot.
+        assert!(matches!(
+            session.confirmed_inputs_for_frame(Frame::NULL),
+            Err(FortressError::InvalidRequestStructured {
+                kind: InvalidRequestKind::NoConfirmedInput { frame },
+            }) if frame == Frame::NULL
+        ));
     }
 
     #[test]

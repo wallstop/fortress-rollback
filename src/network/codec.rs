@@ -932,6 +932,23 @@ pub fn encode<T: Serialize>(value: &T) -> CodecResult<Vec<u8>> {
     Ok(buffer)
 }
 
+/// Encodes a value into a new `Vec<u8>` with a single serialization pass.
+///
+/// [`encode`] first counts the exact encoded length (one complete
+/// serialization) and then serializes again into an exactly reserved buffer.
+/// That is the right trade-off when the bytes are reused or must land in one
+/// allocation, but checksums only consume the bytes once. This variant skips
+/// the counting pass and lets [`FallibleVecWriter`] grow a fallibly reserved
+/// buffer, halving serializer work.
+pub(crate) fn encode_single_pass<T: Serialize>(value: &T) -> CodecResult<Vec<u8>> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve(256).map_err(|_err| {
+        CodecError::encode("failed to reserve output buffer", CodecOperation::Encode)
+    })?;
+    encode_append(value, &mut buffer)?;
+    Ok(buffer)
+}
+
 /// Encodes one network [`Message`] for a byte-stream transport.
 ///
 /// The returned bytes contain a four-byte little-endian `u32` payload length,

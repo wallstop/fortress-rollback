@@ -2039,7 +2039,7 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | Feature                   | Description                                           | Use Case                          | Dependencies        |
 | ------------------------- | ----------------------------------------------------- | --------------------------------- | ------------------- |
 | `sync-send`               | Adds `Send + Sync` bounds to core traits              | Multi-threaded game engines       | None                |
-| `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications | Async game servers                | `tokio` crate       |
+| `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications (native; WASI/Emscripten require Tokio's `tokio_unstable` gate and its unstable-networking restrictions; browser `wasm32-unknown-unknown` is a no-op) | Async game servers                | `tokio` crate       |
 | `json`                    | Enables JSON serialization for telemetry types        | Structured logging/monitoring     | `serde_json` crate  |
 | `hot-join`                | Enables reserved-slot runtime joins and rejoins       | Long-running sessions             | None                |
 | `paranoid`                | Enables runtime invariant checking in release builds  | Debugging production issues       | None                |
@@ -2095,6 +2095,15 @@ other payloads whose encoded size can change from frame to frame.
 #### `tokio`
 
 Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and implements `NonBlockingSocket` for use with Fortress Rollback sessions in async Tokio applications.
+
+The adapter is available on native targets. For WASI and Emscripten, Tokio 1.52
+gates its `net` feature behind the `tokio_unstable` cfg and documents additional
+restrictions for unstable WASI networking; enable that cfg explicitly before relying
+on the adapter there. In particular, Tokio's WASI networking requires sockets to be
+created outside WASM and supplied through `FromRawFd`. `tokio`'s UDP networking does
+not support the browser `wasm32-unknown-unknown` target, so the feature is a
+documented no-op there: browser builds compile with a raw-byte or
+JavaScript-bridged custom socket instead.
 
 ```toml
 [dependencies]

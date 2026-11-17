@@ -186,7 +186,10 @@ pub use checksum::{compute_checksum, compute_checksum_fletcher16, fletcher16, ha
 ///
 /// [`TokioUdpSocket`]: crate::tokio_socket::TokioUdpSocket
 /// [`NonBlockingSocket`]: crate::NonBlockingSocket
-#[cfg(feature = "tokio")]
+#[cfg(all(
+    feature = "tokio",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
 pub mod tokio_socket {
     pub use crate::network::tokio_socket::TokioUdpSocket;
 }
@@ -331,7 +334,10 @@ pub mod network {
     #[doc(hidden)]
     pub mod protocol;
     mod socket_receive;
-    #[cfg(feature = "tokio")]
+    #[cfg(all(
+        feature = "tokio",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
     pub mod tokio_socket;
     #[doc(hidden)]
     pub mod udp_socket;
