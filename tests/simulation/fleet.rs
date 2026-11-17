@@ -5156,18 +5156,23 @@ fn nightly_rare_state_coverage_cell_is_present_and_exercises_ring_and_prediction
 
 /// Permanent regression for the PCT-exposed freeze-frame oracle false
 /// positive. A one-change PCT interleaving at step 302 moves the removed target
-/// (peer 4) to the front; peer 0 then ends with confirmed frame 301 while peer
-/// 3 reaches 303 and observes the slot-4 freeze at frame 302. The oracle used
-/// to read peer 0's unobserved `None` as a disagreement. It must ignore a
-/// survivor whose confirmed prefix ends before the earliest observed freeze,
-/// while still failing a survivor that reached that freeze and never observed a
-/// stable `Disconnected` run.
+/// (peer 4) to the front; peer 0 advances ahead while peers 1-3 stop at the
+/// same confirmed frame under the strict-majority certificate. The oracle used to read a lagging
+/// survivor's unobserved `None` as a disagreement. It must ignore a survivor
+/// whose confirmed prefix ends before the earliest observed freeze, while still
+/// failing a survivor that reached that freeze and never observed a stable
+/// `Disconnected` run.
 #[test]
 fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
-    let schedule: Schedule = serde_json::from_str(include_str!(
+    let mut schedule: Schedule = serde_json::from_str(include_str!(
         "known_failures/d14-lossy-graceful-remove.json"
     ))
     .expect("checked-in D14 schedule must deserialize");
+    // The strict-majority certificate adds a coordinator cut announcement and
+    // a Ready quorum round; under Rough loss the remove needs more than the
+    // original 32 post-remove steps to commit.
+    schedule.config.steps = 750;
+    schedule.heal_at = 750;
     validate_schedule(&schedule).expect("checked-in D14 schedule must be valid");
     let options = RunOptions {
         pct: Some(PctOptions {
@@ -5179,7 +5184,7 @@ fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     let report = run(&schedule, &options);
     assert_eq!(
         report.final_confirmed,
-        vec![301, 301, 301, 303, 295],
+        vec![356, 350, 350, 350, 290],
         "the regression depends on the lagging-survivor interleaving"
     );
     assert!(

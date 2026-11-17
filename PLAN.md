@@ -6,14 +6,11 @@
 
 ## In progress
 
-_None._
+- Land the [issue #445](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/445)
+  strict-majority graceful-drop certificate: deterministic coordinator cut announcement, strict
+  majority of matching Ready witnesses, omitted/live-target fail-closed behavior, and the N=5
+  `3/1/1` plus asymmetric A/B/C-vs-E regressions. Exit: the PR's full CI matrix is green.
 
 ## Future
 
-- Fix [issue #445](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/445): a
-  permanent strict-majority partition with two isolated peers fail-closes the whole majority.
-  A strict-majority certificate needs a proven participant reconciliation (shared required-witness
-  set or majority certificate); local quorum weakening was explored in session 228 and reverted
-  because concurrent disjoint removals expose incompatible cuts. Exit: a deterministic
-  majority-continues regression plus an asymmetric-timeout A/B/C-vs-E reconciliation test pass
-  without forks, and the default plus `hot-join` D14 suites stay green.
+_None._

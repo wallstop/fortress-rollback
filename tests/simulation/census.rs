@@ -2325,7 +2325,7 @@ fn sparse_save_mode_survives_graceful_drop_rollback() {
 /// asymmetric cuts cannot be serialized safely. The observers must hold their
 /// exposed prefixes and fail closed without emitting either uncertified drop.
 #[test]
-fn same_step_multi_drop_after_asymmetric_block_fails_closed() {
+fn same_step_multi_drop_after_asymmetric_block_commits_majority() {
     const SURVIVORS: [usize; 2] = [0, 1];
     const DROPPED: [usize; 2] = [2, 3];
 
@@ -2341,15 +2341,14 @@ fn same_step_multi_drop_after_asymmetric_block_fails_closed() {
     }
     assert_eq!(
         report.recovered_within_b,
-        Some(false),
-        "fail-closed sessions deliberately do not resume after heal"
+        Some(true),
+        "the strict-majority survivors must continue after the heal"
     );
     for observer in SURVIVORS {
         for dropped in DROPPED {
-            assert_eq!(
-                peer_event_payload_count(&report, observer, peer_dropped_key(dropped)),
-                0,
-                "observer {observer} must not emit an uncertified drop for {dropped}: {:?}",
+            assert!(
+                peer_event_payload_count(&report, observer, peer_dropped_key(dropped)) > 0,
+                "observer {observer} must emit the certified drop for {dropped}: {:?}",
                 report.peer_event_payload_counts_by_peer
             );
         }
@@ -2362,16 +2361,25 @@ fn same_step_multi_drop_after_asymmetric_block_fails_closed() {
                 | OracleFailure::InbandDesyncDetected { .. }
                 | OracleFailure::ChecksumMismatchMetric { .. }
         )),
-        "the held prefixes must remain divergence-free: {:?}",
+        "the majority certificate must remain divergence-free: {:?}",
         report.verdict.failures
     );
     let final_snapshot = report.trace_tail.last().expect("non-empty trace");
     for observer in SURVIVORS {
         assert_eq!(
             final_snapshot.session_states.get(observer),
-            Some(&TraceSessionState::Synchronizing),
-            "observer {observer} must fail closed: {:?}",
+            Some(&TraceSessionState::Running),
+            "survivor {observer} must keep Running: {:?}",
             final_snapshot.session_states
+        );
+    }
+    for dropped in DROPPED {
+        assert!(
+            report.final_confirmed[..2]
+                .iter()
+                .all(|survivor| { *survivor > report.final_confirmed[dropped] }),
+            "survivors must confirm past the dropped peer {dropped}: {:?}",
+            report.final_confirmed
         );
     }
 
@@ -2751,7 +2759,10 @@ fn full_ring_receipt_stagger_fails_closed_at_retained_boundary() {
             "expected one end-progress failure for peer {peer}"
         );
     }
-    for peer in 0..4 {
+    // Peers 1/2 keep confirming from the retained prefix; the observer and the
+    // target fail closed before the heal and therefore carry EndProgress rather
+    // than a post-heal liveness failure.
+    for peer in [1_usize, 2, 3] {
         assert_eq!(
             report
                 .verdict
@@ -2766,6 +2777,23 @@ fn full_ring_receipt_stagger_fails_closed_at_retained_boundary() {
             "expected one bounded post-heal failure for peer {peer}"
         );
     }
+    let final_states = report
+        .trace_tail
+        .last()
+        .map(|snapshot| snapshot.session_states.clone())
+        .expect("non-empty trace");
+    assert_eq!(
+        final_states.get(OBSERVER),
+        Some(&TraceSessionState::Synchronizing)
+    );
+    assert_eq!(
+        final_states.get(TARGET),
+        Some(&TraceSessionState::Synchronizing)
+    );
+    assert_eq!(
+        final_states.get(LOW_ORIGIN),
+        Some(&TraceSessionState::Running)
+    );
     assert_eq!(
         report
             .trace_tail

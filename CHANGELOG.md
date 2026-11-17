@@ -63,6 +63,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** a permanent strict-majority partition with two isolated peers no longer
+  fail-closes the whole majority. The coordinated graceful-drop certificate keeps its exact
+  shared participant set, but the deterministic lowest participant now owns the cut (announced
+  before Ready so a donor backfill cannot deadlock), and a strict majority of matching Ready
+  witnesses commits even when a named survivor is unreachable. A still-alive target or an omitted
+  survivor that receives the commit fails closed instead of continuing on a second history, and
+  stale or conflicting commits can never fork a committed cut. The N=5 `3/1/1` permanent-partition
+  and asymmetric A/B/C-vs-E view-split regressions are checked in.
 - **Pre-existing:** a disconnected relay that is polled without advancing no longer has its fresh
   pessimistic floor ignored. The double-failure-relay consumer folds `min(status.last_frame,
   round_floor)` for disconnected relays as well as connected ones, so a relay that answered a

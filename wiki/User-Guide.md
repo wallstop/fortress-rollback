@@ -2959,8 +2959,8 @@ pub fn remove_player(&mut self, player_handle: PlayerHandle) -> Result<(), Fortr
 Every reachable survivor then drives the same bounded protocol from `poll_remote_clients()`:
 
 1. Holds its confirmed frontier and reports its exposed-confirmed high-water plus retained target-input range.
-2. Agrees on a non-retracting cut and backfills any missing retained suffix before declaring ready.
-3. Commits only after every declared survivor has supplied a matching ready certificate.
+2. The lowest participant (the deterministic coordinator) announces one non-retracting cut; participants backfill any missing retained suffix before declaring ready.
+3. Commits after a strict majority of the declared survivors has supplied a matching ready certificate. A still-alive target or an omitted survivor that receives the commit fails closed instead of continuing on a second history.
 4. Atomically freezes every player handle at the target address at that cut, disconnects the endpoint, and emits `FortressEvent::PeerDropped { handle, addr }`, **followed by** `FortressEvent::Disconnected { addr }` in the same `events()` batch.
 
 Keep polling until the events arrive. A two-endpoint session has only one survivor and can commit during the call. In larger sessions, participant loss, unavailable/conflicting retained history, resource refusal, or the two-second operation timeout fails closed: the session returns to `Synchronizing`, the confirmed frontier does not advance past the held prefix, and no `PeerDropped` event is emitted. Concurrent removals are serialized deterministically.
