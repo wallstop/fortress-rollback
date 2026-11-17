@@ -15349,6 +15349,24 @@ mod tests {
 
     #[test]
     #[cfg(feature = "hot-join")]
+    fn poll_hot_join_clears_the_fold_when_orchestration_state_exists() {
+        let mut session = create_two_player_session();
+        session.confirmed_frame_cache = Some(Frame::new(1));
+        session
+            .hot_join
+            .npeer_closed_attempt_frames
+            .insert(PlayerHandle::new(1), Frame::new(1));
+
+        session.poll_hot_join();
+
+        assert!(
+            session.confirmed_frame_cache.is_none(),
+            "hot-join activity can mutate connect status and must drop the poll fold"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
     fn every_hot_join_orchestration_field_invalidates_the_poll_fold() {
         let addr = test_addr(9501);
         let snapshot = || StateSnapshot {
