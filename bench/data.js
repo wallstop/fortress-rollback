@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794869774147,
+  "lastUpdate": 1794884907647,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "49699333+dependabot[bot]@users.noreply.github.com",
-            "name": "dependabot[bot]",
-            "username": "dependabot[bot]"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "d5ac4e053f1d457e8f74b5363e08b368f17500ea",
-          "message": "chore(deps): bump the cargo-workspace group with 2 updates (#334)\n\nBumps the cargo-workspace group with 2 updates:\n[smallvec](https://github.com/servo/rust-smallvec) and\n[z3](https://github.com/prove-rs/z3.rs).\n\nUpdates `smallvec` from 1.16.1 to 1.16.2\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a\nhref=\"https://github.com/servo/rust-smallvec/releases\">smallvec's\nreleases</a>.</em></p>\n<blockquote>\n<h2>v1.16.2</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Backport v2’s retain implementation to v1 by <a\nhref=\"https://github.com/charliermarsh\"><code>@​charliermarsh</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/596\">servo/rust-smallvec#596</a></li>\n<li>Fix element ownership tracking with may_dangle by <a\nhref=\"https://github.com/charliermarsh\"><code>@​charliermarsh</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/594\">servo/rust-smallvec#594</a></li>\n<li>Fix Cargo manual_readme warning by <a\nhref=\"https://github.com/Rayan-and-beyond\"><code>@​Rayan-and-beyond</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/608\">servo/rust-smallvec#608</a></li>\n<li>chore: bump version by <a\nhref=\"https://github.com/alejandro-vaz\"><code>@​alejandro-vaz</code></a>\nin <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/617\">servo/rust-smallvec#617</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a\nhref=\"https://github.com/Rayan-and-beyond\"><code>@​Rayan-and-beyond</code></a>\nmade their first contribution in <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/pull/608\">servo/rust-smallvec#608</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a\nhref=\"https://github.com/servo/rust-smallvec/compare/v1.16.1...v1.16.2\">https://github.com/servo/rust-smallvec/compare/v1.16.1...v1.16.2</a></p>\n</blockquote>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/ccf5fc71044d491c46a3d79e7ed53948e6da1590\"><code>ccf5fc7</code></a>\nchore: bump version (<a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/617\">#617</a>)</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/af207ccb68496e112f3d7366a66c07c6107ef04a\"><code>af207cc</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/608\">#608</a>\nfrom Rayan-and-beyond/fix/manual-readme-warning-606</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/cda4b73506acb35823a8147ef4397375f7063b82\"><code>cda4b73</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/594\">#594</a>\nfrom astral-sh/charlie/codex-fix-may-dangle</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/d0556cb8e33b02b434074896f753f5f03b20c278\"><code>d0556cb</code></a>\nMerge pull request <a\nhref=\"https://redirect.github.com/servo/rust-smallvec/issues/596\">#596</a>\nfrom astral-sh/charlie/codex-v1-compact</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/f73914cf4b523741b9af5d13a98e77d59c54bc13\"><code>f73914c</code></a>\nFlatten retain tests into the unit test module</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/954d599e41b074282857e97c44211f0f797e6597\"><code>954d599</code></a>\nMove retain tests into the unit test module</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/8d936338dbcefa380b4dd596379b57582ed5d616\"><code>8d93633</code></a>\nRemove added retain benchmark harness</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/88c6bfabd610f34f4f1f9d530f58fb8a74b9a807\"><code>88c6bfa</code></a>\nLimit compaction optimization to retain</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/b9ef17da33c19cb1d11190e0c7c29e459297cd6a\"><code>b9ef17d</code></a>\nFix element ownership tracking with may_dangle</li>\n<li><a\nhref=\"https://github.com/servo/rust-smallvec/commit/42029c27c9243d8a178a0d64464185547b3a7d6f\"><code>42029c2</code></a>\nCompact retained elements directly in retain and dedup_by</li>\n<li>See full diff in <a\nhref=\"https://github.com/servo/rust-smallvec/compare/v1.16.1...v1.16.2\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\nUpdates `z3` from 0.21.0 to 0.21.1\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/ffb47c0c2d30259836b93b7dfb01679c4eabbff5\"><code>ffb47c0</code></a>\nchore: release (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/588\">#588</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/cd52e5c1e4178193272742a20cc9ca6f2fa4eb92\"><code>cd52e5c</code></a>\nchore: turn off semver-check for z3 crate</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/fdf3e46f85cff7381af3cbf43816305365da7d36\"><code>fdf3e46</code></a>\nchore: disable semver-checks for z3-sys</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/30578dbab75aacb762b7b3761a72b170f992b909\"><code>30578db</code></a>\nfix: Fall back to pkg-config on build feature conflict (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/595\">#595</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/85d2a48bce50478dae15841d8db7d4ffce337b89\"><code>85d2a48</code></a>\nfeat: Improve Windows cross-compilation support (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/592\">#592</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/f5e0ba7b69582630dd72ffe6057401420f23a4c7\"><code>f5e0ba7</code></a>\nfix: Use wrap for Goal's clone impl (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/594\">#594</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/3d9064797f210d5f59c1587bf29b3b4c783edfd1\"><code>3d90647</code></a>\nfeat: FuncDecl::as_array() (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/591\">#591</a>)</li>\n<li><a\nhref=\"https://github.com/prove-rs/z3.rs/commit/5d4d57ad3a16aa74303b4a23f02918cb9fd20461\"><code>5d4d57a</code></a>\nrefactor: Replace internal usages of z3_ctx.0 with z3_ctx.as_ptr() (<a\nhref=\"https://redirect.github.com/prove-rs/z3.rs/issues/587\">#587</a>)</li>\n<li>See full diff in <a\nhref=\"https://github.com/prove-rs/z3.rs/compare/z3-v0.21.0...z3-v0.21.1\">compare\nview</a></li>\n</ul>\n</details>\n<br />\n\n\nDependabot will resolve any conflicts with this PR as long as you don't\nalter it yourself. You can also trigger a rebase manually by commenting\n`@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits\nthat have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all\nof the ignore conditions of the specified dependency\n- `@dependabot ignore <dependency name> major version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's major version (unless you unignore this specific\ndependency's major version or upgrade to it yourself)\n- `@dependabot ignore <dependency name> minor version` will close this\ngroup update PR and stop Dependabot creating any more for the specific\ndependency's minor version (unless you unignore this specific\ndependency's minor version or upgrade to it yourself)\n- `@dependabot ignore <dependency name>` will close this group update PR\nand stop Dependabot creating any more for the specific dependency\n(unless you unignore this specific dependency or upgrade to it yourself)\n- `@dependabot unignore <dependency name>` will remove all of the ignore\nconditions of the specified dependency\n- `@dependabot unignore <dependency name> <ignore condition>` will\nremove the ignore condition of the specified dependency and ignore\nconditions\n\n\n</details>\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Patch-only lockfile updates with no direct code changes; z3 affects\noptional verification builds only.\n> \n> **Overview**\n> Bumps workspace dependencies in **`Cargo.lock`** only: **`smallvec`**\n1.16.1 → 1.16.2 and **`z3`** 0.21.0 → 0.21.1 (with **`z3-sys`** 0.13.0 →\n0.13.1). No application or manifest changes in this diff.\n> \n> **smallvec** picks up v1 bugfixes (e.g. `retain`/`dedup_by` compaction\nand `may_dangle` ownership tracking). **z3** is a patch release with\nbuild/cross-compile fixes and minor API tweaks upstream; behavior for\noptional Z3 verification tests should stay the same aside from those\ndependency fixes.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit\nb8922e0add3a38378c7d03b8f5b3cb083cafd628. Bugbot is set up for automated\ncode reviews on this repo. Configure\n[here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
-          "timestamp": "2026-10-03T03:02:26Z",
-          "tree_id": "4febf099b20b9b62ce19c164a532f6b17258ac6b",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/d5ac4e053f1d457e8f74b5363e08b368f17500ea"
-        },
-        "date": 1790997421665,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 69231,
-            "range": "± 972",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 34960,
-            "range": "± 910",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1679,
-            "range": "± 110",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 89",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2786,
-            "range": "± 414",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 6827,
             "range": "± 176",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "0c6a97e9facf88c442c386da9dfba11df7f64778",
+          "message": "fix: close CAP drop-certificate liveness and rollback-floor/checkpoint defects (#442)\n\n## Summary\n\nDeep correctness/CAP/cross-platform sweep. Fixes a rollback-floor\nliveness defect, two\ncheckpoint/confirmed-input trust defects, two measured checksum/hot-path\nperformance costs, and the browser-wasm `tokio` build break. Adds the\nmissing permanent\nstrict-majority CAP row and the missing clock-skew + healed-partition\nrow, executes checked-in\ncorpus replays on the 32-bit/ARM lanes, and removes a vacuous hot-join\ncorpus guard.\n\n## Production fixes\n\n### 1. In-window rollback below the retained input floor wedged\n`advance_frame`\n\nThe previous floor raise ran only when the target was at/below the\nprediction-window\nfloor. A gossip-lowered target strictly inside the window but below the\ndiscard edge\n(`confirmed - 1`) still loaded a saved state and then failed\n`SynchronizedInputsFailed`\nforever. The target is now raised to the oldest **servable** frame. The\nnew\n`oldest_servable_input_frame` folds retained-ring starts, disconnected\nslots' frozen-value\nwindows, and hot-join reactivation floors, so legitimate sub-activation\nrollbacks keep\ntheir exact load target (both N-peer sub-F hot-join tests stay green).\n\n```text\npre-fix:  Err(SynchronizedInputsFailed { frame: Frame(5) })\npost-fix: loads Frame(7), current_frame stays 8\n```\n\n### 2. Cleared `GameStateCell` was treated as a loadable checkpoint\n\n`save(frame, None, ..)` is a documented clear, but `load_frame`,\n`saved_state_by_frame`,\nand the sparse earlier-checkpoint search tested only the frame stamp.\nAll three now\nrequire stored data; a cleared cell returns `MissingState` instead of\nsilently\nre-simulating from the caller's current state.\n\n### 3. `confirmed_input(Frame::NULL)` fabricated a blank confirmed input\n\n`-1 as usize` wrapped to the last ring slot and could match a blank\n`Frame::NULL` entry.\nNegative frames now return `NoConfirmedInput` before indexing. The\npreviously vacuous\npublic null-frame test now asserts the error.\n\n### 4. Checksum cost\n\n`compute_checksum` / `compute_checksum_fletcher16` now serialize once\nthrough\n`codec::encode_single_pass` instead of a counting pass followed by an\nencoding pass.\n`fletcher16` accumulates in bounded 4096-byte `u32` blocks and reduces\nmod 255 once per\nblock; a property test proves bit identity with the per-byte form across\nthe boundary.\n\n### 5. Hot-join feature tax on plain sessions\n\n`poll_hot_join` cleared the poll-time confirmed-frame cache\nunconditionally, forcing two\nfull mesh folds per frame for every session built with `--features\nhot-join`, even when it\nnever serves or joins. It now clears only when hot-join state exists.\n\n### 6. Browser-wasm `tokio` build\n\n`mio`'s net backend rejects `wasm32-unknown-unknown`, but the `tokio`\nfeature was\nunscoped. The dependency is now target-scoped; the feature is a\ndocumented no-op on\nbrowser wasm and keeps `TokioUdpSocket` on native/WASI/Emscripten. CI\npins the no-op build.\n\n## New CAP / deterministic coverage\n\n- `skew_gated_partition_healed_before_timeout_keeps_one_history` — N=4\n`2/2` partition\nhealed below the disconnect timeout under `FrameModel::SkewGated60Hz`\nwith independent\nper-peer clock rates; all peers Running and within the prediction window\nafterward.\n- Cross-arch CI now executes the checked-in mixed-transport and\nextended-ring corpus\n  replays on i686 and aarch64, not only the pinned smoke trace digest.\n- The hot-join corpus test no longer passes over an empty directory: it\nfalls back to the\ncanonical generated N-peer hot-join schedule and still picks up promoted\nartifacts.\n- Dependency bump: `clap` 4.6.7 → 4.6.8, `clap_lex` 1.1.1 → 1.1.2 (dev\ntooling).\n\n## Validation\n\n- `cargo nextest run --workspace --features tokio,json`: 3238 passed, 75\nskipped.\n- `cargo nextest run --workspace --features tokio,json,hot-join`: 3529\npassed, 76 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n-- -D warnings`: clean.\n- i686 cross-arch corpus-replay selection: 12 passed (including mixed\ntransport + extended ring).\n- `cargo check --target wasm32-unknown-unknown --no-default-features\n--features tokio`: pass.\n- wasm union\n(`hot-join,json,sync-send,paranoid,trace-validation,violation-census`):\npass.\n- `cargo test -p wasm-browser-smoke --target wasm32-unknown-unknown\n--lib --no-run`: pass.\n- `RUSTFLAGS=\"--cap-lints allow\" cargo kani --only-codegen`: pass.\n- `cd loom-tests && RUSTFLAGS=\"--cfg loom\" cargo test --release`: 9\npassed.\n- `cargo doc --no-deps --features tokio,json,hot-join`: clean.\n- `python3 scripts/ci/agent-preflight.py --full --auto-fix`: all checks\npass.\n- `actionlint`, CI workflow contract tests, changelog hook,\nviolation-site baseline regeneration: pass.\n\n## Follow-ups (not in this PR)\n\n-\n[#445](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/445):\npermanent\nstrict-majority partition with two isolated peers fail-closes the\nmajority; the asymmetric\ntimeout reconciliation needs a protocol-level design and was\ndeliberately reverted from\n  this PR after review.\n-\n[#444](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/444):\ndisconnected\n  relay fresh-floor asymmetry during a poll-only pause.\n-\n[#443](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/443):\nN≥8 warmed\n  `advance_frame` benchmark/allocation row.",
+          "timestamp": "2026-11-17T02:56:37Z",
+          "tree_id": "e0e306277f09a129bcbdf314b6d400f5572d93d5",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/0c6a97e9facf88c442c386da9dfba11df7f64778"
+        },
+        "date": 1794884906545,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 40360,
+            "range": "± 1148",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25942,
+            "range": "± 712",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2772,
+            "range": "± 170",
             "unit": "ns/iter"
           }
         ]
