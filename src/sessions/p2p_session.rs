@@ -16012,6 +16012,188 @@ mod tests {
         );
     }
 
+    fn five_player_majority_session(local: PlayerHandle) -> P2PSession<TestConfig> {
+        let mut builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(5)
+            .expect("five players")
+            .add_player(PlayerType::Local, local)
+            .expect("local player");
+        for handle in 0..5 {
+            if handle != local.as_usize() {
+                builder = builder
+                    .add_player(
+                        PlayerType::Remote(test_addr(9400 + u16::try_from(handle).unwrap_or(0))),
+                        PlayerHandle::new(handle),
+                    )
+                    .expect("remote player");
+            }
+        }
+        let mut session = builder
+            .start_p2p_session(DummySocket)
+            .expect("five-player session");
+        for endpoint in session.player_reg.remotes.values_mut() {
+            endpoint.force_running_for_tests();
+        }
+        for status in session.local_connect_status.iter_mut().take(5) {
+            *status = ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(10),
+                epoch: 0,
+            };
+        }
+        session.state = SessionState::Running;
+        session
+    }
+
+    #[test]
+    fn coordinated_drop_prepare_requires_a_connected_acceptable_target_generation() {
+        let mut session = five_player_majority_session(PlayerHandle::new(1));
+        let targets = vec![DropTarget {
+            handle: 3,
+            generation: 0,
+        }];
+        let prepare = DropPrepare {
+            operation: DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence: 1,
+                target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
+                    &targets,
+                ),
+            },
+            targets,
+            participants: vec![0, 1, 2, 4],
+        };
+        assert!(
+            session.coordinated_drop_validate_prepare(&prepare),
+            "the exact connected-era prepare must validate"
+        );
+
+        session.local_connect_status[3].disconnected = true;
+        assert!(
+            !session.coordinated_drop_validate_prepare(&prepare),
+            "a disconnected target must invalidate the prepare"
+        );
+
+        session.local_connect_status[3].disconnected = false;
+        session.local_connect_status[3].epoch = 6;
+        let mut future_generation = prepare.clone();
+        future_generation.targets[0].generation = 6;
+        future_generation.operation.target_set_digest =
+            P2PSession::<TestConfig>::coordinated_drop_target_digest(&future_generation.targets);
+        assert!(
+            session.coordinated_drop_validate_prepare(&future_generation),
+            "the connected target's own generation is acceptable"
+        );
+        future_generation.targets[0].generation = 8;
+        future_generation.operation.target_set_digest =
+            P2PSession::<TestConfig>::coordinated_drop_target_digest(&future_generation.targets);
+        assert!(
+            !session.coordinated_drop_validate_prepare(&future_generation),
+            "a connected target may not accept an arbitrary future generation"
+        );
+
+        let mut omitted_survivor = prepare.clone();
+        omitted_survivor.participants = vec![1, 2, 4];
+        assert!(
+            !session.coordinated_drop_validate_prepare(&omitted_survivor),
+            "a prepare that omits a running participant must fail closed"
+        );
+    }
+
+    #[test]
+    fn coordinator_cut_announcement_requires_exact_shape_and_authority() {
+        let mut session = five_player_majority_session(PlayerHandle::new(1));
+        let targets = vec![DropTarget {
+            handle: 3,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let seed_active = |session: &mut P2PSession<TestConfig>| {
+            let now = session.coordinated_drop_now();
+            session.coordinated_drop.active = Some(CoordinatedDropAttempt {
+                operation,
+                target_addr: test_addr(9403),
+                targets: targets.clone(),
+                participants: vec![0, 1, 2, 4],
+                quorum: 3,
+                local_participant: 1,
+                held_at: Frame::new(0),
+                phase: CoordinatedDropPhase::Inventory,
+                reports: BTreeMap::new(),
+                ready: std::collections::BTreeSet::new(),
+                ready_transcripts: BTreeMap::new(),
+                committed_acks: std::collections::BTreeSet::new(),
+                cut: None,
+                cut_digest: None,
+                pending_commit: None,
+                backfill_sent: false,
+                backfill_chunks: BTreeMap::new(),
+                relayed_backfill: BTreeMap::new(),
+                next_backfill_chunk: 0,
+                expected_backfill_chunks: None,
+                started_at: now,
+                last_broadcast_at: now,
+            });
+        };
+        let announcement = |participant: u16,
+                            cut: Frame,
+                            digest: u64,
+                            receipts: Vec<DropReceipt>,
+                            exposed: Frame| DropReport {
+            operation,
+            participant,
+            stage: DropReportStage::Inventory,
+            exposed_confirmed: exposed,
+            cut,
+            cut_digest: digest,
+            receipts,
+        };
+
+        seed_active(&mut session);
+        session
+            .coordinated_drop_accept_report(announcement(
+                0,
+                Frame::new(5),
+                0,
+                Vec::new(),
+                Frame::NULL,
+            ))
+            .expect("the coordinator's exact cut announcement is accepted");
+        assert_eq!(
+            session.coordinated_drop.active.as_ref().and_then(|a| a.cut),
+            Some(Frame::new(5))
+        );
+
+        for report in [
+            announcement(1, Frame::new(5), 0, Vec::new(), Frame::NULL),
+            announcement(0, Frame::new(5), 1, Vec::new(), Frame::NULL),
+            announcement(
+                0,
+                Frame::new(5),
+                0,
+                vec![DropReceipt {
+                    target: 3,
+                    available_from: Frame::new(0),
+                    contiguous_through: Frame::new(5),
+                }],
+                Frame::NULL,
+            ),
+            announcement(0, Frame::new(5), 0, Vec::new(), Frame::new(5)),
+        ] {
+            seed_active(&mut session);
+            assert!(
+                session.coordinated_drop_accept_report(report).is_err(),
+                "a non-coordinator or non-announcement shape must be rejected"
+            );
+        }
+    }
+
     /// #445 asymmetric-timeout view: only A timed out E, while B/C still see E
     /// connected. The coordinator's Ready quorum (A/B/C) must commit without
     /// E's witness, and a session that is omitted from the certificate (E)
