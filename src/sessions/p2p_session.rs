@@ -15982,6 +15982,36 @@ mod tests {
         );
     }
 
+    /// A disconnected target generation must match exactly; a connected target
+    /// may be one generation behind the coordinator's just-disconnected view.
+    #[test]
+    fn coordinated_drop_target_generation_acceptance_is_exact_by_view() {
+        let mut session = create_two_player_session();
+        let handle = PlayerHandle::new(1);
+
+        session.local_connect_status[handle.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(10),
+            epoch: 4,
+        };
+        assert!(session.coordinated_drop_target_generation_acceptable(handle, 4));
+        assert!(
+            !session.coordinated_drop_target_generation_acceptable(handle, 5),
+            "a disconnected view may not accept a future-era generation"
+        );
+
+        session.local_connect_status[handle.as_usize()].disconnected = false;
+        assert!(session.coordinated_drop_target_generation_acceptable(handle, 4));
+        assert!(
+            session.coordinated_drop_target_generation_acceptable(handle, 5),
+            "a connected view accepts the coordinator's just-disconnected successor"
+        );
+        assert!(
+            !session.coordinated_drop_target_generation_acceptable(handle, 6),
+            "a connected view may not accept an arbitrary future generation"
+        );
+    }
+
     /// #445 asymmetric-timeout view: only A timed out E, while B/C still see E
     /// connected. The coordinator's Ready quorum (A/B/C) must commit without
     /// E's witness, and a session that is omitted from the certificate (E)
