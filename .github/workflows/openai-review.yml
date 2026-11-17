@@ -1,8 +1,5 @@
 name: OpenAI Review
 
-# Calls the shared review in Ambiguous-Interactive/.github. It posts one COMMENT review per head
-# commit and cannot block a merge. Drafts, forks and bots get no review.
-
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -20,11 +17,11 @@ jobs:
       ${{ !github.event.pull_request.draft &&
           github.event.pull_request.head.repo.full_name == github.repository &&
           github.event.pull_request.user.type != 'Bot' }}
-    uses: Ambiguous-Interactive/.github/.github/workflows/openai-review.yml@v1.0.0
+    uses: Ambiguous-Interactive/review-tools/.github/workflows/openai-review.yml@e37d0ef1195ee247382c92dd8f6370c0b732960b  # v1.0.0
     with:
       model: ${{ vars.OPENAI_REVIEW_MODEL }}
       effort: ${{ vars.OPENAI_REVIEW_EFFORT }}
-      tools-ref: v1.0.0
+      timeout-minutes: 15
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     permissions:
