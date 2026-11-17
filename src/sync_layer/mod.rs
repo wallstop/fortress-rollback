@@ -2535,7 +2535,13 @@ mod sync_layer_tests {
             panic!("save_current_state must return a SaveGameState request");
         };
         cell.save(frame, Some(42u8), Some(12345));
+        sync_layer.advance_frame();
         assert!(sync_layer.saved_state_by_frame(frame).is_some());
+        assert_eq!(
+            sync_layer.newest_saved_frame_in_range(frame, frame),
+            frame,
+            "the populated past frame must be selected by the checkpoint search"
+        );
 
         // The public `GameStateCell::save` contract permits clearing a cell by
         // saving `None`. The frame stamp remains, so a frame-only predicate
@@ -2552,7 +2558,6 @@ mod sync_layer_tests {
                 .is_null(),
             "a cleared cell must not bound a checkpoint range"
         );
-        sync_layer.advance_frame();
         assert!(matches!(
             sync_layer.load_frame(frame),
             Err(FortressError::InvalidFrameStructured {

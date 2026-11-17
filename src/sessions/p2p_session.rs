@@ -1464,16 +1464,7 @@ impl<T: Config> P2PSession<T> {
             })?;
         participants.push(local_participant);
         for (addr, endpoint) in &self.player_reg.remotes {
-            // A timed-out endpoint still reports ProtocolState::Running (the
-            // timeout is a verdict latched for the application while
-            // `NetworkResumed` remains possible), but it cannot answer this
-            // certificate. The automatic-timeout quorum already excludes it
-            // from the reachable-survivor count; excluding it here too keeps
-            // the participant set exactly the witnesses that can vote, so an
-            // unreachable non-target peer cannot stall the certificate into a
-            // durable fail-closed state.
-            if *addr == target_addr || !endpoint.is_running() || endpoint.has_reported_disconnect()
-            {
+            if *addr == target_addr || !endpoint.is_running() {
                 continue;
             }
             if let Some(representative) = endpoint
@@ -1647,11 +1638,7 @@ impl<T: Config> P2PSession<T> {
         }
         current.push(local_participant);
         for (addr, endpoint) in &self.player_reg.remotes {
-            // Match the certificate constructor's reachable-witness set: a
-            // timed-out endpoint cannot answer a prepare it receives late, so
-            // omitting it from the reconstructed set must not invalidate a
-            // prepare this survivor can still complete.
-            if addr == target_addr || !endpoint.is_running() || endpoint.has_reported_disconnect() {
+            if addr == target_addr || !endpoint.is_running() {
                 continue;
             }
             if let Some(representative) = endpoint

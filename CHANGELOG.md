@@ -63,14 +63,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Pre-existing:** a timed-out remote endpoint no longer joins a coordinated graceful-drop
-  certificate's participant set. The automatic-timeout quorum already excluded such an endpoint
-  from its reachable-survivor count, but the participant set was built from `is_running()` alone;
-  a permanent partition with a strict-majority component and two isolated singletons therefore
-  admitted an unreachable non-target witness, timed the certificate out, and durably fail-closed
-  the entire majority. The participant set and the prepare-membership check now use the same
-  reachable-witness predicate, so the majority certifies and continues while the isolated peers
-  fail closed at the shared cut.
 - **Pre-existing:** a rollback target that is inside the prediction window but below the oldest
   servable input frame is now raised to that floor instead of leaving `advance_frame` armed on a
   discarded frame. The retained-floor probe also accounts for frozen slots, disconnected slots

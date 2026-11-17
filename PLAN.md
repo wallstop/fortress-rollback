@@ -10,6 +10,10 @@ _None._
 
 ## Future
 
+- Fix [issue #445](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/445): a
+  permanent strict-majority partition with two isolated peers fail-closes the whole majority.
+  Exit: a deterministic majority-continues regression plus an asymmetric-timeout A/B/C-vs-E
+  reconciliation test pass without forks, and the default plus `hot-join` D14 suites stay green.
 - Fix [issue #444](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/444): a
   disconnected relay's fresh floor is ignored during a poll-only pause. Exit: a deterministic
   scenario reproduces the stale-disconnected-relay race, the consumer folds the fresh floor for
