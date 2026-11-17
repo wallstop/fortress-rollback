@@ -816,6 +816,10 @@ def test_cross_arch_runtime_executes_arm_and_32_bit_usize_targets() -> None:
             "test(smoke_traces_match_checked_in_cross_architecture_digests)"
             in filter_text
         ), f"{lane} must execute the pinned cross-architecture trace digest"
+        assert (
+            "test(simulation::partition_sweep::partition_sweep_pr_gate)"
+            in filter_text
+        ), f"{lane} must execute the partition/CAP gate under a non-x86_64 usize"
         assert "test(simulation::corpus_replay::)" in filter_text, (
             f"{lane} must execute the checked-in corpus replays, which exercise "
             "ring recycling and mixed transports under a non-x86_64 usize"
