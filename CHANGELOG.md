@@ -63,6 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** a disconnected relay that is polled without advancing no longer has its fresh
+  pessimistic floor ignored. The double-failure-relay consumer folds `min(status.last_frame,
+  round_floor)` for disconnected relays as well as connected ones, so a relay that answered a
+  post-prune `FloorRequest` with a floor below its un-mined connect-status freeze cannot let an
+  observer confirm past the true freeze before the relay advances. A stale-high round reply still
+  loses the `min`, preserving the reorder guarantee.
 - **Pre-existing:** a rollback target that is inside the prediction window but below the oldest
   servable input frame is now raised to that floor instead of leaving `advance_frame` armed on a
   discarded frame. The retained-floor probe also accounts for frozen slots, disconnected slots
