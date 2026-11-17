@@ -9921,6 +9921,20 @@ impl<T: Config> P2PSession<T> {
             return Some(SyncHealth::Pending);
         }
 
+        // A confirmed-frame mismatch is a permanent divergence in the trusted
+        // model. `compare_local_checksums_against_peers` consumes the pending
+        // entry after reporting it, so without this latch the stale earlier
+        // `last_verified_frame` would otherwise make this peer look `InSync`.
+        // Checked before the pending scan so no later comparison path can mask
+        // an already-observed confirmed divergence.
+        if let Some((frame, local_checksum, remote_checksum)) = remote.checksum_mismatch_frame {
+            return Some(SyncHealth::DesyncDetected {
+                frame,
+                local_checksum,
+                remote_checksum,
+            });
+        }
+
         // Check for any pending checksums that don't match our local history
         // This catches desyncs before they're processed by compare_local_checksums_against_peers
         for (&remote_frame, &remote_checksum) in &remote.pending_checksums {
@@ -9937,18 +9951,6 @@ impl<T: Config> P2PSession<T> {
                     });
                 }
             }
-        }
-
-        // A confirmed-frame mismatch is a permanent divergence in the trusted
-        // model. `compare_local_checksums_against_peers` consumes the pending
-        // entry after reporting it, so without this latch the stale earlier
-        // `last_verified_frame` would otherwise make this peer look `InSync`.
-        if let Some((frame, local_checksum, remote_checksum)) = remote.checksum_mismatch_frame {
-            return Some(SyncHealth::DesyncDetected {
-                frame,
-                local_checksum,
-                remote_checksum,
-            });
         }
 
         // If THIS peer has a verified frame (a checksum it sent matched our local
