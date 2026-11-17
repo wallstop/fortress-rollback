@@ -321,10 +321,12 @@ z3 = { version = "0.21", optional = true }
 loom = "0.7"
 
 # Tokio async runtime for async socket adapters. Only compiled when the tokio
-# feature is enabled. `mio`'s net support does not cover the browser
-# `wasm32-unknown-unknown` target, so the dependency is target-scoped: enabling
-# the feature there is a documented no-op instead of a build error.
-[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+# feature is enabled. `mio`'s net support does not cover browser
+# `wasm32-unknown-unknown`, and Tokio 1.54 excludes `net` on `wasip1` entirely
+# ("Only features sync,macros,io-util,rt,time are supported on wasm"), so the
+# dependency is target-scoped to neither. Enabling the feature there is a
+# documented no-op instead of a build error.
+[target.'cfg(not(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "wasi")))'.dependencies]
 tokio = { version = "1.52", features = ["net", "io-util", "sync", "rt", "macros", "time"], optional = true }
 
 # The root test/benchmark toolchain is native/Emscripten-only. Keeping these

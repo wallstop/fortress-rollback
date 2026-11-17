@@ -360,14 +360,18 @@ def test_miri_job_has_no_cross_target_apt_setup() -> None:
             )
 
 
-def test_wasm_job_covers_browser_and_emscripten_targets() -> None:
-    """WASM CI must compile both supported target families independently."""
+def test_wasm_job_covers_browser_emscripten_and_wasi_targets() -> None:
+    """WASM CI must compile every supported target family independently."""
     workflow = _load_ci_rust_workflow()
     wasm_job = workflow["jobs"]["wasm-check"]
 
     assert wasm_job["strategy"]["fail-fast"] is False
     assert Counter(wasm_job["strategy"]["matrix"]["target"]) == Counter(
-        ("wasm32-unknown-unknown", "wasm32-unknown-emscripten")
+        (
+            "wasm32-unknown-unknown",
+            "wasm32-unknown-emscripten",
+            "wasm32-wasip1",
+        )
     )
 
     steps = wasm_job["steps"]
@@ -398,6 +402,15 @@ def test_wasm_job_covers_browser_and_emscripten_targets() -> None:
             frozenset({"tokio"}),
         )
     )
+
+    # Tokio rejects its `net` feature on every wasm target, so the feature is a
+    # no-op for browser wasm and `wasip1` alike; Emscripten keeps the adapter.
+    tokio_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Check WASM targets treat tokio as a no-op"
+    )
+    assert tokio_step["if"] == "matrix.target != 'wasm32-unknown-emscripten'"
 
     clippy_commands = _cargo_commands(steps, "clippy")
     assert len(clippy_commands) == 1

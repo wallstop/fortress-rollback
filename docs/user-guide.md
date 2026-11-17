@@ -2039,7 +2039,7 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | Feature                   | Description                                           | Use Case                          | Dependencies        |
 | ------------------------- | ----------------------------------------------------- | --------------------------------- | ------------------- |
 | `sync-send`               | Adds `Send + Sync` bounds to core traits              | Multi-threaded game engines       | None                |
-| `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications (native; WASI/Emscripten require Tokio's `tokio_unstable` gate and its unstable-networking restrictions; browser `wasm32-unknown-unknown` is a no-op) | Async game servers                | `tokio` crate       |
+| `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications (native and Emscripten; browser `wasm32-unknown-unknown` and WASI are documented no-ops: Tokio rejects the `net` feature on wasm) | Async game servers                | `tokio` crate       |
 | `json`                    | Enables JSON serialization for telemetry types        | Structured logging/monitoring     | `serde_json` crate  |
 | `hot-join`                | Enables reserved-slot runtime joins and rejoins       | Long-running sessions             | None                |
 | `paranoid`                | Enables runtime invariant checking in release builds  | Debugging production issues       | None                |
@@ -2096,14 +2096,14 @@ other payloads whose encoded size can change from frame to frame.
 
 Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and implements `NonBlockingSocket` for use with Fortress Rollback sessions in async Tokio applications.
 
-The adapter is available on native targets. For WASI and Emscripten, Tokio 1.52
-gates its `net` feature behind the `tokio_unstable` cfg and documents additional
-restrictions for unstable WASI networking; enable that cfg explicitly before relying
-on the adapter there. In particular, Tokio's WASI networking requires sockets to be
-created outside WASM and supplied through `FromRawFd`. `tokio`'s UDP networking does
-not support the browser `wasm32-unknown-unknown` target, so the feature is a
-documented no-op there: browser builds compile with a raw-byte or
-JavaScript-bridged custom socket instead.
+The adapter is available on native and Emscripten targets. Tokio 1.54 rejects
+the `net` feature on every wasm target (`Only features
+sync,macros,io-util,rt,time are supported on wasm`), so the `tokio` feature is
+a documented no-op for both browser `wasm32-unknown-unknown` and
+`wasm32-wasip1`: the crate compiles, but `TokioUdpSocket` is not exported. Use
+a raw-byte or JavaScript-bridged custom socket instead. (Earlier releases
+described a `tokio_unstable` gate for WASI; Tokio no longer exposes `net` on
+`wasip1` at all, so that configuration cannot compile.)
 
 ```toml
 [dependencies]
@@ -2963,7 +2963,7 @@ Every reachable survivor then drives the same bounded protocol from `poll_remote
 3. Commits after a strict majority of the declared survivors has supplied a matching ready certificate. A still-alive target or an omitted survivor that receives the commit fails closed instead of continuing on a second history.
 4. Atomically freezes every player handle at the target address at that cut, disconnects the endpoint, and emits `FortressEvent::PeerDropped { handle, addr }`, **followed by** `FortressEvent::Disconnected { addr }` in the same `events()` batch.
 
-Keep polling until the events arrive. A two-endpoint session has only one survivor and can commit during the call. In larger sessions, participant loss, unavailable/conflicting retained history, resource refusal, or the two-second operation timeout fails closed: the session returns to `Synchronizing`, the confirmed frontier does not advance past the held prefix, and no `PeerDropped` event is emitted. Concurrent removals are serialized deterministically.
+Keep polling until the events arrive. A two-endpoint session has only one survivor and can commit during the call. In larger sessions, participant loss, unavailable/conflicting retained history, resource refusal, or the two-second operation timeout fails closed: the session returns to `Synchronizing`, the confirmed frontier does not advance past the held prefix, and no `PeerDropped` event is emitted. Concurrent removals with different targets are not supported in one protocol round: a session runs at most one certificate at a time and only the deterministic lowest participant may choose a cut, so the losing removal cannot make progress and its sessions fail closed (`Synchronizing`) instead of forking. Serialize application-driven removals: issue one, wait for its `PeerDropped`/`Disconnected` events, then issue the next.
 
 ```rust
 use fortress_rollback::{
