@@ -2098,9 +2098,10 @@ Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and imp
 
 The adapter is available on native targets. For WASI and Emscripten, Tokio 1.52
 gates its `net` feature behind the `tokio_unstable` cfg and documents additional
-restrictions for unstable WASI networking; enable that cfg explicitly and review
-those restrictions before relying on the adapter there. `tokio`'s UDP networking
-does not support the browser `wasm32-unknown-unknown` target, so the feature is a
+restrictions for unstable WASI networking; enable that cfg explicitly before relying
+on the adapter there. In particular, Tokio's WASI networking requires sockets to be
+created outside WASM and supplied through `FromRawFd`. `tokio`'s UDP networking does
+not support the browser `wasm32-unknown-unknown` target, so the feature is a
 documented no-op there: browser builds compile with a raw-byte or
 JavaScript-bridged custom socket instead.
 
