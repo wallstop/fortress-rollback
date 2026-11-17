@@ -16046,6 +16046,72 @@ mod tests {
     }
 
     #[test]
+    fn coordinated_drop_quorum_is_strict_majority() {
+        for (participants, expected) in [(1, 1), (2, 2), (3, 2), (4, 3), (5, 3), (6, 4)] {
+            assert_eq!(
+                P2PSession::<TestConfig>::coordinated_drop_quorum(participants),
+                expected,
+                "quorum for {participants} participants"
+            );
+        }
+    }
+
+    #[test]
+    fn two_of_four_ready_witnesses_cannot_apply_a_commit() {
+        let mut session = five_player_majority_session(PlayerHandle::new(1));
+        let targets = vec![DropTarget {
+            handle: 3,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let cut = Frame::new(0);
+        let commit = DropCommit {
+            operation,
+            cut,
+            cut_digest: 0,
+        };
+        let now = session.coordinated_drop_now();
+        let mut ready = std::collections::BTreeSet::new();
+        ready.insert(0_u16);
+        ready.insert(1_u16);
+        session.coordinated_drop.active = Some(CoordinatedDropAttempt {
+            operation,
+            target_addr: test_addr(9403),
+            targets,
+            participants: vec![0, 1, 2, 4],
+            quorum: 3,
+            local_participant: 1,
+            held_at: cut,
+            phase: CoordinatedDropPhase::Ready,
+            reports: BTreeMap::new(),
+            ready,
+            ready_transcripts: BTreeMap::new(),
+            committed_acks: std::collections::BTreeSet::new(),
+            cut: Some(cut),
+            cut_digest: Some(0),
+            pending_commit: Some(commit),
+            backfill_sent: false,
+            backfill_chunks: BTreeMap::new(),
+            relayed_backfill: BTreeMap::new(),
+            next_backfill_chunk: 0,
+            expected_backfill_chunks: None,
+            started_at: now,
+            last_broadcast_at: now,
+        });
+        assert_eq!(
+            session.coordinated_drop_apply_commit(commit),
+            Err(DropAbortReason::ConflictingHistory),
+            "two of four Ready witnesses are not a strict majority"
+        );
+        assert!(!session.local_connect_status[3].disconnected);
+    }
+
+    #[test]
     fn coordinated_drop_prepare_requires_a_connected_acceptable_target_generation() {
         let mut session = five_player_majority_session(PlayerHandle::new(1));
         let targets = vec![DropTarget {
