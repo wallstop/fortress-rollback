@@ -551,6 +551,16 @@ impl<T: Config> InputQueue<T> {
         &self,
         requested_frame: Frame,
     ) -> Result<PlayerInput<T::Input>, crate::FortressError> {
+        // A negative frame (including `Frame::NULL` = -1) must not wrap through
+        // `as usize` into a ring slot: slot `queue_length - 1` may hold a blank
+        // `Frame::NULL` entry whose stamped frame matches the request, which
+        // would fabricate a "confirmed" default input that never existed.
+        if requested_frame.as_i32() < 0 {
+            return Err(InvalidRequestKind::NoConfirmedInput {
+                frame: requested_frame,
+            }
+            .into());
+        }
         if let Some(input) = self.reclaimed_floor_input {
             if input.frame == requested_frame {
                 return Ok(input);
@@ -2539,6 +2549,22 @@ mod input_queue_tests {
         // Try to get input for frame 10 which doesn't exist
         let result = queue.confirmed_input(Frame::new(10));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn confirmed_input_rejects_negative_frames_instead_of_wrapping() {
+        let queue = test_queue(0);
+        for frame in [Frame::NULL, Frame::new(-5)] {
+            assert!(
+                matches!(
+                    queue.confirmed_input(frame),
+                    Err(FortressError::InvalidRequestStructured {
+                        kind: InvalidRequestKind::NoConfirmedInput { frame: rejected },
+                    }) if rejected == frame
+                ),
+                "negative frame {frame:?} must not wrap into a ring slot"
+            );
+        }
     }
 
     #[test]

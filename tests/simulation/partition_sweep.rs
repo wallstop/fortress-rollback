@@ -3356,3 +3356,290 @@ fn ack_exposure_candidates_reject_healthy_liveness() {
         .expect("mutated isolated peer has remote endpoints");
     assert!(mutated_min > shared_prefix + 1);
 }
+
+/// CAP availability under independent frame clocks: a symmetric partition that
+/// heals before the disconnect timeout must not expel any peer, and the
+/// skew-gated 60 Hz frame model must still converge every survivor on one
+/// confirmed history afterward.
+///
+/// Every other partition row drives the lockstep model (one frame opportunity
+/// per outer step), so the interaction between real clock-rate drift and a
+/// transient partition is untested. Here each peer produces frames from its own
+/// rate-skewed clock, the network is severed across a 2/2 bisection for 1.2 s
+/// (below the 2 s disconnect timeout), and the heal must restore one Running
+/// mesh rather than triggering an automatic drop.
+#[test]
+fn skew_gated_partition_healed_before_timeout_keeps_one_history() {
+    use super::harness::run;
+    use super::harness::schedule::FrameModel;
+
+    const N: usize = 4;
+    const STEPS: u32 = 360;
+    const CUT_STEP: u32 = 80;
+    const HEAL_STEP: u32 = 160;
+    const MIN_FINAL_CONFIRMED: i32 = 200;
+
+    let mut events = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to && ((from < 2) != (to < 2)) {
+                events.push((
+                    CUT_STEP,
+                    ScheduleEvent::Block {
+                        from,
+                        to,
+                        blocked: true,
+                    },
+                ));
+                events.push((
+                    HEAL_STEP,
+                    ScheduleEvent::Block {
+                        from,
+                        to,
+                        blocked: false,
+                    },
+                ));
+            }
+        }
+    }
+    events.sort_by_key(|(step, _)| *step);
+    let mut schedule = disruption_schedule(N, events);
+    schedule.seed = 0xC0FF_EE01;
+    schedule.link_seed = 0xC0FF_EE02;
+    schedule.heal_at = HEAL_STEP;
+    schedule.config.steps = STEPS;
+    schedule.config.frame_model = FrameModel::SkewGated60Hz;
+    // Fastest skew is +500 ppm; at 15 ms per step this remains below the
+    // model's 16 ms at-most-one-opportunity bound.
+    schedule.config.clock_skew_ppm = vec![500, -500, 250, 0];
+    schedule.config.step_dt_ms = 15;
+
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+
+    // Premise: the bisection actually blocked every cross-component direction.
+    for (from, to) in [
+        (0usize, 2usize),
+        (0, 3),
+        (1, 2),
+        (1, 3),
+        (2, 0),
+        (2, 1),
+        (3, 0),
+        (3, 1),
+    ] {
+        assert!(
+            report
+                .blocked_drops_by_link
+                .get(&(from, to))
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "the symmetric partition must block {from}->{to}: {:?}",
+            report.blocked_drops_by_link
+        );
+    }
+    for kind in [EventKind::NetworkInterrupted, EventKind::NetworkResumed] {
+        assert!(
+            report.peer_event_counts.get(&kind).copied().unwrap_or(0) > 0,
+            "the partition and heal must surface {kind:?}: {:?}",
+            report.peer_event_counts
+        );
+    }
+
+    // Premise: individual clocks produced different frame-opportunity totals;
+    // otherwise the run would not be exercising rate drift.
+    let mut opportunities = report.frame_opportunities.clone();
+    opportunities.sort_unstable();
+    assert!(
+        opportunities.first() != opportunities.last(),
+        "the skewed peers must accumulate different opportunity totals: {:?}",
+        report.frame_opportunities
+    );
+
+    // A sub-timeout partition is an availability event, not a drop: every peer
+    // keeps Running, confirms well past the heal, and stays within the
+    // prediction window of every other peer.
+    let final_snapshot = report
+        .trace_tail
+        .last()
+        .expect("a completed run records end-of-step trace snapshots");
+    assert!(
+        final_snapshot
+            .session_states
+            .iter()
+            .all(|state| *state == TraceSessionState::Running),
+        "a healed sub-timeout partition must leave every peer Running: {:?}",
+        final_snapshot.session_states
+    );
+    for (peer, confirmed) in report.final_confirmed.iter().enumerate() {
+        assert!(
+            *confirmed >= MIN_FINAL_CONFIRMED,
+            "peer {peer} must keep confirming after the heal: {:?}",
+            report.final_confirmed
+        );
+    }
+    let lowest = report
+        .final_confirmed
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(i32::MIN);
+    let highest = report
+        .final_confirmed
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(i32::MAX);
+    assert!(
+        (highest - lowest) <= i32::try_from(schedule.config.max_prediction).unwrap_or(i32::MAX),
+        "skewed survivors must stay within the prediction window after healing: {:?}",
+        report.final_confirmed
+    );
+
+    let replay = run(&schedule, &RunOptions::default());
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the skew-gated partition row must reproduce its exact trace"
+    );
+}
+
+/// CAP majority row with more than one unreachable non-target peer: a
+/// permanent partition into a strict-majority component and two isolated
+/// singletons must still let the majority certify both drops and continue.
+///
+/// This is the liveness complement to the healed `6/2` row. A timed-out
+/// endpoint remains protocol-`Running` (its silence verdict is latched while
+/// `NetworkResumed` stays possible), so a certificate participant set built
+/// from `is_running()` alone includes a peer that cannot vote. The first
+/// certificate then waits on that unreachable witness and aborts, which
+/// durably fail-closes the entire majority. Excluding timed-out endpoints
+/// from the participant set (exactly as the automatic-timeout quorum already
+/// excludes them from its survivor count) keeps the certificate to reachable
+/// witnesses.
+#[test]
+fn permanent_majority_partition_with_two_isolated_peers_continues() {
+    use super::harness::run;
+
+    const N: usize = 5;
+    const GROUPS: [usize; N] = [0, 0, 0, 1, 2];
+    const CUT_STEP: u32 = 80;
+    const CUT_ALLOWANCE: i32 = 8;
+    const MAJORITY_MIN_CONFIRMED: i32 = 300;
+
+    let mut events = Vec::new();
+    for (from, &from_group) in GROUPS.iter().enumerate() {
+        for (to, &to_group) in GROUPS.iter().enumerate() {
+            if from != to && from_group != to_group {
+                events.push((
+                    CUT_STEP,
+                    ScheduleEvent::Block {
+                        from,
+                        to,
+                        blocked: true,
+                    },
+                ));
+            }
+        }
+    }
+    let mut schedule = disruption_schedule(N, events);
+    schedule.seed = 0xC0FF_EE11;
+    schedule.link_seed = 0xC0FF_EE12;
+    schedule.config.steps = 900;
+    schedule.heal_at = 900;
+
+    let report = run(&schedule, &RunOptions::default());
+
+    // The majority keeps one confirmed history and continues far past the cut.
+    let majority = &report.final_confirmed[..3];
+    assert_eq!(
+        majority[0], majority[1],
+        "majority peers must confirm one history: {:?}",
+        report.final_confirmed
+    );
+    assert_eq!(
+        majority[1], majority[2],
+        "majority peers must confirm one history: {:?}",
+        report.final_confirmed
+    );
+    assert!(
+        majority[0] >= MAJORITY_MIN_CONFIRMED,
+        "the strict-majority component must keep confirming: {:?}",
+        report.final_confirmed
+    );
+    let final_snapshot = report
+        .trace_tail
+        .last()
+        .expect("a completed run records end-of-step trace snapshots");
+    assert_eq!(
+        &final_snapshot.session_states[..3],
+        &[TraceSessionState::Running; 3],
+        "the majority component must stay Running: {:?}",
+        final_snapshot.session_states
+    );
+
+    // The two singletons fail closed at the shared cut without inventing a
+    // second history.
+    for peer in 3..N {
+        assert!(
+            report.final_confirmed[peer] <= CUT_STEP as i32 + CUT_ALLOWANCE,
+            "isolated peer {peer} must fail closed at the cut: {:?}",
+            report.final_confirmed
+        );
+        assert_eq!(
+            final_snapshot.session_states[peer],
+            TraceSessionState::Synchronizing,
+            "isolated peer {peer} must fail closed: {:?}",
+            final_snapshot.session_states
+        );
+    }
+
+    // Each majority peer witnesses both certified drops.
+    use super::harness::{peer_addr, PeerEventKey, PeerEventPayload};
+    for peer in 0..3 {
+        for dropped in 3..N {
+            let key = PeerEventKey {
+                kind: EventKind::PeerDropped,
+                payload: PeerEventPayload::PlayerAddr {
+                    handle: fortress_rollback::PlayerHandle::new(dropped),
+                    addr: peer_addr(dropped),
+                },
+            };
+            let observed = report
+                .peer_event_payload_counts_by_peer
+                .get(peer)
+                .and_then(|counts| counts.get(&key))
+                .copied()
+                .unwrap_or(0);
+            assert!(
+                observed > 0,
+                "majority peer {peer} must observe PeerDropped for {dropped}: {:?}",
+                report.peer_event_payload_counts_by_peer
+            );
+        }
+    }
+    assert!(
+        typed_safe_failure_diagnostics_hold(
+            &report,
+            false,
+            false,
+            schedule.config.recovery_window_steps(),
+        ),
+        "the isolated peers' terminal failures must stay the reviewed EndProgress set: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. } | OracleFailure::StateDivergence { .. }
+        )),
+        "the majority and the isolated peers must share one confirmed prefix: {:?}",
+        report.verdict.failures
+    );
+
+    let replay = run(&schedule, &RunOptions::default());
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the permanent-majority row must reproduce its exact trace"
+    );
+}

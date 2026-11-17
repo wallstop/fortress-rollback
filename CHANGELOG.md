@@ -63,6 +63,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** a timed-out remote endpoint no longer joins a coordinated graceful-drop
+  certificate's participant set. The automatic-timeout quorum already excluded such an endpoint
+  from its reachable-survivor count, but the participant set was built from `is_running()` alone;
+  a permanent partition with a strict-majority component and two isolated singletons therefore
+  admitted an unreachable non-target witness, timed the certificate out, and durably fail-closed
+  the entire majority. The participant set and the prepare-membership check now use the same
+  reachable-witness predicate, so the majority certifies and continues while the isolated peers
+  fail closed at the shared cut.
+- **Pre-existing:** a rollback target that is inside the prediction window but below the oldest
+  servable input frame is now raised to that floor instead of leaving `advance_frame` armed on a
+  discarded frame. The retained-floor probe also accounts for frozen slots, disconnected slots
+  served from their frozen value, and hot-join reactivation floors, so legitimate sub-activation
+  rollbacks keep their exact load target.
+- **Pre-existing:** a `GameStateCell` that was explicitly cleared with `save(frame, None, ..)` is
+  no longer treated as a loadable rollback checkpoint. `load_frame`, `saved_state_by_frame`, and
+  the sparse earlier-checkpoint search now require stored data as well as a matching frame stamp,
+  so a cleared cell returns `MissingState` instead of silently re-simulating from the caller's
+  current state.
+- **Pre-existing:** `confirmed_inputs_for_frame(Frame::NULL)` (and internal negative-frame
+  lookups) now returns `NoConfirmedInput` instead of wrapping `-1` to the last ring slot and
+  fabricating a blank confirmed input.
+- **Pre-existing:** `compute_checksum` and `compute_checksum_fletcher16` serialize the state in
+  one pass instead of a counting pass followed by an encoding pass. `fletcher16` also defers its
+  modulo reduction to bounded blocks, removing two integer divisions per input byte; output is
+  bit-identical to the previous per-byte form.
+- **Pre-existing:** ordinary P2P sessions built with the `hot-join` feature now keep the
+  poll-time confirmation fold for `advance_frame`. The poll cache was cleared unconditionally by
+  `poll_hot_join`, forcing a second full mesh fold every frame even for sessions that never serve
+  or join; it is now cleared only when hot-join state can actually mutate a folding input.
+- **Pre-existing:** enabling the `tokio` feature on browser `wasm32-unknown-unknown` no longer
+  fails to build. The dependency is scoped away from that target and the feature is a documented
+  no-op there; native, WASI, and Emscripten builds keep `TokioUdpSocket`.
 - **Pre-existing:** a spectator now records a host's final reliable input when the `Goodbye`
   datagram is decoded before that input within the same poll. Previously the host was tombstoned
   on the first `Goodbye` event and the already-drained input was skipped, leaving the spectator
