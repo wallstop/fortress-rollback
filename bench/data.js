@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794896138629,
+  "lastUpdate": 1794900214218,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "ab451d28c080138b8a92a578bd0eb38fb7751ae2",
-          "message": "fix: close partition forks and expand consistency evidence (#364)\n\n## Description\n\nThis aggregate change repairs current-main dependency breakage, advances\nthe active consistency-evidence P0, and fixes the split-brain defect\nfound by the new matrix.\n\n- Restore `parking_lot` 0.12 after #359 followed a Loom path dependency\nand changed the root manifest to the Rust-1.95-only 0.13 line without\nsynchronizing all locks. Apply every root MSRV hold to every auxiliary\nCargo updater, with a drift-proof regression test.\n- Supersede stale install-action 2.89.0 update #362 with immutable\nv2.90.1 pins at every use, including the composite installer.\n- Add an expectation-aware partition ledger at N=2/3/4/8/16. It\npreserves complete oracle diagnostics and replay evidence, checks\npre-cut progress and every directed injection, classifies bounded\nrecovery/safe failure/defect/invalid evidence, and runs matched\ncorruption controls.\n- Fix witnessless automatic `ContinueWithout` timeouts so two-endpoint\npartitions cannot commit opposite one-member certificates. Explicit\n`remove_player` and remote Goodbye retain their existing one-survivor\nbehavior; uncertified `Disconnected` events stay suppressed, and\nspectator same-poll Goodbye handling stays consistent.\n- Enforce the complete oracle verdict in the existing healthy cost sweep\nwithout changing the sweep-v3 JSON schema. Publish both matrices through\nnightly artifacts and document exact evidence at `8c8660b`.\n\nThe active plan remains open for reorder, duplication, bursts,\nasymmetry, repeated flaps, poll stalls, exact timing/resource\nmeasurements, and component-scoped majority/minority state evidence.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No new `unwrap()` in production code\n  - No new `expect()` in production code\n  - No new `panic!()` or `todo!()`\n  - New production errors use existing explicit state/error paths\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [x] I have updated relevant examples in the `examples/` directory (no\nAPI signatures or example behavior required changes)\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- Witnessless two-endpoint and multi-handle automatic-timeout\nregressions.\n- Explicit local removal and receiver-side Goodbye compatibility\ncoverage.\n- Spectator same-poll input-plus-Goodbye regression coverage.\n- Hot-join witnessless-timeout terminal-state coverage; obsolete\nauto-drop/rejoin assumptions removed.\n- Dependabot root/child MSRV-rule drift regression.\n- Partition schedule, classifier, replay, premise, terminal-plateau, and\nmatched negative-control coverage.\n\n**Validation performed:**\n\n- `cargo nextest run --no-capture`: **2,981 passed, 73 skipped**.\n- `cargo nextest run --features hot-join --no-fail-fast --no-capture`:\n**3,239 passed, 74 skipped**.\n- Exact nightly release matrices at\n`8c8660bf37341eff246bf85d7913d2e2c6ce0c18`: **2 passed**; 136 cost rows\nplus 24 partition rows.\n- Partition ledger: **5 bounded recoveries, 15 safe failures, 4\nintentional defect controls**; zero replay mismatches, zero premise\nviolations, four typed controls, and a 64-step plateau in every\nsafe-failure row.\n- Exact PR gates: **2 passed**; ten baseline rows match the checked-in\ncost ledger with zero desyncs.\n- `cargo +1.86.0 check --locked --all-targets`: **passed**.\n- `python3 scripts/release/workspace_locks.py check`: **all four\nworkspaces passed**.\n- `cargo update --dry-run`: **zero compatible updates** in every Cargo\nworkspace; only intentional MSRV-held root releases remain outdated.\n- `.venv/bin/pytest scripts/tests -q`: **2,186 passed**.\n- `cargo test --doc -- --nocapture`: **160 passed, 50 ignored**.\n- Rustdoc with `-D warnings`, Actionlint, Markdownlint, plan hygiene,\nchangelog policy, wiki consistency, link checking, doc claims, and\nbranch-explicit agent preflight: **passed**.\n- Final adversarial review after Goodbye and spectator fixes: **zero\nfindings**.\n\n## Related Issues\n\n- Supersedes #362 with the newer install-action release and the required\nmain-lock repair.\n- Advances the active P0 in `PLAN.md`; no open GitHub issues existed\nwhen this work began.",
-          "timestamp": "2026-11-05T10:44:08-08:00",
-          "tree_id": "41ce73583aee3306fd54af4d46ee938429c83570",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/ab451d28c080138b8a92a578bd0eb38fb7751ae2"
-        },
-        "date": 1793904785291,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 60433,
-            "range": "± 639",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 30863,
-            "range": "± 359",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1785,
-            "range": "± 112",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 114",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2995,
-            "range": "± 230",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 6895,
             "range": "± 268",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "e48e758d1a50e8b3a2ab0903d22738b1d9b3af90",
+          "message": "test: finish the vacuous-test sweep (#446) (#456)\n\n## Description\n\nCompletes the #446 vacuous-test sweep. A call-aware scanner over `src/`,\n`tests/`, and `loom-tests/` found the remaining no-assert tests after\nsessions 228–229; this PR makes the genuine survivors assert their\nintended behavior:\n\n- **RNG:** recursion counts the custom `RandomValue` implementation and\nproves the nested thread-local `random()` re-entry does not deadlock the\n`RefCell`; entropy seeding asserts a non-constant stream.\n- **Telemetry:** `debug_check_invariants!` ok/fail now assert the\ncollected violations, severity/kind, invariant text, and context suffix;\n`report_violation_to!` with an explicit `None` asserts it does not fall\nback to the thread-scoped collector.\n- **Config:** each Debug rendering must name its type.\n\nThe remaining no-literal-assert tests are classified and not vacuous:\n`?`-propagating constructors, `#[should_panic]` contracts, compile-time\nmacro/API contract tests, helper-driven orchestration whose helpers\nassert, and explicit z3 proof summaries.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n## Testing\n\n**Tests added/modified:**\n- `rng::tests::test_random_value_can_call_random_recursively`,\n`test_seedable_from_entropy`\n- `telemetry::tests::test_debug_check_invariants_macro_ok/_fail`,\n`test_report_violation_to_macro_with_none`\n- `test_all_configs_are_debug`\n\n**Validation:**\n- targeted nextest: 6 passed\n- `cargo clippy --workspace --all-targets --features tokio,json -D\nwarnings`: clean\n- `cargo tf`: 2776 passed / 492 skipped\n\n## Related Issues\n\nCloses #446\nRelates to #445",
+          "timestamp": "2026-11-17T07:12:51Z",
+          "tree_id": "5526a88feb308949c20152383a326b2f20534faa",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/e48e758d1a50e8b3a2ab0903d22738b1d9b3af90"
+        },
+        "date": 1794900213365,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39837,
+            "range": "± 812",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25443,
+            "range": "± 517",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1243,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2812,
+            "range": "± 300",
             "unit": "ns/iter"
           }
         ]
