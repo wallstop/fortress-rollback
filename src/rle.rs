@@ -755,22 +755,18 @@ mod tests {
 
     #[test]
     fn test_decode_invalid_truncated() {
-        // Create encoded data for a long sequence
-        let data = vec![0u8; 100];
-        let _encoded = encode(&data);
+        // 1..=100 is entirely non-contiguous: the encoding declares the full
+        // 100-byte payload after a length varint. Cutting the payload short
+        // must be rejected, never silently accepted as a partial decode.
+        let data: Vec<u8> = (1..=100).collect();
+        let encoded = encode(&data);
+        assert!(encoded.len() > 5);
 
-        // Truncate it in the middle of non-contiguous data section
-        // First, create data that will have non-contiguous section
-        let data2: Vec<u8> = (1..=100).collect();
-        let encoded2 = encode(&data2);
-
-        // The decode should handle truncated data gracefully
-        // (either return partial result or error)
-        if encoded2.len() > 5 {
-            let truncated = &encoded2[..5];
-            // This might error or return partial - both are acceptable
-            let _result = decode(truncated);
-        }
+        let result = decode(&encoded[..5]);
+        assert!(
+            result.is_err(),
+            "a truncated non-contiguous payload must fail, got {result:?}"
+        );
     }
 
     #[test]

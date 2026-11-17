@@ -1573,9 +1573,10 @@ fn run_reorder_choreography(base_port: u16) -> ReorderOutcome {
     for (i, s) in sessions.iter().enumerate() {
         let peer_confirmed = s.confirmed_frame().as_i32();
         for frame in 1..=peer_confirmed {
-            if let Ok(inp) = s.confirmed_inputs_for_frame(Frame::new(frame)) {
-                confirmed_inputs[i].insert(frame, inp.iter().map(|x| x.inp).collect());
-            }
+            let inputs = s
+                .confirmed_inputs_for_frame(Frame::new(frame))
+                .expect("every confirmed frame must stay retained for the harvest oracle");
+            confirmed_inputs[i].insert(frame, inputs.iter().map(|x| x.inp).collect());
         }
     }
 

@@ -686,6 +686,26 @@ impl<T: Config> HotJoinState<T> {
     fn clear_serve_retry(&mut self, handle: PlayerHandle) {
         self.serve_retry.remove(&handle);
     }
+
+    /// Returns `true` when this session carries any hot-join orchestration
+    /// state that can open/commit/abort a serve or mutate connect status
+    /// outside the ordinary event pass.
+    ///
+    /// Such a mutation can invalidate the poll-time confirmed-frame fold, so
+    /// [`poll_hot_join`](P2PSession::poll_hot_join) must drop the cache. A
+    /// plain P2P session built with the feature compiled in has none of these
+    /// fields populated and keeps the single-fold reuse.
+    fn carries_orchestration_state(&self) -> bool {
+        !self.reserved_slots.is_empty()
+            || self.accept_hot_join
+            || self.joiner.is_some()
+            || !self.joining.is_empty()
+            || self.npeer.is_some()
+            || self.npeer_post.is_some()
+            || self.pending_reactivation.is_some()
+            || !self.npeer_closed_attempt_frames.is_empty()
+            || !self.serve_retry.is_empty()
+    }
 }
 
 /// Per-handle hot-join serve retry state (see
@@ -3706,16 +3726,7 @@ impl<T: Config> P2PSession<T> {
         // built with the feature compiled in must keep the single-fold reuse,
         // otherwise every hot-join-enabled build pays a second full mesh fold
         // per frame even though it never joins or serves.
-        let hot_join_may_mutate = !self.hot_join.reserved_slots.is_empty()
-            || self.hot_join.accept_hot_join
-            || self.hot_join.joiner.is_some()
-            || !self.hot_join.joining.is_empty()
-            || self.hot_join.npeer.is_some()
-            || self.hot_join.npeer_post.is_some()
-            || self.hot_join.pending_reactivation.is_some()
-            || !self.hot_join.npeer_closed_attempt_frames.is_empty()
-            || !self.hot_join.serve_retry.is_empty();
-        if hot_join_may_mutate {
+        if self.hot_join.carries_orchestration_state() {
             self.confirmed_frame_cache = None;
         }
     }
@@ -11592,13 +11603,26 @@ impl<T: Config> P2PSession<T> {
             //
             // **Mid-game-drop reorder facet, DISCONNECTED-relay sub-shape (S53).**
             // A relay reporting the slot **disconnected** folds its connect-status
-            // `last_frame` ONLY (no round floor) — that term IS its authoritative
-            // queue-min freeze (equal to the true floor for a disconnected slot),
-            // reorder-safe, so confirmation can never outrun the freeze via a
-            // disconnected relay.
+            // `last_frame` — that term IS its authoritative queue-min freeze
+            // (equal to the true floor for a disconnected slot), reorder-safe, so
+            // confirmation can never outrun the freeze via a disconnected relay.
+            //
+            // **Poll-only disconnected relay (#444).** The freeze term is only
+            // authoritative once the relay has MINED its status. A relay that is
+            // being polled without advancing (application pause, `AppModel::Obey`
+            // wait pause, CPU stall) can answer a FRESH floor round with a floor
+            // below its un-mined `status.last_frame`: the round's pessimistic
+            // fold already includes a lower disconnected peer view the status
+            // merge has not applied yet. Ignoring that fresh floor lets the
+            // observer confirm past the true freeze before the relay advances
+            // and mines down. Folding the `min` of both terms is safe in every
+            // ordering: the round reply is generation-fresh and reorder-immune,
+            // and it can only lower the bound (never raise it), exactly like the
+            // connected-relay path. A stale-HIGH round reply stays ignored by
+            // the `min` (the status freeze wins), preserving the S53 reorder
+            // guarantee.
             let round_floor = endpoint.round_floor(handle);
             let reported = if consume_round_floor
-                && !status.disconnected
                 && endpoint.floor_round_is_fresh()
                 && round_floor != Frame::NULL
             {
@@ -13625,6 +13649,99 @@ mod tests {
         assert_eq!(session.sync_layer.current_frame(), Frame::new(8));
     }
 
+    /// Builds an every-frame session that advanced through `advance_to` with a
+    /// real checkpoint only at `saved_frame` and confirmation at `confirmed`.
+    fn session_with_a_single_checkpoint(
+        advance_to: i32,
+        max_prediction: usize,
+        saved_frame: i32,
+        confirmed: i32,
+    ) -> P2PSession<TestConfig> {
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(1)
+            .expect("num_players")
+            .with_max_prediction_window(max_prediction)
+            .with_save_mode(SaveMode::EveryFrame)
+            .with_input_queue_config(crate::InputQueueConfig { queue_length: 16 })
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        let local = PlayerHandle::new(0);
+
+        for frame_index in 0..=advance_to {
+            let frame = Frame::new(frame_index);
+            assert_eq!(
+                session
+                    .sync_layer
+                    .add_local_input(local, PlayerInput::new(frame, frame_index as u8)),
+                frame
+            );
+            if frame_index == saved_frame {
+                if let FortressRequest::SaveGameState { cell, frame } =
+                    session.sync_layer.save_current_state()
+                {
+                    cell.save(frame, Some(frame_index as u8), None);
+                }
+            }
+            if frame_index < advance_to {
+                session.sync_layer.advance_frame();
+            }
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(confirmed), SaveMode::EveryFrame);
+        session
+    }
+
+    #[test]
+    fn adjust_gamestate_retained_floor_sparse_search_edges() {
+        // The retained input floor is 6 in all three rows (confirmation 7).
+        // Every row leaves the first candidate target without a checkpoint and
+        // places the only loadable state one frame later.
+
+        // Equality: the target equals the retained floor. The target is NOT
+        // below the floor, so the sparse search must not run and the missing
+        // checkpoint fails closed.
+        let mut equal = session_with_a_single_checkpoint(8, 4, 7, 7);
+        let mut requests = RequestVec::<TestConfig>::new();
+        assert!(
+            equal
+                .adjust_gamestate(Frame::new(6), Frame::new(0), &mut requests)
+                .is_err(),
+            "a target exactly at the retained floor must not be treated as raised"
+        );
+
+        // Raised in-window target: first_incorrect (5) is above the prediction
+        // floor (4) but below the retained floor (6). Only the raised flag can
+        // select the sparse search here; it must advance to the loadable 7.
+        let mut raised = session_with_a_single_checkpoint(8, 4, 7, 7);
+        let mut requests = RequestVec::<TestConfig>::new();
+        raised
+            .adjust_gamestate(Frame::new(5), Frame::new(0), &mut requests)
+            .expect("an in-window raised target must search for a loadable checkpoint");
+        let loaded = requests
+            .iter()
+            .find_map(|request| match request {
+                FortressRequest::LoadGameState { frame, .. } => Some(*frame),
+                _ => None,
+            })
+            .expect("the rollback must load the later checkpoint");
+        assert_eq!(loaded, Frame::new(7));
+
+        // Above the floor: the target (7) is above the retained floor (6), so
+        // it must not be raised into a sparse search. With no checkpoint at 7
+        // the rollback fails closed instead of silently skipping to 8.
+        let mut above = session_with_a_single_checkpoint(9, 4, 8, 7);
+        let mut requests = RequestVec::<TestConfig>::new();
+        assert!(
+            above
+                .adjust_gamestate(Frame::new(7), Frame::new(0), &mut requests)
+                .is_err(),
+            "a target above the retained floor must not be raised"
+        );
+    }
+
     #[test]
     fn adjust_gamestate_reports_gossip_lowered_target_clamped_to_floor() {
         let observer = Arc::new(crate::telemetry::CollectingObserver::new());
@@ -15231,6 +15348,132 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "hot-join")]
+    fn poll_hot_join_clears_the_fold_when_orchestration_state_exists() {
+        let mut session = create_two_player_session();
+        session.confirmed_frame_cache = Some(Frame::new(1));
+        session
+            .hot_join
+            .npeer_closed_attempt_frames
+            .insert(PlayerHandle::new(1), Frame::new(1));
+
+        session.poll_hot_join();
+
+        assert!(
+            session.confirmed_frame_cache.is_none(),
+            "hot-join activity can mutate connect status and must drop the poll fold"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn every_hot_join_orchestration_field_invalidates_the_poll_fold() {
+        let addr = test_addr(9501);
+        let snapshot = || StateSnapshot {
+            frame: Frame::new(1),
+            num_players: 2,
+            state_bytes: vec![0],
+            bridge_inputs: Vec::new(),
+            bridge_statuses: Vec::new(),
+            checksum: None,
+        };
+
+        fn assert_detected(label: &str, seed: impl FnOnce(&mut HotJoinState<TestConfig>)) {
+            let mut hot_join = HotJoinState::<TestConfig>::default();
+            assert!(
+                !hot_join.carries_orchestration_state(),
+                "{label}: a default state must keep the poll fold"
+            );
+            seed(&mut hot_join);
+            assert!(
+                hot_join.carries_orchestration_state(),
+                "{label}: every populated orchestration field must invalidate the fold"
+            );
+        }
+
+        assert_detected("reserved slot", |hot_join| {
+            hot_join.reserved_slots.insert(PlayerHandle::new(1));
+        });
+        assert_detected("host role", |hot_join| {
+            hot_join.accept_hot_join = true;
+        });
+        assert_detected("joiner role", |hot_join| {
+            hot_join.joiner = Some(JoinerState {
+                local_handle: PlayerHandle::new(1),
+                host_addr: addr,
+                npeer: false,
+                pending_requests: Vec::new(),
+                applied_frame: None,
+                ack_resends_remaining: 0,
+                buffered: None,
+                closed_attempt_snapshot_frame: Frame::NULL,
+                pending_backfill: std::collections::BTreeSet::new(),
+                torn_down: false,
+            });
+        });
+        assert_detected("in-flight serve", |hot_join| {
+            hot_join.joining.insert(
+                PlayerHandle::new(1),
+                JoinServe {
+                    addr,
+                    frame: Frame::new(1),
+                    snapshot: snapshot(),
+                    polls_since_serve: 0,
+                },
+            );
+        });
+        assert_detected("n-peer serve", |hot_join| {
+            hot_join.npeer = Some(NPeerServe {
+                handle: PlayerHandle::new(1),
+                joiner_addr: addr,
+                snapshot_frame: Frame::new(0),
+                activation_frame: Frame::new(1),
+                snapshot: None,
+                joiner_acked: false,
+                survivors: std::collections::BTreeSet::new(),
+                pending_acks: std::collections::BTreeSet::new(),
+                polls_since_serve: 0,
+            });
+        });
+        assert_detected("post-serve announcer", |hot_join| {
+            hot_join.npeer_post = Some(NPeerPostServe {
+                committed: true,
+                handle: PlayerHandle::new(1),
+                frame: Frame::new(1),
+                snapshot_frame: Frame::new(0),
+                joiner_addr: addr,
+                survivors: std::collections::BTreeSet::new(),
+                resends_left: 1,
+            });
+        });
+        assert_detected("pending reactivation", |hot_join| {
+            hot_join.pending_reactivation = Some(PendingReactivation {
+                handle: PlayerHandle::new(1),
+                frame: Frame::new(1),
+                coordinator_addr: addr,
+                joiner_addr: test_addr(9502),
+                pre_freeze_status: ConnectionStatus::default(),
+                pre_freeze_input: None,
+                reopened: false,
+            });
+        });
+        assert_detected("closed attempt high-water", |hot_join| {
+            hot_join
+                .npeer_closed_attempt_frames
+                .insert(PlayerHandle::new(1), Frame::new(1));
+        });
+        assert_detected("serve retry backoff", |hot_join| {
+            hot_join.serve_retry.insert(
+                PlayerHandle::new(1),
+                ServeRetry {
+                    consecutive_timeouts: 1,
+                    min_saved_frame: Frame::new(2),
+                },
+            );
+        });
+    }
+
+    #[test]
     fn metrics_snapshot_includes_adapter_transport_counters() {
         let mut session = create_local_only_session();
         session.socket = Box::new(DiagnosticSocket);
@@ -16780,19 +17023,32 @@ mod tests {
     // ==========================================
 
     #[test]
-    fn poll_remote_clients_does_not_panic() {
+    fn poll_remote_clients_without_messages_preserves_state_and_emits_no_events() {
         let mut session = create_two_player_session();
-        // Should not panic even with no messages
+        let state_before = session.current_state();
+        let frame_before = session.current_frame();
+
         session.poll_remote_clients();
+
+        assert_eq!(session.current_state(), state_before);
+        assert_eq!(session.current_frame(), frame_before);
+        assert!(
+            session.events().next().is_none(),
+            "an empty poll must not synthesize connection events"
+        );
     }
 
     #[test]
-    fn poll_remote_clients_multiple_times() {
+    fn repeated_local_only_polls_keep_running_without_events() {
         let mut session = create_local_only_session();
         for _ in 0..10 {
             session.poll_remote_clients();
+            assert_eq!(session.current_state(), SessionState::Running);
         }
-        // Should complete without issues
+        assert!(
+            session.events().next().is_none(),
+            "a local-only session has no peers to report"
+        );
     }
 
     // ==========================================
@@ -21362,12 +21618,12 @@ mod tests {
     }
 
     /// MID-GAME-DROP REORDER facet, DISCONNECTED-relay sub-shape (S53). A relay
-    /// reporting the slot **disconnected** folds its connect-status `last_frame`
-    /// (its authoritative, reorder-safe queue-min freeze), NOT its round floor —
-    /// the round is consulted only for CONNECTED relays. Here the relay C reports
-    /// D **disconnected at the converged freeze 4** but its (fresh) round floor
-    /// for D is a stale-HIGH 10; the consumer must fold the freeze (4), so
-    /// confirmation can never outrun the freeze via a disconnected relay.
+    /// reporting the slot **disconnected** folds the `min` of its connect-status
+    /// `last_frame` (its authoritative, reorder-safe queue-min freeze) and its
+    /// fresh round floor. Here the relay C reports D **disconnected at the
+    /// converged freeze 4** but its (fresh) round floor for D is a stale-HIGH 10;
+    /// the `min` keeps the freeze (4), so confirmation can never outrun the
+    /// freeze via a disconnected relay.
     #[test]
     fn remote_slot_confirmed_bound_disconnected_relay_ignores_stale_high_floor() {
         let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
@@ -21392,8 +21648,8 @@ mod tests {
         // The RELAY C reports D DISCONNECTED at the converged freeze 4 (it folded
         // the origin's low and adopted the disconnect; this term is reorder-safe —
         // `merge_peer_connect_status` mins/adopts it down and never resurrects).
-        // Its round floor for D, however, is a stale-HIGH 10 (which the consumer
-        // must NOT fold for a disconnected relay).
+        // Its round floor for D, however, is a stale-HIGH 10; the consumer folds
+        // the min, so the reorder-safe freeze (4) still wins.
         {
             let c_endpoint = session
                 .player_reg
@@ -21442,7 +21698,80 @@ mod tests {
         );
         assert!(
             !session.diagnostic_sometimes_state_vector()[1],
-            "a disconnected relay uses its authoritative status freeze, not its floor"
+            "a disconnected relay uses its authoritative status freeze; the min keeps it over the stale-high floor"
+        );
+    }
+
+    /// CONSUMPTION (poll-only disconnected relay, #444). A relay that is polled
+    /// without advancing answers a FRESH floor round with a lower floor than its
+    /// un-mined connect-status `last_frame`: the round folds a cached lower
+    /// disconnected view the relay's status merge has not applied yet. The
+    /// observer must fold the fresh floor, not the stale-high status, or it can
+    /// confirm and discard frames above the true freeze before the relay mines
+    /// down. The stale-HIGH control above shows the `min` still preserves the
+    /// reorder guarantee.
+    #[test]
+    fn remote_slot_confirmed_bound_poll_only_disconnected_relay_consumes_fresh_floor() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect_remote();
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+            epoch: 0,
+        };
+        // C has already concluded D's disconnect (status last_frame 10) but is
+        // polled only: it has cached a lower disconnected peer view and its
+        // FRESH round floor is 4, below its un-mined status.
+        {
+            let c_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            c_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            c_endpoint.set_round_floor_for_tests(d, Frame::new(4));
+        }
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            d_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            d_endpoint.set_round_floor_for_tests(d, Frame::new(10));
+        }
+
+        let status = session.local_connect_status[d.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(4)),
+            "a poll-only disconnected relay's fresh floor (4) is below its un-mined \
+             status (10); folding only the status confirms past the true freeze"
+        );
+        assert!(
+            session.diagnostic_sometimes_state_vector()[1],
+            "the consumed lower floor must be counted"
         );
     }
 
@@ -21702,10 +22031,11 @@ mod tests {
     /// pruned, C+D running) and the relay C reports the dropped slot D
     /// **disconnected at the converged freeze 4**, but its cached pessimistic floor
     /// for D is a reordered stale-HIGH 10 (a pre-fold packet's floor clobbered the
-    /// plain-overwrite cache). `confirmed_frame()` must fold C's reorder-safe
-    /// connect-status freeze (4), NOT the stale floor (10): a disconnected relay's
-    /// `last_frame` is its authoritative queue-min freeze and is merged
-    /// reorder-safely, so confirmation can never outrun it. RED before the fix
+    /// plain-overwrite cache). `confirmed_frame()` must keep C's reorder-safe
+    /// connect-status freeze (4), not the stale floor (10): the fold takes the
+    /// `min` of the two, and a disconnected relay's `last_frame` is its
+    /// authoritative queue-min freeze merged reorder-safely, so confirmation can
+    /// never outrun it. RED before the fix
     /// (`confirmed_frame() == 10`, confirming + discarding the `(4, 10]` window the
     /// freeze reclaims); GREEN after (`== 4`).
     #[test]
@@ -21800,8 +22130,7 @@ mod tests {
             d_endpoint.set_round_floor_for_tests(d, Frame::new(100));
         }
         // The RELAY C reports D DISCONNECTED at the converged freeze 4, with a
-        // stale-HIGH round floor (10) for D (which the consumer must NOT fold for a
-        // disconnected relay).
+        // stale-HIGH round floor (10) for D (the min fold keeps the freeze).
         {
             let c_endpoint = session
                 .player_reg
@@ -21826,6 +22155,121 @@ mod tests {
              freeze (4), not its stale-HIGH round floor (10); confirmed_frame must HOLD at 4. \
              Pre-fix this returns 10 (confirming + discarding the contested (4, 10] window — \
              the mid-game-drop reorder desync, disconnected-relay sub-shape)."
+        );
+    }
+
+    /// POLL-ONLY disconnected relay (#444), end-to-end at [`confirmed_frame`].
+    /// The relay C reports D disconnected at its un-mined status (10) but its
+    /// FRESH round floor is the lower cached view (4); A still sees D connected
+    /// high. The consumer folds `min(10, 4)` and holds confirmation at 4, so A
+    /// cannot confirm + discard above the true freeze before C advances.
+    #[test]
+    fn confirmed_frame_poll_only_disconnected_relay_folds_fresh_floor() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let b = PlayerHandle::new(1);
+        let c = PlayerHandle::new(2);
+        let d = PlayerHandle::new(3);
+
+        for _ in 0..20 {
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(0), SaveMode::EveryFrame);
+
+        session.local_connect_status[0] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect_remote();
+        session.local_connect_status[b.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(50),
+            epoch: 0,
+        };
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+
+        for addr in [addr_c, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist");
+            endpoint.set_peer_connect_status_for_tests(
+                b,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(50),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(100),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_round_floor_for_tests(c, Frame::new(100));
+        }
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            d_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(100),
+                    epoch: 0,
+                },
+            );
+            d_endpoint.set_round_floor_for_tests(d, Frame::new(100));
+        }
+        // Poll-only relay C: its status still says D disconnected at 10, but
+        // the fresh round floor already folded a lower disconnected peer view
+        // at 4.
+        {
+            let c_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            c_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            c_endpoint.set_round_floor_for_tests(d, Frame::new(4));
+        }
+
+        assert_eq!(
+            session.confirmed_frame(),
+            Frame::new(4),
+            "a poll-only disconnected relay's fresh floor (4) must bound confirmed_frame, \
+             not its un-mined status freeze (10); pre-fix this returns 10 and the \
+             observer confirms + discards the contested (4, 10] window"
         );
     }
 

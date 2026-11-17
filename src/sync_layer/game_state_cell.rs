@@ -321,14 +321,23 @@ impl<T> GameStateCell<T> {
     }
 
     /// Returns whether the cell currently holds game-state data (loom version).
+    //
+    // cargo-mutants parses cfg-disabled variants but the ordinary Nextest
+    // mutation build compiles only the default implementation. Loom proves
+    // this variant's locking behavior; ordinary tests cover the shared
+    // `GameState` shape and the default body.
     #[cfg(loom)]
+    #[cfg_attr(any(), mutants::skip)]
     #[must_use]
     pub(crate) fn has_data(&self) -> bool {
         self.0.lock().unwrap().data.is_some()
     }
 
     /// Returns whether the cell currently holds game-state data (Kani version).
+    //
+    // Kani owns this cfg-disabled variant; the default body is mutation-tested.
     #[cfg(kani)]
+    #[cfg_attr(any(), mutants::skip)]
     #[must_use]
     pub(crate) fn has_data(&self) -> bool {
         self.0.borrow().data.is_some()

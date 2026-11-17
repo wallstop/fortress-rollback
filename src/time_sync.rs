@@ -456,11 +456,19 @@ mod sync_layer_tests {
 
         // Initialize with some known values first
         time_sync.advance_frame(Frame::new(5), 10, 20);
+        let before = (time_sync.local.clone(), time_sync.remote.clone());
 
-        // Advance with negative frame - should be skipped (no panic)
+        // A negative frame is invalid and must not write anywhere. `-5` would
+        // wrap to ring position 25 if the validity check regressed.
         time_sync.advance_frame(Frame::new(-5), 99, 99);
 
-        // Test passes if we don't panic from invalid array index
+        assert_eq!(
+            (time_sync.local.clone(), time_sync.remote.clone()),
+            before,
+            "a negative frame must be skipped without mutating the ring"
+        );
+        assert_eq!(time_sync.local[25], 0);
+        assert_eq!(time_sync.remote[25], 0);
     }
 
     // ==========================================================================
