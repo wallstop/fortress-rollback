@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794893227313,
+  "lastUpdate": 1794896138629,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "966a95b83ef1c38ee175dd9edebcf597cf78644f",
-          "message": "fix(devcontainer): harden MCP tooling and refresh consistency evidence (#358)\n\n## Summary\n\n- Make project MCP credentials optional and independently configurable,\nadd a secret-safe health report, and diagnose stale file/process\nenvironment drift.\n- Migrate devcontainer OpenCode installation and the\nbounded-network-retry plugin to OpenCode 2, including legacy V1 cleanup\nand interruption recovery.\n- Refresh all MSRV-compatible Cargo lockfile dependencies and prevent\nknown-incompatible Dependabot release lines from recurring.\n- Define the confirmed-prefix consistency/availability contract and\nrevalidate the schema-v3 simulation baseline at current HEAD.\n\n## Consistency evidence\n\n- `sweep_pr_gate`: 10/10 cells matched every checked-in baseline field\nexactly; both replay checks passed; zero desyncs.\n- Release `full_matrix_sweep`: 136/136 cells passed at 5,000 steps and\nseed 1 across N=2/3/4/8/12/16; zero desyncs.\n- The tuning guide now distinguishes confirmed consistency, speculative\nresponsiveness, and confirmed availability, and states\ndeterministic-game, polling, delivery, and CAP assumptions.\n- Reorder, duplication, burst, asymmetry, partition/flap, and poll-stall\nevidence remain explicitly queued in `PLAN.md`; this PR does not claim\nthose axes are covered.\n\n## Dependency disposition\n\nAll four Cargo workspaces now select zero compatible updates. Remaining\nnewer releases exceed the Rust 1.86 MSRV: bincode-next 3.1.1 (1.90),\nparking_lot 0.13 (1.95), proptest 1.12 and z3 0.22 (1.88), and\nserial_test 4.0.1 (1.93.1). Dependabot holds those release lines while\nallowing compatible patches.\n\n## Validation\n\n- `bash scripts/tests/test-ai-backends.sh` — pass\n- `.venv/bin/pytest scripts/tests/test_codex_devcontainer_setup.py -q` —\n48 passed\n- `.venv/bin/pytest scripts/tests -q` — 2,186 passed\n- `cargo clippy --workspace --all-targets --features tokio,json` — pass\n- `cargo nextest run --no-capture` — 2,975 passed, 72 skipped\n- `cargo +1.86.0 check --locked --all-targets` — pass\n- `RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps` — pass\n- `cargo test --doc -- --nocapture` — 160 passed, 50 ignored\n- `python3 scripts/release/workspace_locks.py check` — all four locks\npass\n- `actionlint`, shell portability, Markdownlint, wiki sync/consistency,\nlink checks, doc claims, typos, plan hygiene, and changed-file-aware\nagent preflight — pass\n\nNo changelog entry: tooling, documentation, and compatible lockfile-only\nchanges do not alter the public crate API, wire format, or library\nbehavior.\n\n## Operational note\n\nReal credentialed MCP health verification still requires the owner's\n`.env.local` and a devcontainer rebuild. The health report intentionally\nexits `2` with setup guidance when optional credentials are absent.",
-          "timestamp": "2026-11-04T13:04:50-08:00",
-          "tree_id": "f4685543acd26b1bf457227dd4a8e0f1ef910ea1",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/966a95b83ef1c38ee175dd9edebcf597cf78644f"
-        },
-        "date": 1793826826749,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 50043,
-            "range": "± 526",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 32345,
-            "range": "± 170",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1406,
-            "range": "± 6",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1602,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3194,
-            "range": "± 217",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 5621,
             "range": "± 164",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "d8641b4fa0806d4d7d988d9bb2d95bdcce3a8fe8",
+          "message": "test: pin reset_prediction and P2P constructor outcomes (#446) (#453)\n\n## Description\n\nContinues the #446 vacuous-test sweep. Two tests that previously\nasserted nothing now pin observable behavior:\n\n- `SyncLayer::reset_prediction`: the old test called\n`synchronized_inputs` and `reset_prediction` and asserted nothing. It\nnow verifies both slots are `Predicted` at frame 1, delivers a\nconflicting real frame-1 input, asserts `first_incorrect_frame == 1`,\nthen resets and asserts every queue's `first_incorrect_frame` is NULL.\n- P2P builder tests: `test_add_more_players` and `test_start_session`\nonly returned `Ok(())`; they now assert the constructed session's\n`num_players` (spectators excluded) and `Synchronizing` state.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n## Testing\n\n**Tests added/modified:**\n- `sync_layer::sync_layer_tests::test_reset_prediction` now asserts the\nmisprediction record and reset behavior.\n- `sessions::p2p::test_add_more_players` / `test_start_session` assert\nplayer count and session state.\n\n**Validation:**\n- targeted nextest: 4 + 3 passed\n- `cargo clippy --workspace --all-targets --features tokio,json -D\nwarnings`: clean\n- `cargo tf`: 2776 passed / 492 skipped\n\n## Related Issues\n\nRelates to #446",
+          "timestamp": "2026-11-17T06:04:00Z",
+          "tree_id": "fb8a0ee605e023d9852147f173d965cc1f7b4aa6",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/d8641b4fa0806d4d7d988d9bb2d95bdcce3a8fe8"
+        },
+        "date": 1794896137053,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 42230,
+            "range": "± 564",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 26257,
+            "range": "± 226",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 682,
+            "range": "± 151",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 868,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 6895,
+            "range": "± 268",
             "unit": "ns/iter"
           }
         ]
