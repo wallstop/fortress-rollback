@@ -562,11 +562,19 @@ fn test_all_configs_are_debug() {
     let spectator_config = SpectatorConfig::default();
     let time_sync_config = TimeSyncConfig::default();
 
-    // This should compile - testing that Debug is implemented
-    let _ = format!("{:?}", sync_config);
-    let _ = format!("{:?}", protocol_config);
-    let _ = format!("{:?}", spectator_config);
-    let _ = format!("{:?}", time_sync_config);
+    // Debug is part of the public API contract; the formatted form must be
+    // non-empty and name the type so troubleshooting output is useful.
+    for (name, rendered) in [
+        ("SyncConfig", format!("{sync_config:?}")),
+        ("ProtocolConfig", format!("{protocol_config:?}")),
+        ("SpectatorConfig", format!("{spectator_config:?}")),
+        ("TimeSyncConfig", format!("{time_sync_config:?}")),
+    ] {
+        assert!(
+            rendered.contains(name),
+            "{name} Debug output must name the type: {rendered}"
+        );
+    }
 }
 
 #[test]
