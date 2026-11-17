@@ -11603,13 +11603,26 @@ impl<T: Config> P2PSession<T> {
             //
             // **Mid-game-drop reorder facet, DISCONNECTED-relay sub-shape (S53).**
             // A relay reporting the slot **disconnected** folds its connect-status
-            // `last_frame` ONLY (no round floor) — that term IS its authoritative
-            // queue-min freeze (equal to the true floor for a disconnected slot),
-            // reorder-safe, so confirmation can never outrun the freeze via a
-            // disconnected relay.
+            // `last_frame` — that term IS its authoritative queue-min freeze
+            // (equal to the true floor for a disconnected slot), reorder-safe, so
+            // confirmation can never outrun the freeze via a disconnected relay.
+            //
+            // **Poll-only disconnected relay (#444).** The freeze term is only
+            // authoritative once the relay has MINED its status. A relay that is
+            // being polled without advancing (application pause, `AppModel::Obey`
+            // wait pause, CPU stall) can answer a FRESH floor round with a floor
+            // below its un-mined `status.last_frame`: the round's pessimistic
+            // fold already includes a lower disconnected peer view the status
+            // merge has not applied yet. Ignoring that fresh floor lets the
+            // observer confirm past the true freeze before the relay advances
+            // and mines down. Folding the `min` of both terms is safe in every
+            // ordering: the round reply is generation-fresh and reorder-immune,
+            // and it can only lower the bound (never raise it), exactly like the
+            // connected-relay path. A stale-HIGH round reply stays ignored by
+            // the `min` (the status freeze wins), preserving the S53 reorder
+            // guarantee.
             let round_floor = endpoint.round_floor(handle);
             let reported = if consume_round_floor
-                && !status.disconnected
                 && endpoint.floor_round_is_fresh()
                 && round_floor != Frame::NULL
             {
@@ -21574,12 +21587,12 @@ mod tests {
     }
 
     /// MID-GAME-DROP REORDER facet, DISCONNECTED-relay sub-shape (S53). A relay
-    /// reporting the slot **disconnected** folds its connect-status `last_frame`
-    /// (its authoritative, reorder-safe queue-min freeze), NOT its round floor —
-    /// the round is consulted only for CONNECTED relays. Here the relay C reports
-    /// D **disconnected at the converged freeze 4** but its (fresh) round floor
-    /// for D is a stale-HIGH 10; the consumer must fold the freeze (4), so
-    /// confirmation can never outrun the freeze via a disconnected relay.
+    /// reporting the slot **disconnected** folds the `min` of its connect-status
+    /// `last_frame` (its authoritative, reorder-safe queue-min freeze) and its
+    /// fresh round floor. Here the relay C reports D **disconnected at the
+    /// converged freeze 4** but its (fresh) round floor for D is a stale-HIGH 10;
+    /// the `min` keeps the freeze (4), so confirmation can never outrun the
+    /// freeze via a disconnected relay.
     #[test]
     fn remote_slot_confirmed_bound_disconnected_relay_ignores_stale_high_floor() {
         let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
@@ -21604,8 +21617,8 @@ mod tests {
         // The RELAY C reports D DISCONNECTED at the converged freeze 4 (it folded
         // the origin's low and adopted the disconnect; this term is reorder-safe —
         // `merge_peer_connect_status` mins/adopts it down and never resurrects).
-        // Its round floor for D, however, is a stale-HIGH 10 (which the consumer
-        // must NOT fold for a disconnected relay).
+        // Its round floor for D, however, is a stale-HIGH 10; the consumer folds
+        // the min, so the reorder-safe freeze (4) still wins.
         {
             let c_endpoint = session
                 .player_reg
@@ -21654,7 +21667,80 @@ mod tests {
         );
         assert!(
             !session.diagnostic_sometimes_state_vector()[1],
-            "a disconnected relay uses its authoritative status freeze, not its floor"
+            "a disconnected relay uses its authoritative status freeze; the min keeps it over the stale-high floor"
+        );
+    }
+
+    /// CONSUMPTION (poll-only disconnected relay, #444). A relay that is polled
+    /// without advancing answers a FRESH floor round with a lower floor than its
+    /// un-mined connect-status `last_frame`: the round folds a cached lower
+    /// disconnected view the relay's status merge has not applied yet. The
+    /// observer must fold the fresh floor, not the stale-high status, or it can
+    /// confirm and discard frames above the true freeze before the relay mines
+    /// down. The stale-HIGH control above shows the `min` still preserves the
+    /// reorder guarantee.
+    #[test]
+    fn remote_slot_confirmed_bound_poll_only_disconnected_relay_consumes_fresh_floor() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let d = PlayerHandle::new(3);
+
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect_remote();
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(10),
+            epoch: 0,
+        };
+        // C has already concluded D's disconnect (status last_frame 10) but is
+        // polled only: it has cached a lower disconnected peer view and its
+        // FRESH round floor is 4, below its un-mined status.
+        {
+            let c_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            c_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            c_endpoint.set_round_floor_for_tests(d, Frame::new(4));
+        }
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            d_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            d_endpoint.set_round_floor_for_tests(d, Frame::new(10));
+        }
+
+        let status = session.local_connect_status[d.as_usize()];
+        assert_eq!(
+            session.remote_slot_confirmed_bound(d, &status),
+            Some(Frame::new(4)),
+            "a poll-only disconnected relay's fresh floor (4) is below its un-mined \
+             status (10); folding only the status confirms past the true freeze"
+        );
+        assert!(
+            session.diagnostic_sometimes_state_vector()[1],
+            "the consumed lower floor must be counted"
         );
     }
 
@@ -21914,10 +22000,11 @@ mod tests {
     /// pruned, C+D running) and the relay C reports the dropped slot D
     /// **disconnected at the converged freeze 4**, but its cached pessimistic floor
     /// for D is a reordered stale-HIGH 10 (a pre-fold packet's floor clobbered the
-    /// plain-overwrite cache). `confirmed_frame()` must fold C's reorder-safe
-    /// connect-status freeze (4), NOT the stale floor (10): a disconnected relay's
-    /// `last_frame` is its authoritative queue-min freeze and is merged
-    /// reorder-safely, so confirmation can never outrun it. RED before the fix
+    /// plain-overwrite cache). `confirmed_frame()` must keep C's reorder-safe
+    /// connect-status freeze (4), not the stale floor (10): the fold takes the
+    /// `min` of the two, and a disconnected relay's `last_frame` is its
+    /// authoritative queue-min freeze merged reorder-safely, so confirmation can
+    /// never outrun it. RED before the fix
     /// (`confirmed_frame() == 10`, confirming + discarding the `(4, 10]` window the
     /// freeze reclaims); GREEN after (`== 4`).
     #[test]
@@ -22012,8 +22099,7 @@ mod tests {
             d_endpoint.set_round_floor_for_tests(d, Frame::new(100));
         }
         // The RELAY C reports D DISCONNECTED at the converged freeze 4, with a
-        // stale-HIGH round floor (10) for D (which the consumer must NOT fold for a
-        // disconnected relay).
+        // stale-HIGH round floor (10) for D (the min fold keeps the freeze).
         {
             let c_endpoint = session
                 .player_reg
