@@ -18646,6 +18646,27 @@ mod tests {
             }),
             "the earliest confirmed mismatch must be reported"
         );
+
+        // A later, conflicting report for the SAME frame must not replace the
+        // first observed evidence at that frame: the latch keeps the earliest
+        // (frame, checksums) mismatch rather than the newest duplicate.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(earlier, earlier_remote ^ 1);
+        session.compare_local_checksums_against_peers();
+        assert_eq!(
+            session.sync_health(handle),
+            Some(SyncHealth::DesyncDetected {
+                frame: earlier,
+                local_checksum: earlier_local,
+                remote_checksum: earlier_remote,
+            }),
+            "a conflicting duplicate at the latched frame must not rewrite the evidence"
+        );
     }
 
     // ==========================================
