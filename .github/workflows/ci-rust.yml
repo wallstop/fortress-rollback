@@ -611,6 +611,13 @@ jobs:
       - name: Check WASM build (with hot-join feature)
         run: cargo check --target ${{ matrix.target }} --no-default-features --features hot-join
 
+      # `tokio`'s mio net backend does not support the browser
+      # `wasm32-unknown-unknown` target. The dependency is target-scoped, so
+      # enabling the feature there must compile as a documented no-op.
+      - name: Check browser WASM treats tokio as a no-op
+        if: matrix.target == 'wasm32-unknown-unknown'
+        run: cargo check --target ${{ matrix.target }} --no-default-features --features tokio
+
       - name: Check documented browser custom-socket example
         if: matrix.target == 'wasm32-unknown-unknown'
         run: cargo check --locked --target ${{ matrix.target }} --example custom_socket
@@ -880,9 +887,10 @@ jobs:
   # many-thousand-case loops take longer than nextest's per-test budget under
   # emulation; they already run on the native matrix. The simulation suite is
   # excluded because its nightly shards are release-mode multi-thousand-step
-  # loops, except for the pinned cross-architecture trace-digest test, which
-  # folds the whole session/protocol/simulation stack into one value and must
-  # match the x86_64 reference on both lanes.
+  # loops, except for the pinned cross-architecture trace-digest test (which
+  # folds the whole session/protocol/simulation stack into one value) and the
+  # checked-in corpus replays (ring recycling and mixed transports). Both must
+  # stay byte-identical on every lane.
   cross-arch-runtime:
     name: Cross-Arch Runtime (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -896,7 +904,8 @@ jobs:
             packages: qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross
             filter: >-
               (not test(simulation::) or
-              test(smoke_traces_match_checked_in_cross_architecture_digests))
+              test(smoke_traces_match_checked_in_cross_architecture_digests) or
+              test(simulation::corpus_replay::))
               and not test(network::multi_process::)
               and not test(network::compression::property_tests::)
           - name: i686-32bit
@@ -904,7 +913,8 @@ jobs:
             packages: gcc-i686-linux-gnu libc6-dev-i386-cross libc6-i386 lib32gcc-s1
             filter: >-
               (not test(simulation::) or
-              test(smoke_traces_match_checked_in_cross_architecture_digests))
+              test(smoke_traces_match_checked_in_cross_architecture_digests) or
+              test(simulation::corpus_replay::))
               and not test(network::multi_process::)
 
     env:

@@ -476,6 +476,9 @@ The repository keeps this comparison running in CI rather than relying on manual
   qemu-aarch64 in the `cross-arch-runtime` CI matrix.
 - `machine_width_state` pins fixed-width serialization and hashing of `usize`/`isize` fields and
   collection length prefixes on 32-bit and 64-bit targets.
+- The checked-in simulation corpus replays (mixed reliable/unreliable transports and the extended
+  ring-recycling schedule) execute on native i686 and under qemu-aarch64 in the same
+  `cross-arch-runtime` matrix, covering ring-index and frame arithmetic with a non-x86_64 `usize`.
 
 ### Known Platform Differences
 

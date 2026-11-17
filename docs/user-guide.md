@@ -2039,7 +2039,7 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | Feature                   | Description                                           | Use Case                          | Dependencies        |
 | ------------------------- | ----------------------------------------------------- | --------------------------------- | ------------------- |
 | `sync-send`               | Adds `Send + Sync` bounds to core traits              | Multi-threaded game engines       | None                |
-| `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications | Async game servers                | `tokio` crate       |
+| `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications (native, WASI, and Emscripten; browser `wasm32-unknown-unknown` builds treat it as a no-op) | Async game servers                | `tokio` crate       |
 | `json`                    | Enables JSON serialization for telemetry types        | Structured logging/monitoring     | `serde_json` crate  |
 | `hot-join`                | Enables reserved-slot runtime joins and rejoins       | Long-running sessions             | None                |
 | `paranoid`                | Enables runtime invariant checking in release builds  | Debugging production issues       | None                |
@@ -2095,6 +2095,11 @@ other payloads whose encoded size can change from frame to frame.
 #### `tokio`
 
 Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and implements `NonBlockingSocket` for use with Fortress Rollback sessions in async Tokio applications.
+
+The adapter is available on native targets, WASI, and Emscripten. `tokio`'s UDP
+networking does not support the browser `wasm32-unknown-unknown` target, so the
+feature is a documented no-op there: browser builds compile with a raw-byte or
+JavaScript-bridged custom socket instead.
 
 ```toml
 [dependencies]

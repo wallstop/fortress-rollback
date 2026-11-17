@@ -360,8 +360,24 @@ fn checked_in_extended_ring_schedule_recycles_rings_and_replays_identically() {
 
 #[cfg(feature = "hot-join")]
 #[test]
-fn checked_in_hot_join_corpus_replays_with_full_oracle() {
-    replay_paths(hot_join_corpus_paths());
+fn hot_join_schedules_replay_with_full_oracle() {
+    // Corpus artifacts are promoted from real failures; there is currently no
+    // checked-in hot-join artifact. Fall back to the canonical generated N-peer
+    // hot-join schedule so this guard cannot pass vacuously over an empty
+    // directory, and automatically pick up any future promoted artifacts.
+    let paths = hot_join_corpus_paths();
+    if paths.is_empty() {
+        let schedule = super::census::clean_npeer_hot_join_schedule(4);
+        let report = run(&schedule, &RunOptions::default());
+        report.expect_pass(&schedule);
+        let replay = run(&schedule, &RunOptions::default());
+        assert_eq!(
+            report.trace_hash, replay.trace_hash,
+            "the generated hot-join schedule must reproduce its exact trace"
+        );
+        return;
+    }
+    replay_paths(paths);
 }
 
 fn has_hot_join(schedule: &Schedule) -> bool {

@@ -383,7 +383,7 @@ def test_wasm_job_covers_browser_and_emscripten_targets() -> None:
         for command in _cargo_commands(steps, "check")
         if "--no-default-features" in command
     ]
-    assert len(check_commands) == 5
+    assert len(check_commands) == 6
     for command in check_commands:
         assert _option_values(command, "--target") == [MATRIX_TARGET_EXPRESSION]
         assert command.count("--no-default-features") == 1
@@ -395,6 +395,7 @@ def test_wasm_job_covers_browser_and_emscripten_targets() -> None:
             frozenset({"paranoid"}),
             frozenset({"json"}),
             frozenset({"hot-join"}),
+            frozenset({"tokio"}),
         )
     )
 
@@ -802,6 +803,10 @@ def test_cross_arch_runtime_executes_arm_and_32_bit_usize_targets() -> None:
             "test(smoke_traces_match_checked_in_cross_architecture_digests)"
             in filter_text
         ), f"{lane} must execute the pinned cross-architecture trace digest"
+        assert "test(simulation::corpus_replay::)" in filter_text, (
+            f"{lane} must execute the checked-in corpus replays, which exercise "
+            "ring recycling and mixed transports under a non-x86_64 usize"
+        )
         assert "not test(network::multi_process::)" in filter_text
 
     env = job["env"]

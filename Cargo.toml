@@ -316,13 +316,16 @@ smallvec = { version = "1.13", features = ["serde"] }
 # Only compiled when z3-verification feature is enabled
 # For a vendored build (slow), use z3-verification-bundled instead
 z3 = { version = "0.21", optional = true }
-# Tokio async runtime for async socket adapters
-# Only compiled when tokio feature is enabled
-tokio = { version = "1.52", features = ["net", "io-util", "sync", "rt", "macros", "time"], optional = true }
-
 # Loom for concurrency testing - only used when cfg(loom) is set
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
+
+# Tokio async runtime for async socket adapters. Only compiled when the tokio
+# feature is enabled. `mio`'s net support does not cover the browser
+# `wasm32-unknown-unknown` target, so the dependency is target-scoped: enabling
+# the feature there is a documented no-op instead of a build error.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+tokio = { version = "1.52", features = ["net", "io-util", "sync", "rt", "macros", "time"], optional = true }
 
 # The root test/benchmark toolchain is native/Emscripten-only. Keeping these
 # dependencies out of browser example builds avoids compiling host-oriented
