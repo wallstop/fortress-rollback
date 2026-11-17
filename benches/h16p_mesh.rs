@@ -260,6 +260,7 @@ fn bench_confirmed_frame(c: &mut Criterion) {
 /// Absolute budgets (median, shared CI runner, debug-assertion-free release):
 /// - N=8: 300 us per mesh pass (measured ~33 us locally).
 /// - N=16: 1.5 ms per mesh pass (measured ~158 us locally).
+///
 /// Enforced by `scripts/ci/check-mesh-advance-budget.py`. These are guardrails
 /// against an order-of-magnitude regression in the per-frame mesh folds, not a
 /// hardware-independent performance claim.
