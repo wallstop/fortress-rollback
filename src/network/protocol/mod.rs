@@ -519,6 +519,15 @@ where
     /// not leak into another remote's sync verdict (an N>=3 logical error if it
     /// were session-global). `None` until the first matching checksum.
     pub(crate) last_verified_frame: Option<Frame>,
+    /// Earliest confirmed frame at which this peer's checksum did NOT match our
+    /// local history, together with both compared values. A confirmed-frame
+    /// mismatch is a permanent divergence in the trusted-peer model, so
+    /// [`P2PSession::sync_health`] must keep reporting it instead of falling
+    /// back to `InSync` from a stale earlier match. Per-peer for the same
+    /// reason as `last_verified_frame`.
+    ///
+    /// [`P2PSession::sync_health`]: crate::P2PSession::sync_health
+    pub(crate) checksum_mismatch_frame: Option<(Frame, u128, u128)>,
     /// Number of confirmed frames at which this peer's checksum did NOT match
     /// our local history (the per-peer persistence signal behind B3 trust
     /// downgrade). Monotonic (saturating), per-peer (never leaks across
@@ -1046,6 +1055,7 @@ impl<T: Config> UdpProtocol<T> {
             // debug desync
             pending_checksums: BTreeMap::new(),
             last_verified_frame: None,
+            checksum_mismatch_frame: None,
             checksum_mismatch_count: 0,
             desync_detection,
 
