@@ -18529,6 +18529,26 @@ mod tests {
             !session.is_synchronized(),
             "is_synchronized() must stay false for a peer with a confirmed mismatch"
         );
+
+        // A later matching checksum in the pending set must not mask the latched
+        // confirmed divergence: the latch is checked before the pending scan.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(matching, local_match);
+        assert_eq!(
+            session.sync_health(handle),
+            Some(SyncHealth::DesyncDetected {
+                frame: diverging,
+                local_checksum: local_diverging,
+                remote_checksum: remote_diverging,
+            }),
+            "a pending match must not flip a latched confirmed mismatch back to InSync"
+        );
+        assert!(!session.is_synchronized());
     }
 
     // ==========================================
