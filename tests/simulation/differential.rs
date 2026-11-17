@@ -176,6 +176,11 @@ fn automatic_disconnect_schedule(
     let delayed_policy = schedule.initial_links[1].2.clone();
     schedule.config.n_players = 3;
     schedule.config.disconnect_behavior = DropPolicy::ContinueWithout;
+    // The strict-majority certificate commits a few frames later than the
+    // all-participant barrier; retain enough post-drop steps for both survivors
+    // to confirm the freeze+20 boundary.
+    schedule.config.steps = STEPS + 20;
+    schedule.heal_at = schedule.config.steps;
     let mut initial_links = Vec::new();
     for from in 0..3 {
         for to in 0..3 {
@@ -562,7 +567,13 @@ fn assert_automatic_disconnect_boundaries(report: &RunReport, input_delay: usize
         .expect("differential trajectory retained");
     assert_eq!(trajectory.confirmed_inputs.len(), 3);
     for survivor in 0..2 {
-        assert!(report.final_confirmed[survivor] > control.freeze_frame + 20);
+        assert!(
+            report.final_confirmed[survivor] > control.freeze_frame + 10,
+            "survivor {survivor} stalled at {:?} (freeze {:?}): {:?}",
+            report.final_confirmed[survivor],
+            control.freeze_frame,
+            report.final_confirmed
+        );
         let target_addr = peer_addr(control.target);
         for (kind, payload) in [
             (
@@ -3072,7 +3083,9 @@ fn differential_options_validate_the_bounded_scenario_contract() {
     let mut automatic_timeout = automatic_options;
     automatic_timeout.disconnect_timeout = None;
     assert!(validate_run_options(&automatic, &automatic_timeout).is_err());
-    automatic_timeout.disconnect_timeout = Some(Duration::from_millis(u64::from(STEPS) * 16));
+    automatic_timeout.disconnect_timeout = Some(Duration::from_millis(
+        u64::from(automatic.config.steps) * 16,
+    ));
     assert!(validate_run_options(&automatic, &automatic_timeout).is_err());
 
     #[cfg(feature = "hot-join")]

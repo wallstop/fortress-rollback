@@ -2251,8 +2251,9 @@ fn slow_peer_within_timeout_is_not_expelled_and_keeps_one_history() {
     );
 
     // Matched negative control: silence past the timeout is a different
-    // contract. The slow peer is certified as dropped and the histories branch;
-    // the divergence must be surfaced explicitly, not silently accepted.
+    // contract. The slow peer is certified as dropped and fails closed while
+    // the majority continues on the single shared history; the one-sided split
+    // must be surfaced explicitly, never as a silent fork.
     let beyond = run_slow_peer(BEYOND_TIMEOUT_STEPS);
     let evidence = beyond
         .component_scope
@@ -2260,8 +2261,17 @@ fn slow_peer_within_timeout_is_not_expelled_and_keeps_one_history() {
         .expect("component-scoped evidence was requested");
     let outcome = classify_component_scope(evidence, STALL_CONFIRM_ALLOWANCE);
     assert!(
-        matches!(outcome, ComponentOutcome::Forked { .. }),
-        "the post-timeout branch must be visible as a fork, got {outcome:?}"
+        matches!(&outcome, ComponentOutcome::SplitMatch { continued, .. } if continued == &vec![0]),
+        "the post-timeout majority must be a one-sided SplitMatch, got {outcome:?}"
+    );
+    assert_eq!(
+        evidence.final_states,
+        vec![
+            TraceSessionState::Running,
+            TraceSessionState::Running,
+            TraceSessionState::Synchronizing,
+        ],
+        "the timed-out peer must fail closed while the majority keeps Running"
     );
     assert!(
         beyond
@@ -2278,8 +2288,18 @@ fn slow_peer_within_timeout_is_not_expelled_and_keeps_one_history() {
             .verdict
             .failures
             .iter()
-            .any(|failure| matches!(failure, OracleFailure::ConfirmedInputDivergence { .. })),
-        "the post-timeout branch must be detected, not silent: {:?}",
+            .any(|failure| matches!(failure, OracleFailure::EndProgress { peer: 2, .. })),
+        "the expelled peer must be visibly terminal, not silent: {:?}",
+        beyond.verdict.failures
+    );
+    assert!(
+        !beyond.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+        )),
+        "a failed-closed minority must not fork the survivors' history: {:?}",
         beyond.verdict.failures
     );
 }
@@ -2326,6 +2346,118 @@ fn run_slow_peer(stall_steps: u32) -> RunReport {
         ..RunOptions::default()
     };
     run_with_input::<StubInput>(&schedule, &options)
+}
+
+/// CAP matrix: permanent `3 / 1 / 1` partition (N=5). The strict-majority
+/// component must certify both isolated peers' drops and keep confirming on one
+/// history; each isolated peer must fail closed. This is the #445 liveness
+/// regression: the pre-fix all-participant certificate wedged all five peers.
+#[test]
+fn strict_majority_partition_with_two_isolated_peers_continues() {
+    const CUT_STEP_HERE: u32 = 80;
+    let n = 5;
+    let mut initial_links = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let component = |peer: usize| match peer {
+        0..=2 => 0,
+        3 => 1,
+        _ => 2,
+    };
+    let mut events = Vec::new();
+    for from in 0..n {
+        for to in 0..n {
+            if from != to && component(from) != component(to) {
+                events.push((
+                    CUT_STEP_HERE,
+                    ScheduleEvent::Block {
+                        from,
+                        to,
+                        blocked: true,
+                    },
+                ));
+            }
+        }
+    }
+    events.sort_by_key(|(step, _)| *step);
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x1111_2222_3333_4444,
+        config: SimConfig {
+            n_players: n,
+            steps: STEPS,
+            disconnect_behavior: DropPolicy::ContinueWithout,
+            noise: BackgroundNoise::Clean,
+            ..SimConfig::smoke(n)
+        },
+        initial_links,
+        events,
+        heal_at: STEPS,
+    };
+    let options = RunOptions {
+        disconnect_timeout: Some(DISCONNECT_TIMEOUT),
+        ..RunOptions::default()
+    };
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let majority_min = report.final_confirmed[0..3]
+        .iter()
+        .copied()
+        .min()
+        .expect("three majority peers");
+    assert!(
+        majority_min > 200,
+        "the strict majority must confirm well past the cut: {:?}",
+        report.final_confirmed
+    );
+    for isolated in [3_usize, 4] {
+        assert!(
+            report.final_confirmed[isolated] < majority_min,
+            "isolated peer {isolated} must stop below the majority history: {:?}",
+            report.final_confirmed
+        );
+    }
+    let final_snapshot = report.trace_tail.last().expect("non-empty trace");
+    for peer in 0..3 {
+        assert_eq!(
+            final_snapshot.session_states.get(peer),
+            Some(&TraceSessionState::Running),
+            "majority peer {peer} must stay Running: {:?}",
+            final_snapshot.session_states
+        );
+    }
+    for isolated in [3_usize, 4] {
+        assert_eq!(
+            final_snapshot.session_states.get(isolated),
+            Some(&TraceSessionState::Synchronizing),
+            "isolated peer {isolated} must fail closed: {:?}",
+            final_snapshot.session_states
+        );
+    }
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+                | OracleFailure::FreezeFrameDivergence { .. }
+        )),
+        "the majority certificate must not fork or diverge: {:?}",
+        report.verdict.failures
+    );
+
+    let again = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, again.trace_hash,
+        "the 3/1/1 majority certificate must reproduce its exact trace"
+    );
 }
 
 /// CAP matrix row 3: a single automatic drop leaves a three-of-four majority

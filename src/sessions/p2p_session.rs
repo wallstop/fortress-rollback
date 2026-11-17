@@ -239,6 +239,9 @@ struct CoordinatedDropAttempt<A> {
     target_addr: A,
     targets: Vec<DropTarget>,
     participants: Vec<u16>,
+    /// Strict majority of `participants` required for the coordinator to pick a
+    /// cut and for any node to adopt a commit. Fixed at operation start.
+    quorum: usize,
     local_participant: u16,
     held_at: Frame,
     phase: CoordinatedDropPhase,
@@ -1140,6 +1143,30 @@ impl<T: Config> P2PSession<T> {
         canonical.unwrap_or(status.epoch)
     }
 
+    /// Whether a prepare/commit target generation is acceptable for this
+    /// session's view. A connected target may be one generation behind the
+    /// coordinator's just-disconnected view: only the coordinator lost the
+    /// peer, so its status epoch advanced first. The commit's disconnect
+    /// application bumps this session's epoch to the target generation, while
+    /// an already-disconnected or reconnected-era view must match exactly.
+    fn coordinated_drop_target_generation_acceptable(
+        &self,
+        handle: PlayerHandle,
+        target_generation: u16,
+    ) -> bool {
+        let Some(status) = self.local_connect_status.get(handle.as_usize()) else {
+            return false;
+        };
+        let Some(local_generation) = self.local_coordinated_drop_generation(handle) else {
+            return false;
+        };
+        if status.disconnected {
+            return local_generation == target_generation;
+        }
+        local_generation == target_generation
+            || local_generation.wrapping_add(1) == target_generation
+    }
+
     fn local_coordinated_drop_generation(&self, handle: PlayerHandle) -> Option<u16> {
         let status = self.local_connect_status.get(handle.as_usize()).copied()?;
         #[cfg(feature = "hot-join")]
@@ -1259,6 +1286,19 @@ impl<T: Config> P2PSession<T> {
                     .is_ok_and(|raw| targets.iter().any(|target| target.handle == raw))
             });
             if !is_target && endpoint.is_running() {
+                endpoint.send_drop_control_message(message.clone());
+            }
+        }
+    }
+
+    /// Commit-only fan-out that ALSO reaches the target endpoint. A target
+    /// process that is still alive (concurrent removals, a healed partition, or
+    /// a removal initiated by its peers) must learn that the majority froze its
+    /// inputs; otherwise it keeps Running on a history the survivors dropped.
+    /// A target without a matching active attempt fails closed on receipt.
+    fn coordinated_drop_broadcast_commit(&mut self, message: DropControlMessage) {
+        for endpoint in self.player_reg.remotes.values_mut() {
+            if endpoint.is_running() {
                 endpoint.send_drop_control_message(message.clone());
             }
         }
@@ -1394,6 +1434,65 @@ impl<T: Config> P2PSession<T> {
         survivors.saturating_mul(2) > epoch
     }
 
+    /// Strict-majority threshold over the shared participant set. At least one
+    /// participant, and strictly more than half, so two disjoint certificates
+    /// for the same operation can never both complete.
+    fn coordinated_drop_quorum(participants_len: usize) -> usize {
+        participants_len / 2 + 1
+    }
+
+    /// The deterministic cut authority: the lowest participant handle. The
+    /// exact shared participant set is reconstructed identically by every
+    /// preparer, so every participant agrees on this handle without extra wire
+    /// state. If the coordinator is unreachable the operation fails closed.
+    fn coordinated_drop_coordinator(participants: &[u16]) -> Option<u16> {
+        participants.first().copied()
+    }
+
+    /// Whether this session has locally concluded that `participant` cannot
+    /// witness the certificate: its endpoint is pruned or it has emitted its
+    /// silence-timeout verdict. The coordinator may omit only such
+    /// participants from a bare-quorum decision; a reachable-but-slow peer is
+    /// still awaited on the ordinary path.
+    fn coordinated_drop_participant_unresponsive(&self, participant: u16) -> bool {
+        let handle = PlayerHandle::new(usize::from(participant));
+        if self.player_reg.is_local_player(handle) {
+            return false;
+        }
+        match self.player_reg.handles.get(&handle) {
+            Some(PlayerType::Remote(addr)) => {
+                self.player_reg.remotes.get(addr).is_none_or(|endpoint| {
+                    !endpoint.is_running() || endpoint.has_reported_disconnect()
+                })
+            },
+            _ => true,
+        }
+    }
+
+    /// Whether every participant missing from `have` is locally unresponsive,
+    /// so the coordinator may pick a cut / a node may commit on a bare quorum.
+    fn coordinated_drop_missing_reports_are_unresponsive(
+        &self,
+        participants: &[u16],
+        have: &BTreeMap<u16, DropReport>,
+    ) -> bool {
+        participants.iter().all(|participant| {
+            have.contains_key(participant)
+                || self.coordinated_drop_participant_unresponsive(*participant)
+        })
+    }
+
+    fn coordinated_drop_missing_ready_are_unresponsive(
+        &self,
+        participants: &[u16],
+        ready: &std::collections::BTreeSet<u16>,
+    ) -> bool {
+        participants.iter().all(|participant| {
+            ready.contains(participant)
+                || self.coordinated_drop_participant_unresponsive(*participant)
+        })
+    }
+
     fn begin_coordinated_drop(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
         if let Some(active) = self.coordinated_drop.active.as_ref() {
             if active
@@ -1525,6 +1624,7 @@ impl<T: Config> P2PSession<T> {
             sequence,
             target_set_digest: Self::coordinated_drop_target_digest(&targets),
         };
+        let quorum = Self::coordinated_drop_quorum(participants.len());
         let held_at = self.confirmed_frame();
         let held_at = std::cmp::max(
             held_at,
@@ -1550,6 +1650,7 @@ impl<T: Config> P2PSession<T> {
             target_addr,
             targets: targets.clone(),
             participants,
+            quorum,
             local_participant,
             held_at,
             phase: CoordinatedDropPhase::Inventory,
@@ -1707,10 +1808,8 @@ impl<T: Config> P2PSession<T> {
             let handle = PlayerHandle::new(usize::from(target.handle));
             self.local_connect_status
                 .get(handle.as_usize())
-                .is_some_and(|status| {
-                    !status.disconnected
-                        && self.local_coordinated_drop_generation(handle) == Some(target.generation)
-                })
+                .is_some_and(|status| !status.disconnected)
+                && self.coordinated_drop_target_generation_acceptable(handle, target.generation)
         })
     }
 
@@ -1857,6 +1956,7 @@ impl<T: Config> P2PSession<T> {
             )
             .map_err(|_error| DropAbortReason::ResourceLimit)?;
         let now = self.coordinated_drop_now();
+        let quorum = Self::coordinated_drop_quorum(prepare.participants.len());
         let mut reports = BTreeMap::new();
         reports.insert(local_participant, report.clone());
         self.coordinated_drop.active = Some(CoordinatedDropAttempt {
@@ -1864,6 +1964,7 @@ impl<T: Config> P2PSession<T> {
             target_addr,
             targets: prepare.targets.clone(),
             participants: prepare.participants,
+            quorum,
             local_participant,
             held_at,
             phase: CoordinatedDropPhase::Inventory,
@@ -1904,6 +2005,30 @@ impl<T: Config> P2PSession<T> {
         let mut relay = false;
         match report.stage {
             DropReportStage::Inventory => {
+                // Coordinator cut announcement: an Inventory-shaped report
+                // with a valid cut and no receipts/digest. It is sent BEFORE
+                // the coordinator can emit Ready, because it may first need a
+                // donor backfill; without this announcement non-coordinators
+                // would not know which cut to backfill toward (deadlock).
+                let coordinator_cut_announcement = report.cut.is_valid()
+                    && report.cut_digest == 0
+                    && report.receipts.is_empty()
+                    && report.exposed_confirmed.is_null();
+                if coordinator_cut_announcement {
+                    if Some(report.participant)
+                        != Self::coordinated_drop_coordinator(&active.participants)
+                    {
+                        return Err(DropAbortReason::GenerationChanged);
+                    }
+                    if active.cut.is_some_and(|cut| cut != report.cut) {
+                        return Err(DropAbortReason::ConflictingHistory);
+                    }
+                    if active.cut.is_none() {
+                        active.cut = Some(report.cut);
+                        active.phase = CoordinatedDropPhase::Backfill;
+                    }
+                    return Ok(());
+                }
                 if !report.exposed_confirmed.is_valid()
                     || !report.cut.is_null()
                     || report.cut_digest != 0
@@ -1937,30 +2062,46 @@ impl<T: Config> P2PSession<T> {
                 if !report.cut.is_valid() || !report.receipts.is_empty() {
                     return Err(DropAbortReason::ConflictingHistory);
                 }
-                if let Some(existing) = active.ready_transcripts.get(&report.participant) {
-                    if *existing != (report.cut, report.cut_digest) {
-                        return Err(DropAbortReason::ConflictingHistory);
+                let coordinator = Self::coordinated_drop_coordinator(&active.participants);
+                // Only the deterministic coordinator may originate the cut.
+                // Other participants wait for that Ready and then verify it, so
+                // two nodes can never lock different cuts for one operation.
+                if active.cut.is_none() {
+                    if Some(report.participant) != coordinator {
+                        return Ok(());
                     }
-                } else {
+                    active.cut = Some(report.cut);
+                    active.cut_digest = Some(report.cut_digest);
                     active
                         .ready_transcripts
                         .insert(report.participant, (report.cut, report.cut_digest));
+                    // Re-enter Backfill so this node verifies/backfills its own
+                    // history and emits Ready at the coordinator's cut.
+                    active.phase = CoordinatedDropPhase::Backfill;
                     relay = true;
+                } else {
+                    if active.cut != Some(report.cut) {
+                        return Err(DropAbortReason::ConflictingHistory);
+                    }
+                    if active
+                        .cut_digest
+                        .is_some_and(|digest| digest != report.cut_digest)
+                    {
+                        return Err(DropAbortReason::ConflictingHistory);
+                    }
+                    if let Some(existing) = active.ready_transcripts.get(&report.participant) {
+                        if *existing != (report.cut, report.cut_digest) {
+                            return Err(DropAbortReason::ConflictingHistory);
+                        }
+                    } else {
+                        active
+                            .ready_transcripts
+                            .insert(report.participant, (report.cut, report.cut_digest));
+                        relay = true;
+                    }
+                    active.cut_digest.get_or_insert(report.cut_digest);
+                    active.ready.insert(report.participant);
                 }
-                if active.cut.is_none() {
-                    return Ok(());
-                }
-                if active.cut != Some(report.cut) {
-                    return Err(DropAbortReason::ConflictingHistory);
-                }
-                if active
-                    .cut_digest
-                    .is_some_and(|digest| digest != report.cut_digest)
-                {
-                    return Err(DropAbortReason::ConflictingHistory);
-                }
-                active.cut_digest.get_or_insert(report.cut_digest);
-                active.ready.insert(report.participant);
             },
             DropReportStage::Committed => {
                 if active.cut != Some(report.cut) || !report.receipts.is_empty() {
@@ -2321,11 +2462,40 @@ impl<T: Config> P2PSession<T> {
         {
             return Ok(());
         }
+        if self
+            .coordinated_drop
+            .committed
+            .values()
+            .any(|fence| fence.operation == commit.operation && fence.cut != commit.cut)
+        {
+            // Two different cuts for one operation can never both be applied.
+            return Err(DropAbortReason::ConflictingHistory);
+        }
         let Some(active) = self.coordinated_drop.active.as_mut() else {
+            // The commit is for an operation this session never observed. It is
+            // either a stale retransmission (already closed) or this session was
+            // omitted from the certificate (including being the drop target).
+            // Continuing Running in the latter case would fork the confirmed
+            // history, so cap confirmation here.
+            if self
+                .coordinated_drop
+                .closed
+                .iter()
+                .any(|closed| *closed == commit.operation)
+            {
+                return Ok(());
+            }
+            self.enter_fail_closed_disconnect_state_at(self.confirmed_frame());
             return Ok(());
         };
         if active.operation != commit.operation {
-            return Ok(());
+            return if Self::coordinated_drop_operation_cmp(commit.operation, active.operation)
+                == std::cmp::Ordering::Less
+            {
+                Ok(())
+            } else {
+                Err(DropAbortReason::ParticipantLost)
+            };
         }
         if active.cut.is_some_and(|cut| cut != commit.cut)
             || active
@@ -2333,6 +2503,9 @@ impl<T: Config> P2PSession<T> {
                 .is_some_and(|digest| digest != commit.cut_digest)
         {
             return Err(DropAbortReason::ConflictingHistory);
+        }
+        if active.phase == CoordinatedDropPhase::Committed {
+            return Ok(());
         }
         active.pending_commit = Some(commit);
         Ok(())
@@ -2417,7 +2590,8 @@ impl<T: Config> P2PSession<T> {
             if active.operation != commit.operation
                 || active.cut != Some(commit.cut)
                 || active.cut_digest != Some(commit.cut_digest)
-                || active.ready.len() != active.participants.len()
+                || !active.ready.contains(&active.local_participant)
+                || active.ready.len() < active.quorum
                 || active.phase != CoordinatedDropPhase::Ready
             {
                 return Err(DropAbortReason::ConflictingHistory);
@@ -2429,14 +2603,13 @@ impl<T: Config> P2PSession<T> {
             )
         };
         for target in &targets {
+            let handle = PlayerHandle::new(usize::from(target.handle));
             let status = self
                 .local_connect_status
-                .get(usize::from(target.handle))
+                .get(handle.as_usize())
                 .ok_or(DropAbortReason::GenerationChanged)?;
             if status.disconnected
-                || self.local_coordinated_drop_generation(PlayerHandle::new(usize::from(
-                    target.handle,
-                ))) != Some(target.generation)
+                || !self.coordinated_drop_target_generation_acceptable(handle, target.generation)
             {
                 return Err(DropAbortReason::GenerationChanged);
             }
@@ -2464,6 +2637,11 @@ impl<T: Config> P2PSession<T> {
         self.sync_layer
             .freeze_players_at_cuts(&cuts)
             .map_err(|_error| DropAbortReason::MissingHistory)?;
+        // Fan the commit out BEFORE the target endpoints are marked
+        // non-running below (a non-Running endpoint drops outgoing control
+        // messages). A still-alive target must receive the certificate and
+        // fail closed instead of continuing on the survivors' dropped history.
+        self.coordinated_drop_broadcast_commit(DropControlMessage::Commit(commit));
         let representative = cuts
             .first()
             .map(|(handle, _cut)| *handle)
@@ -2510,7 +2688,6 @@ impl<T: Config> P2PSession<T> {
             cut_digest: commit.cut_digest,
             receipts: Vec::new(),
         };
-        self.coordinated_drop_broadcast(DropControlMessage::Commit(commit), &targets);
         self.coordinated_drop_broadcast(DropControlMessage::Report(committed_report), &targets);
         if let Some(active) = self.coordinated_drop.active.as_mut() {
             active.phase = CoordinatedDropPhase::Committed;
@@ -2590,22 +2767,28 @@ impl<T: Config> P2PSession<T> {
             self.coordinated_drop_fail_closed(DropAbortReason::Timeout, true);
             return;
         }
-        let participant_lost = active.phase != CoordinatedDropPhase::Committed
-            && active.participants.iter().copied().any(|participant| {
-                participant != active.local_participant
-                    && match self
+        let live_participants = active
+            .participants
+            .iter()
+            .copied()
+            .filter(|participant| {
+                *participant == active.local_participant
+                    || match self
                         .player_reg
                         .handles
-                        .get(&PlayerHandle::new(usize::from(participant)))
+                        .get(&PlayerHandle::new(usize::from(*participant)))
                     {
                         Some(PlayerType::Remote(addr)) => self
                             .player_reg
                             .remotes
                             .get(addr)
-                            .is_none_or(|endpoint| !endpoint.is_running()),
-                        _ => true,
+                            .is_some_and(UdpProtocol::is_running),
+                        _ => false,
                     }
-            });
+            })
+            .count();
+        let participant_lost =
+            active.phase != CoordinatedDropPhase::Committed && live_participants < active.quorum;
         if participant_lost {
             self.coordinated_drop_fail_closed(DropAbortReason::ParticipantLost, true);
             return;
@@ -2640,6 +2823,7 @@ impl<T: Config> P2PSession<T> {
             let cut = active.cut;
             let cut_digest = active.cut_digest;
             let local_participant = active.local_participant;
+            let is_coordinator = participants.first() == Some(&local_participant);
             self.coordinated_drop_broadcast(
                 DropControlMessage::Prepare(DropPrepare {
                     operation,
@@ -2650,6 +2834,25 @@ impl<T: Config> P2PSession<T> {
             );
             for report in inventory_reports {
                 self.coordinated_drop_broadcast(DropControlMessage::Report(report), &targets);
+            }
+            // Announce the cut while it is still being backfilled so every
+            // participant can compute the same required start and donors can
+            // send their chunks before the coordinator becomes Ready.
+            if phase == CoordinatedDropPhase::Backfill && is_coordinator {
+                if let Some(cut) = cut {
+                    self.coordinated_drop_broadcast(
+                        DropControlMessage::Report(DropReport {
+                            operation,
+                            participant: local_participant,
+                            stage: DropReportStage::Inventory,
+                            exposed_confirmed: Frame::NULL,
+                            cut,
+                            cut_digest: 0,
+                            receipts: Vec::new(),
+                        }),
+                        &targets,
+                    );
+                }
             }
             for report in ready_reports {
                 self.coordinated_drop_broadcast(DropControlMessage::Report(report), &targets);
@@ -2702,7 +2905,7 @@ impl<T: Config> P2PSession<T> {
 
         let committed_resolution = self.coordinated_drop.active.as_ref().and_then(|active| {
             (active.phase == CoordinatedDropPhase::Committed).then_some((
-                active.committed_acks.len() == active.participants.len(),
+                active.committed_acks.len() >= active.quorum,
                 active.operation,
             ))
         });
@@ -2719,7 +2922,18 @@ impl<T: Config> P2PSession<T> {
             .active
             .as_ref()
             .is_some_and(|attempt| {
-                attempt.cut.is_none() && attempt.reports.len() == attempt.participants.len()
+                if attempt.cut.is_some()
+                    || attempt.reports.len() < attempt.quorum
+                    || Self::coordinated_drop_coordinator(&attempt.participants)
+                        != Some(attempt.local_participant)
+                {
+                    return false;
+                }
+                attempt.reports.len() == attempt.participants.len()
+                    || self.coordinated_drop_missing_reports_are_unresponsive(
+                        &attempt.participants,
+                        &attempt.reports,
+                    )
             });
         if choose_cut {
             let cut = self.coordinated_drop.active.as_ref().and_then(|attempt| {
@@ -2807,27 +3021,38 @@ impl<T: Config> P2PSession<T> {
             }
         }
 
-        let commit = self.coordinated_drop.active.as_ref().and_then(|active| {
-            if active.phase == CoordinatedDropPhase::Ready
-                && active.ready.len() == active.participants.len()
-            {
-                Some(active.pending_commit.unwrap_or(DropCommit {
+        let commit_ready = self.coordinated_drop.active.as_ref().is_some_and(|active| {
+            active.phase == CoordinatedDropPhase::Ready && active.ready.len() >= active.quorum
+        });
+        let commit = if commit_ready {
+            self.coordinated_drop.active.as_ref().and_then(|active| {
+                if let Some(pending) = active.pending_commit {
+                    // A commit received from the coordinator is applied once
+                    // this node has verified its own Ready at the same cut and
+                    // has observed the Ready quorum.
+                    return Some(pending);
+                }
+                let is_coordinator = Self::coordinated_drop_coordinator(&active.participants)
+                    == Some(active.local_participant);
+                if !is_coordinator
+                    || (active.ready.len() < active.participants.len()
+                        && !self.coordinated_drop_missing_ready_are_unresponsive(
+                            &active.participants,
+                            &active.ready,
+                        ))
+                {
+                    return None;
+                }
+                Some(DropCommit {
                     operation: active.operation,
                     cut: active.cut?,
                     cut_digest: active.cut_digest?,
-                }))
-            } else {
-                None
-            }
-        });
+                })
+            })
+        } else {
+            None
+        };
         if let Some(commit) = commit {
-            let targets = self
-                .coordinated_drop
-                .active
-                .as_ref()
-                .map(|active| active.targets.clone())
-                .unwrap_or_default();
-            self.coordinated_drop_broadcast(DropControlMessage::Commit(commit), &targets);
             if let Err(reason) = self.coordinated_drop_apply_commit(commit) {
                 self.coordinated_drop_fail_closed(reason, true);
             }
@@ -15757,6 +15982,136 @@ mod tests {
         );
     }
 
+    /// #445 asymmetric-timeout view: only A timed out E, while B/C still see E
+    /// connected. The coordinator's Ready quorum (A/B/C) must commit without
+    /// E's witness, and a session that is omitted from the certificate (E)
+    /// must fail closed instead of continuing on a second history.
+    #[test]
+    fn asymmetric_timeout_witness_omission_commits_majority_and_fails_omitted_closed() {
+        let build = |local: PlayerHandle| {
+            let mut builder = SessionBuilder::<TestConfig>::new()
+                .with_num_players(5)
+                .expect("five players")
+                .add_player(PlayerType::Local, local)
+                .expect("local player");
+            for handle in 0..5 {
+                if handle != local.as_usize() {
+                    builder = builder
+                        .add_player(
+                            PlayerType::Remote(test_addr(
+                                9200 + u16::try_from(handle).unwrap_or(0),
+                            )),
+                            PlayerHandle::new(handle),
+                        )
+                        .expect("remote player");
+                }
+            }
+            let mut session = builder
+                .start_p2p_session(DummySocket)
+                .expect("five-player session");
+            for endpoint in session.player_reg.remotes.values_mut() {
+                endpoint.force_running_for_tests();
+            }
+            for status in session.local_connect_status.iter_mut().take(5) {
+                *status = ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                };
+            }
+            session.state = SessionState::Running;
+            session
+        };
+
+        let mut majority = build(PlayerHandle::new(1));
+        for frame_index in 0..=1 {
+            let frame = Frame::new(frame_index);
+            for handle in 0..5 {
+                majority
+                    .sync_layer
+                    .add_remote_input(PlayerHandle::new(handle), PlayerInput::new(frame, 7_u8));
+            }
+            if frame_index == 0 {
+                majority.sync_layer.advance_frame();
+            }
+        }
+        let targets = vec![DropTarget {
+            handle: 3,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let cut = Frame::new(0);
+        let commit = DropCommit {
+            operation,
+            cut,
+            cut_digest: 0,
+        };
+        let now = majority.coordinated_drop_now();
+        let mut ready = std::collections::BTreeSet::new();
+        let mut ready_transcripts = BTreeMap::new();
+        for participant in [0_u16, 1, 2] {
+            ready.insert(participant);
+            ready_transcripts.insert(participant, (cut, 0));
+        }
+        majority.coordinated_drop.active = Some(CoordinatedDropAttempt {
+            operation,
+            target_addr: test_addr(9203),
+            targets,
+            participants: vec![0, 1, 2, 4],
+            quorum: 3,
+            local_participant: 1,
+            held_at: cut,
+            phase: CoordinatedDropPhase::Ready,
+            reports: BTreeMap::new(),
+            ready,
+            ready_transcripts,
+            committed_acks: std::collections::BTreeSet::new(),
+            cut: Some(cut),
+            cut_digest: Some(0),
+            pending_commit: Some(commit),
+            backfill_sent: false,
+            backfill_chunks: BTreeMap::new(),
+            relayed_backfill: BTreeMap::new(),
+            next_backfill_chunk: 0,
+            expected_backfill_chunks: None,
+            started_at: now,
+            last_broadcast_at: now,
+        });
+
+        majority
+            .coordinated_drop_apply_commit(commit)
+            .expect("a 3-of-4 Ready quorum must commit without the omitted witness");
+        assert_eq!(
+            majority.coordinated_drop.active.as_ref().map(|a| a.phase),
+            Some(CoordinatedDropPhase::Committed)
+        );
+        assert!(
+            majority.local_connect_status[3].disconnected,
+            "the target must be frozen and disconnected by the commit"
+        );
+        assert!(
+            !majority.local_connect_status[4].disconnected,
+            "the omitted witness E is not the target and must not be frozen by this commit"
+        );
+        assert_eq!(majority.current_state(), SessionState::Running);
+
+        let mut omitted = build(PlayerHandle::new(4));
+        assert_eq!(omitted.current_state(), SessionState::Running);
+        omitted
+            .coordinated_drop_accept_commit(commit)
+            .expect("an unknown commit is handled by failing closed, not an error");
+        assert_eq!(
+            omitted.current_state(),
+            SessionState::Synchronizing,
+            "a session omitted from the certificate must fail closed"
+        );
+    }
+
     #[test]
     fn empty_drop_mailboxes_still_drive_queued_operation() {
         let mut session = create_two_player_session();
@@ -15840,6 +16195,7 @@ mod tests {
             target_addr: test_addr(8080),
             targets: Vec::new(),
             participants: Vec::new(),
+            quorum: 1,
             local_participant: 0,
             held_at: cut,
             phase: CoordinatedDropPhase::Ready,
@@ -16540,6 +16896,7 @@ mod tests {
             target_addr: test_addr(8080),
             targets: Vec::new(),
             participants: Vec::new(),
+            quorum: 1,
             local_participant: 0,
             held_at: Frame::new(0),
             phase: CoordinatedDropPhase::Ready,
