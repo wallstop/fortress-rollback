@@ -146,6 +146,22 @@ jobs:
             --base "$results/base-3" --candidate "$results/merge-3" \
             --threshold 1.50
 
+      # Issue #443: the allocation contracts cannot see the CPU-only mesh
+      # folds (they allocate nothing), so the warmed N>=8 advance_frame row has
+      # a documented absolute budget instead of a paired base/candidate gate.
+      # The budget is enforced on the shared runner where the row is measured.
+      - name: Warmed mesh advance_frame absolute budget
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
+          SCCACHE_IDLE_TIMEOUT: "0"
+        run: |
+          cargo bench --bench h16p_mesh -- 'H-16P advance_frame' \
+            --warm-up-time 1 --measurement-time 2 --sample-size 20
+          python3 scripts/ci/check-mesh-advance-budget.py target/criterion
+
       - name: Upload paired benchmark results
         if: always()
         uses: actions/upload-artifact@v7

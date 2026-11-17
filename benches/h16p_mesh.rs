@@ -11,7 +11,7 @@
     clippy::unwrap_used
 )]
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use fortress_rollback::{
     Config, FortressRequest, Message, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType,
     ProtocolConfig, SessionBuilder, SessionState, NULL_FRAME,
@@ -124,7 +124,7 @@ fn handle_requests(requests: impl IntoIterator<Item = FortressRequest<BenchConfi
     }
 }
 
-fn synchronized_mesh(num_players: usize) -> Vec<P2PSession<BenchConfig>> {
+fn synchronized_mesh(num_players: usize) -> (Vec<P2PSession<BenchConfig>>, ManualClock) {
     let addresses = addresses(num_players);
     let fabric: Fabric = Arc::new(Mutex::new(
         addresses
@@ -230,13 +230,13 @@ fn synchronized_mesh(num_players: usize) -> Vec<P2PSession<BenchConfig>> {
         "network work must be drained before measurement"
     );
 
-    sessions
+    (sessions, clock)
 }
 
 fn bench_confirmed_frame(c: &mut Criterion) {
     let mut group = c.benchmark_group("H-16P confirmed_frame");
     for num_players in PLAYER_COUNTS {
-        let sessions = synchronized_mesh(num_players);
+        let (sessions, _clock) = synchronized_mesh(num_players);
         group.bench_with_input(
             BenchmarkId::new("steady_mesh", format!("N={num_players}")),
             &num_players,
@@ -248,5 +248,58 @@ fn bench_confirmed_frame(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_confirmed_frame);
+/// Times one warmed full-mesh `advance_frame` pass at N>=8.
+///
+/// Construction, synchronization, input staging, and the network poll all run
+/// in `iter_batched`'s unmeasured setup. The measured routine is exactly the
+/// per-frame session work the issue #443 audit flagged: every session's
+/// `advance_frame` (including `update_player_disconnects` and
+/// `max_frame_advantage` mesh scans) plus request handling. The test fabric's
+/// `Message` clones therefore cannot dominate the number.
+///
+/// Absolute budgets (median, shared CI runner, debug-assertion-free release):
+/// - N=8: 300 us per mesh pass (measured ~33 us locally).
+/// - N=16: 1.5 ms per mesh pass (measured ~158 us locally).
+/// Enforced by `scripts/ci/check-mesh-advance-budget.py`. These are guardrails
+/// against an order-of-magnitude regression in the per-frame mesh folds, not a
+/// hardware-independent performance claim.
+fn bench_advance_frame(c: &mut Criterion) {
+    let mut group = c.benchmark_group("H-16P advance_frame");
+    for num_players in [8, 16] {
+        let (sessions, clock) = synchronized_mesh(num_players);
+        let sessions = std::cell::RefCell::new(sessions);
+        let mut input = 0_u8;
+        group.bench_with_input(
+            BenchmarkId::new("warmed_mesh", format!("N={num_players}")),
+            &num_players,
+            |b, _| {
+                b.iter_batched(
+                    || {
+                        let mut sessions = sessions.borrow_mut();
+                        for (player_index, session) in sessions.iter_mut().enumerate() {
+                            session
+                                .add_local_input(PlayerHandle::new(player_index), BenchInput(input))
+                                .expect("stage warm input");
+                        }
+                        input = input.wrapping_add(1);
+                        poll_mesh(&mut sessions, &clock);
+                        poll_mesh(&mut sessions, &clock);
+                    },
+                    |()| {
+                        let mut sessions = sessions.borrow_mut();
+                        for session in sessions.iter_mut() {
+                            let requests =
+                                session.advance_frame().expect("advance warmed mesh frame");
+                            handle_requests(requests);
+                        }
+                    },
+                    BatchSize::PerIteration,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_confirmed_frame, bench_advance_frame);
 criterion_main!(benches);
