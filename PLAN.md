@@ -6,10 +6,11 @@
 
 ## In progress
 
-- Land the session-228 PR: mutation-survivor closure for #442's new paths, the #444 poll-only
-  disconnected-relay floor fix, the #443 warmed N>=8 mesh `advance_frame` budget, and the first
-  #446 vacuous-test slice. Exit: the single PR's full CI matrix is green and review feedback is
-  addressed.
+- Continue [issue #446](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/446):
+  session 229 strengthens `SyncLayer::reset_prediction` and the P2P builder tests, after session
+  228 removed the first four zero-assertion tests and strengthened the telemetry macro and reorder
+  harvest assertions. Exit for this slice: those tests assert observable behavior and the full
+  suite stays green.
 
 ## Future
 
@@ -20,12 +21,7 @@
   because concurrent disjoint removals expose incompatible cuts. Exit: a deterministic
   majority-continues regression plus an asymmetric-timeout A/B/C-vs-E reconciliation test pass
   without forks, and the default plus `hot-join` D14 suites stay green.
-- Fix [issue #450](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/450): the
-  #448 OpenAI Review caller fails at startup with zero jobs because the private shared-workflow
-  repository is not reachable. Exit: a PR run produces at least one job/conclusion, or the caller
-  is pinned to a reachable workflow, without changing org policy.
-- Finish [issue #446](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/446): scan
-  every zero-assertion/ignored-result test and give each one a falsifiable assertion or delete it
-  if it duplicates a stronger test. Session 228 fixed the first four (RLE truncation, TimeSync
-  negative frame, and two empty P2P poll tests). Exit: a repo-wide assertion scan has no
-  remaining vacuous tests.
+- Verify [issue #450](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/450) after
+  #451 moved OpenAI Review/Agent Metrics to the public `review-tools` SHA. Exit: a PR run produces
+  at least one OpenAI Review job/conclusion; close #450 if green, otherwise report the shared
+  workflow contract failure to `review-tools`.
