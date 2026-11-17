@@ -22158,6 +22158,121 @@ mod tests {
         );
     }
 
+    /// POLL-ONLY disconnected relay (#444), end-to-end at [`confirmed_frame`].
+    /// The relay C reports D disconnected at its un-mined status (10) but its
+    /// FRESH round floor is the lower cached view (4); A still sees D connected
+    /// high. The consumer folds `min(10, 4)` and holds confirmation at 4, so A
+    /// cannot confirm + discard above the true freeze before C advances.
+    #[test]
+    fn confirmed_frame_poll_only_disconnected_relay_folds_fresh_floor() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let b = PlayerHandle::new(1);
+        let c = PlayerHandle::new(2);
+        let d = PlayerHandle::new(3);
+
+        for _ in 0..20 {
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(0), SaveMode::EveryFrame);
+
+        session.local_connect_status[0] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_b)
+            .expect("B endpoint")
+            .disconnect_remote();
+        session.local_connect_status[b.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(50),
+            epoch: 0,
+        };
+        session.local_connect_status[c.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+        session.local_connect_status[d.as_usize()] = ConnectionStatus {
+            disconnected: false,
+            last_frame: Frame::new(100),
+            epoch: 0,
+        };
+
+        for addr in [addr_c, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("endpoint must exist");
+            endpoint.set_peer_connect_status_for_tests(
+                b,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(50),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_peer_connect_status_for_tests(
+                c,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(100),
+                    epoch: 0,
+                },
+            );
+            endpoint.set_round_floor_for_tests(c, Frame::new(100));
+        }
+        {
+            let d_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_d)
+                .expect("D endpoint");
+            d_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: Frame::new(100),
+                    epoch: 0,
+                },
+            );
+            d_endpoint.set_round_floor_for_tests(d, Frame::new(100));
+        }
+        // Poll-only relay C: its status still says D disconnected at 10, but
+        // the fresh round floor already folded a lower disconnected peer view
+        // at 4.
+        {
+            let c_endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr_c)
+                .expect("C endpoint");
+            c_endpoint.set_peer_connect_status_for_tests(
+                d,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(10),
+                    epoch: 0,
+                },
+            );
+            c_endpoint.set_round_floor_for_tests(d, Frame::new(4));
+        }
+
+        assert_eq!(
+            session.confirmed_frame(),
+            Frame::new(4),
+            "a poll-only disconnected relay's fresh floor (4) must bound confirmed_frame, \
+             not its un-mined status freeze (10); pre-fix this returns 10 and the \
+             observer confirms + discards the contested (4, 10] window"
+        );
+    }
+
     /// POST-PRUNE round hold preserves a genuine lowering (the `min` cap, not a
     /// clamp): a relayed converge-DOWN below the current confirmed flows through
     /// so freeze convergence still follows down — the hold only blocks an ADVANCE.
