@@ -21,7 +21,3 @@
   because concurrent disjoint removals expose incompatible cuts. Exit: a deterministic
   majority-continues regression plus an asymmetric-timeout A/B/C-vs-E reconciliation test pass
   without forks, and the default plus `hot-join` D14 suites stay green.
-- Track [issue #454](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/454): the
-  manual `Agent Metrics` dispatch of the shared `review-tools` workflow fails at startup with zero
-  jobs while OpenAI Review succeeds. Exit: a manual dispatch starts a job and completes, or the
-  shared workflow's checkout ref is made event-independent.
