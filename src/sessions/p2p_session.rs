@@ -7970,8 +7970,8 @@ impl<T: Config> P2PSession<T> {
     ///
     /// A session runs at most one coordinated certificate at a time, and only
     /// the deterministic lowest participant may choose a cut. Two removals
-    /// with different target sets therefore **cannot both make progress** when
-    /// they share that coordinator.
+    /// with different target sets therefore **cannot progress concurrently**
+    /// when they share that coordinator.
     ///
     /// The exact race phase decides the outcome. A prepare that supersedes a
     /// still-`Inventory` attempt queues the losing target for retry once the
@@ -18581,6 +18581,71 @@ mod tests {
             "a pending match must not flip a latched confirmed mismatch back to InSync"
         );
         assert!(!session.is_synchronized());
+    }
+
+    /// The latch records the earliest confirmed divergence, not the first one
+    /// that happens to arrive: a delayed report for an earlier frame replaces a
+    /// later latched frame so `sync_health` names the first divergence.
+    #[test]
+    fn sync_health_reports_the_earliest_mismatch_regardless_of_arrival_order() {
+        let mut session = create_three_player_desync_session();
+        let handle = PlayerHandle::new(1);
+        let addr = test_addr(8080);
+
+        for _ in 0..4 {
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(4), session.save_mode);
+
+        let earlier = Frame::new(1);
+        let later = Frame::new(3);
+        let earlier_local: u128 = 0xA1;
+        let earlier_remote: u128 = 0xA2;
+        let later_local: u128 = 0xB1;
+        let later_remote: u128 = 0xB2;
+        session
+            .local_checksum_history
+            .insert(earlier, earlier_local);
+        session.local_checksum_history.insert(later, later_local);
+
+        // The later frame's report arrives first.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(later, later_remote);
+        session.compare_local_checksums_against_peers();
+        assert_eq!(
+            session.sync_health(handle),
+            Some(SyncHealth::DesyncDetected {
+                frame: later,
+                local_checksum: later_local,
+                remote_checksum: later_remote,
+            })
+        );
+
+        // A delayed report for an earlier frame must replace the latch.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(earlier, earlier_remote);
+        session.compare_local_checksums_against_peers();
+        assert_eq!(
+            session.sync_health(handle),
+            Some(SyncHealth::DesyncDetected {
+                frame: earlier,
+                local_checksum: earlier_local,
+                remote_checksum: earlier_remote,
+            }),
+            "the earliest confirmed mismatch must be reported"
+        );
     }
 
     // ==========================================
