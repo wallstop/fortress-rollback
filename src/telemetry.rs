@@ -3146,7 +3146,8 @@ mod tests {
     }
 
     #[test]
-    fn test_debug_check_invariants_macro_fail() {
+    #[cfg(any(debug_assertions, feature = "paranoid"))]
+    fn test_debug_check_invariants_macro_fail_reports_in_debug() {
         let observer = Arc::new(CollectingObserver::new());
         let _scope = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
         let checker = TestCheckerFail {
@@ -3170,6 +3171,22 @@ mod tests {
             violations[1].message.contains("[context: with context]"),
             "the context overload must include its context: {:?}",
             violations[1].message
+        );
+    }
+
+    #[test]
+    #[cfg(not(any(debug_assertions, feature = "paranoid")))]
+    fn test_debug_check_invariants_macro_fail_is_noop_without_debug_assertions() {
+        let observer = Arc::new(CollectingObserver::new());
+        let _scope = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
+        let checker = TestCheckerFail {
+            message: "macro test",
+        };
+        debug_check_invariants!(checker);
+        debug_check_invariants!(checker, "with context");
+        assert!(
+            observer.violations().is_empty(),
+            "the release no-op contract must not report via the debug macro"
         );
     }
 
