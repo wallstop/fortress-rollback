@@ -435,8 +435,8 @@ impl<T: Config> SyncLayer<T> {
     /// Oldest frame every live queue can actually serve, including
     /// pre-activation frames provided by a hot-join reactivation floor.
     ///
-    /// [`oldest_retained_input_frame`](Self::oldest_retained_input_frame)
-    /// reports the oldest ring entry. A reopened slot's ring begins at its
+    /// `oldest_retained_input_frame` reports the oldest ring entry. A reopened
+    /// slot's ring begins at its
     /// activation frame, but its [`ReactivationFloor`] can still serve the
     /// frozen `(frozen_bound, activation_frame)` window exactly as the
     /// pre-reopen simulation did. A rollback target inside that window is
