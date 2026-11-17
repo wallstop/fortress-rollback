@@ -17005,19 +17005,32 @@ mod tests {
     // ==========================================
 
     #[test]
-    fn poll_remote_clients_does_not_panic() {
+    fn poll_remote_clients_without_messages_preserves_state_and_emits_no_events() {
         let mut session = create_two_player_session();
-        // Should not panic even with no messages
+        let state_before = session.current_state();
+        let frame_before = session.current_frame();
+
         session.poll_remote_clients();
+
+        assert_eq!(session.current_state(), state_before);
+        assert_eq!(session.current_frame(), frame_before);
+        assert!(
+            session.events().next().is_none(),
+            "an empty poll must not synthesize connection events"
+        );
     }
 
     #[test]
-    fn poll_remote_clients_multiple_times() {
+    fn repeated_local_only_polls_keep_running_without_events() {
         let mut session = create_local_only_session();
         for _ in 0..10 {
             session.poll_remote_clients();
+            assert_eq!(session.current_state(), SessionState::Running);
         }
-        // Should complete without issues
+        assert!(
+            session.events().next().is_none(),
+            "a local-only session has no peers to report"
+        );
     }
 
     // ==========================================
