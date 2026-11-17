@@ -99,11 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `poll_hot_join`, forcing a second full mesh fold every frame even for sessions that never serve
   or join; it is now cleared only when hot-join state can actually mutate a folding input.
 - **Pre-existing:** enabling the `tokio` feature on a wasm target no longer fails to build. Tokio
-  1.54 rejects the `net` feature on every wasm target (`Only features
-  sync,macros,io-util,rt,time are supported on wasm`), so the dependency is scoped away from both
-  browser `wasm32-unknown-unknown` and `wasm32-wasip1` and the feature is a documented no-op
-  there; native and Emscripten builds keep `TokioUdpSocket`. The WASM CI matrix now builds
-  `wasm32-wasip1` with each isolated feature.
+  1.54 rejects the `net` feature on wasm (`Only features sync,macros,io-util,rt,time are supported
+  on wasm`) and mio's net modules do not build for browser wasm, `wasip1`, or Emscripten, so the
+  dependency is scoped away from the whole wasm family and the feature is a documented no-op
+  there; native builds keep `TokioUdpSocket`. The WASM CI matrix now builds `wasm32-wasip1` with
+  each isolated feature.
 - **Pre-existing:** `P2PSession::sync_health` no longer falls back to `InSync` after a confirmed
   checksum mismatch is consumed from the pending set. A confirmed-frame mismatch is latched
   per-peer, so both `sync_health` and `is_synchronized` keep reporting `DesyncDetected` instead of

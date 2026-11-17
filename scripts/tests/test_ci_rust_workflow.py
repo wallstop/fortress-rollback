@@ -403,14 +403,14 @@ def test_wasm_job_covers_browser_emscripten_and_wasi_targets() -> None:
         )
     )
 
-    # Tokio rejects its `net` feature on every wasm target, so the feature is a
-    # no-op for browser wasm and `wasip1` alike; Emscripten keeps the adapter.
+    # Tokio/mio do not build their net surface on any wasm target, so the
+    # feature must compile as a no-op on browser wasm, wasip1, and Emscripten.
     tokio_step = next(
         step
         for step in steps
         if step.get("name") == "Check WASM targets treat tokio as a no-op"
     )
-    assert tokio_step["if"] == "matrix.target != 'wasm32-unknown-emscripten'"
+    assert "if" not in tokio_step
 
     clippy_commands = _cargo_commands(steps, "clippy")
     assert len(clippy_commands) == 1

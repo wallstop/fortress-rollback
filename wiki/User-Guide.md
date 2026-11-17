@@ -2039,7 +2039,7 @@ Fortress Rollback provides several Cargo feature flags to customize behavior for
 | Feature                   | Description                                           | Use Case                          | Dependencies        |
 | ------------------------- | ----------------------------------------------------- | --------------------------------- | ------------------- |
 | `sync-send`               | Adds `Send + Sync` bounds to core traits              | Multi-threaded game engines       | None                |
-| `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications (native and Emscripten; browser `wasm32-unknown-unknown` and WASI are documented no-ops: Tokio rejects the `net` feature on wasm) | Async game servers                | `tokio` crate       |
+| `tokio`                   | Enables `TokioUdpSocket` for async Tokio applications (native only; every wasm target is a documented no-op: Tokio/mio reject the `net` feature on wasm) | Async game servers                | `tokio` crate       |
 | `json`                    | Enables JSON serialization for telemetry types        | Structured logging/monitoring     | `serde_json` crate  |
 | `hot-join`                | Enables reserved-slot runtime joins and rejoins       | Long-running sessions             | None                |
 | `paranoid`                | Enables runtime invariant checking in release builds  | Debugging production issues       | None                |
@@ -2096,14 +2096,14 @@ other payloads whose encoded size can change from frame to frame.
 
 Enables `TokioUdpSocket`, an adapter that wraps a Tokio async UDP socket and implements `NonBlockingSocket` for use with Fortress Rollback sessions in async Tokio applications.
 
-The adapter is available on native and Emscripten targets. Tokio 1.54 rejects
-the `net` feature on every wasm target (`Only features
-sync,macros,io-util,rt,time are supported on wasm`), so the `tokio` feature is
-a documented no-op for both browser `wasm32-unknown-unknown` and
-`wasm32-wasip1`: the crate compiles, but `TokioUdpSocket` is not exported. Use
-a raw-byte or JavaScript-bridged custom socket instead. (Earlier releases
-described a `tokio_unstable` gate for WASI; Tokio no longer exposes `net` on
-`wasip1` at all, so that configuration cannot compile.)
+The adapter is available on native targets. Tokio 1.54 rejects the `net`
+feature on wasm (`Only features sync,macros,io-util,rt,time are supported on
+wasm`) and mio's net modules do not build for browser wasm, WASI, or
+Emscripten, so the `tokio` feature is a documented no-op on every wasm target:
+the crate compiles, but `TokioUdpSocket` is not exported. Use a raw-byte or
+JavaScript-bridged custom socket instead. (Earlier releases described a
+`tokio_unstable` gate for WASI; Tokio no longer exposes `net` on `wasip1` at
+all, so that configuration cannot compile.)
 
 ```toml
 [dependencies]

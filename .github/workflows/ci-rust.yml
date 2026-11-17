@@ -612,14 +612,11 @@ jobs:
       - name: Check WASM build (with hot-join feature)
         run: cargo check --target ${{ matrix.target }} --no-default-features --features hot-join
 
-      # `tokio`'s mio net backend does not support the browser
-      # `wasm32-unknown-unknown` target, and Tokio 1.54 rejects the `net` feature
-      # on every wasm target (`wasip1` included: "Only features
-      # sync,macros,io-util,rt,time are supported on wasm"). The dependency is
-      # target-scoped, so enabling the feature there must compile as a
-      # documented no-op.
+      # Tokio 1.54 rejects the `net` feature on wasm, and mio's net modules do
+      # not build for any wasm target (`wasip1`, browser, or Emscripten). The
+      # dependency is target-scoped away from the wasm family, so enabling the
+      # feature there must compile as a documented no-op.
       - name: Check WASM targets treat tokio as a no-op
-        if: matrix.target != 'wasm32-unknown-emscripten'
         run: cargo check --target ${{ matrix.target }} --no-default-features --features tokio
 
       - name: Check documented browser custom-socket example
