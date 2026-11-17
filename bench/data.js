@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794900214218,
+  "lastUpdate": 1794901910077,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "1e2d8e2825c733a8fe1b2fe48076193621e4a0ce",
-          "message": "test: add duplication evidence and repair verification driver (#367)\n\n## Description\n\nAdvances the active consistency-evidence P0 with deterministic\ndirected-duplication rows and closes verification-tooling gaps found\nduring the issue/dependency review.\n\n- Add per-directed-link duplication counters and exact target-only\ninjection premises.\n- Add duplication recovery rows at N=2/3/4/8/16 plus matched in-window\nN=2/N=16 state-corruption controls.\n- Include the new counters in complete replay comparison and document\nexact-SHA results for the 31-row matrix.\n- Make `verify-all.sh` run the implemented Z3 suite in default and\nparallel modes, propagate Z3 failures, and restore parallel TLA+/Kani\nresults from background subshells.\n- Correct verification documentation about Z3 model scope, fixed\nqueue-size assumptions, negative frames, and the existing\nruntime-to-TLA+ handshake trace refinement.\n- Refresh compatible Cargo lockfiles in all four workspaces; remaining\ndirect upgrades are intentionally MSRV-held.\n\n`PLAN.md` remains active locally with only duplication removed from the\noutstanding axes. No public API, wire format, production Rust behavior,\nor changelog-visible behavior changes.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change\n- [x] 📚 Documentation\n- [ ] ♻️ Refactor\n- [x] 🧪 Test\n- [x] 🔧 CI/Build (verification tooling and dependency locks)\n\n## Checklist\n\n### Required\n\n- [x] I have read the contributing guide and repository engineering\npolicy.\n- [x] I followed the zero-panic policy; no production Rust behavior\nchanged.\n- [x] I added regression and matrix coverage for the changed behavior.\n- [x] `cargo fmt && cargo clippy --workspace --all-targets --features\ntokio,json` passed.\n- [x] `cargo nextest run --no-capture` passed: **2,986 passed, 73\nskipped**.\n\n### If Applicable\n\n- [x] Documentation and synchronized wiki pages updated.\n- [x] CHANGELOG reviewed: no entry needed for\ntest/tooling/docs/compatible-lock changes.\n- [x] No new compiler warnings.\n\n## Testing\n\n**Tests added/modified:**\n\n- Directed SimNet duplication and saturating counter-merge tests.\n- Declared schedule/injection premises and complete replay checks for 31\npartition/duplication rows.\n- Five fake-tool regressions for default/parallel Z3 execution, Z3\nfailure propagation, and parallel TLA+/Kani failure propagation.\n- Z3 documentation/comment alignment; no proof expectations weakened.\n\n**Validation performed:**\n\n- Exact-SHA full release matrix at\n`fbbe1d5b3d097623cbdff3a454a0f6b33c93ee1d`: **31 rows**, comprising **10\nbounded recoveries, 15 safe failures, and six intentional defect\ncontrols**. Every row SHA matched; replay mismatches and premise\nviolations were both zero.\n- Five duplication bases injected 174 duplicate sends each, only on 0→1,\nwith per-link sums equal to the global counter. N=2/N=16 in-window state\ncontrols produced typed peer/frame evidence.\n- `cargo test --test verification --features z3-verification-bundled --\nz3 --nocapture`: **65 passed**.\n- `pytest scripts/tests -q`: **2,191 passed**.\n- `cargo test --doc -- --nocapture`: **160 passed, 50 ignored**.\n- Rustdoc with `-D warnings`, Ruff, shell portability, workspace-lock\nchecks, Cargo MSRV check, links (1,444), doc claims, wiki consistency,\nMarkdownlint, plan hygiene, and branch-explicit agent preflight:\n**passed**.\n- `cargo update --dry-run`: zero remaining compatible updates. Latest\n`main` at `ab451d2`: **all 15 push workflows succeeded**.\n\n## Related Issues\n\n- #365 was investigated and closed separately with its bounded\nLean/Aeneas feasibility result.\n- Advances the active P0 consistency-evidence matrix; reorder, bursts,\nasymmetry, repeated flaps, poll stalls, exact timing, and host resource\nevidence remain tracked there.",
-          "timestamp": "2026-11-05T17:19:02-08:00",
-          "tree_id": "6875ac9f4756ffd772b51399b24841761da34f1a",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/1e2d8e2825c733a8fe1b2fe48076193621e4a0ce"
-        },
-        "date": 1793928444012,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 25457,
-            "range": "± 624",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 15228,
-            "range": "± 320",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 455,
-            "range": "± 11",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 562,
-            "range": "± 9",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 5491,
-            "range": "± 700",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2812,
             "range": "± 300",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "ed08d253d849567c4b3a63ac236534535cdffa97",
+          "message": "test: pin both debug_check_invariants! contracts (#457)\n\n## Description\n\nFixes the main `CI - Safety & Correctness` failure introduced by the\n#446 sweep. The strict release jobs (`cargo test --release --lib`) build\nwith debug assertions disabled, where `debug_check_invariants!` is a\ndocumented no-op. The fail-path test now pins both contracts:\n\n- debug / `paranoid`: two Critical/Invariant violations with the\ninvariant text and the context suffix;\n- release no-op: no violations reported.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n## Testing\n\nReproduced both strict modes locally:\n- `RUSTFLAGS=\"-D warnings\" cargo test --release --lib\ntelemetry::tests::test_debug_check_invariants` → 2 passed (no-op\nbranch).\n- `RUSTFLAGS=\"-C debug-assertions=on\" cargo test --release --lib\ntelemetry::tests::test_debug_check_invariants` → 2 passed (reporting\nbranch).\n\n## Related Issues\n\nFixes the main safety-gate regression from #446.",
+          "timestamp": "2026-11-17T07:40:56Z",
+          "tree_id": "87d275a283cac81cecfdaabb19ee6afb878c07ff",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/ed08d253d849567c4b3a63ac236534535cdffa97"
+        },
+        "date": 1794901909150,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 40108,
+            "range": "± 948",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25117,
+            "range": "± 534",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1246,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2798,
+            "range": "± 166",
             "unit": "ns/iter"
           }
         ]
