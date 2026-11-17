@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794910590207,
+  "lastUpdate": 1794956758496,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "4757214205cb8b8f685df777b9c3be49993b0b85",
-          "message": "test: add deterministic asymmetry consistency evidence (#370)\n\n## Summary\n\n- Extend the expectation-aware consistency ledger to a deterministic 200\nms one-way delay on link 0→1 at N=2/3/4/8/16.\n- Add saturating per-link/global per-copy delay evidence,\nbackward-compatible trace identity, exact replay comparison, and matched\nN=2/N=16 corruption controls.\n- Handle valid post-heal overtaking explicitly: clean sends may pass old\ndelayed packets, so directed reorder evidence is required rather than\nrejected.\n- Record the schema-v5 matrix in the tuning guide/wiki and remove only\nthe completed asymmetry axis from `PLAN.md`.\n\n## Evidence\n\nImplementation SHA `726b25f47fb51213c71a8ebcbb47b07dfa7757f1` passed the\nrelease-mode full matrix:\n\n- 52 rows: 40 uninjected bases and 12 matched controls.\n- 25 bounded recoveries, 15 safe failures, and 12 intentional defect\ncontrols.\n- Asymmetric delay observed 170 delayed copies and 26 post-heal reorder\ndeliveries at N=2; every larger size observed 132 delayed copies and 22\nreorder deliveries.\n- Every delay/reorder injection occurred only on 0→1, and per-link sums\nmatched global counters.\n- Both controls produced typed state divergence at peer 1/frame 120,\nbounded by the confirmed prefix at healing.\n- Zero replay mismatches and zero premise violations; every row carries\nthe exact implementation SHA.\n\nIndependent SimNet tests validate direction, exact virtual-time delivery\nboundaries, per-copy delayed duplication, and counter saturation. Four\nadversarial review rounds closed the initial oracle boundary,\ninstrumentation coverage, documentation, and progress-record findings;\nthe final aggregate review reported zero findings.\n\n## Validation\n\n- Focused SimNet/trace/schedule tests and 15-row PR gate: passed.\n- Exact-SHA `partition_sweep_full`: 52 rows passed in release mode.\n- `cargo clippy --workspace --all-targets --features tokio,json`:\npassed.\n- `cargo nextest run --no-capture`: 2,996 passed, 73 skipped.\n- `.venv/bin/pytest scripts/tests -q`: 2,191 passed.\n- `RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps`: passed; doc tests\n160 passed, 50 ignored.\n- Link check: 1,445 links, zero errors/warnings; doc claims, wiki\nconsistency, Markdownlint, plan hygiene, typos, and four workspace-lock\nchecks passed.\n- Agent preflight: all selected checks passed without fallback.\n- Latest `main` (`b960525`): all 14 push workflows successful, zero\npending/failures.\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS (no production code changed)\n- Determinism: PASS (fixed seed/virtual time; complete replay equality)\n- Error handling: PASS (test-only instrumentation)\n- Test breadth: PASS (direction, timing, duplication, saturation,\nmatrix, replay, and negative controls)\n- Design log: N/A (no architecture decision)\n- CHANGELOG: N/A (no public API, production behavior, or wire change)\n\n## Scope\n\nNo production API or wire behavior changes are included, so no changelog\nentry is needed. Repeated flaps, poll stalls, exact timing, and host\nresource evidence remain in the active P0 plan. The only open issue,\n#365, remains the intentionally queued P2 Lean experiment. All\ncompatible Cargo workspace dependencies are current; remaining direct\nupgrades are held by the Rust 1.86 MSRV.",
-          "timestamp": "2026-11-06T13:19:32-08:00",
-          "tree_id": "40f1edc91709000424c90a38bc8d45154f049771",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/4757214205cb8b8f685df777b9c3be49993b0b85"
-        },
-        "date": 1794000428414,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 39694,
-            "range": "± 232",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 23084,
-            "range": "± 195",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1090,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1243,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2760,
-            "range": "± 156",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3142,
             "range": "± 185",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "8a4ec54c4db3a63f6d9c6bc9514f29ddc2a8123b",
+          "message": "fix: latch confirmed desync in sync_health, build tokio on wasip1, enforce the pacing oracle (#462)\n\n## Summary\n\nThree correctness/coverage fixes found by a CAP + cross-platform audit\nof `cf60d1c`\n(latest main: 190 check-runs, 0 non-green; no open issues or PRs).\n\n### 1. `sync_health`/`is_synchronized` could report `InSync` on a\ndiverged session\n\n`compare_local_checksums_against_peers` consumed a mismatching checksum\nfrom\n`pending_checksums` after emitting `DesyncDetected`, but only advanced\n`last_verified_frame` on a match. The next `sync_health` call therefore\nfell back\nto a stale earlier match and returned `InSync`; `is_synchronized()`\ncould\ngreen-light termination on a permanent confirmed-frame divergence.\n\nFix: latch the earliest confirmed mismatch per peer\n(`checksum_mismatch_frame`) and consult it before the stale-match\nfallback.\n\n- Red/green:\n`sync_health_keeps_reporting_desync_after_mismatch_is_consumed`\n  fails with the latch removed and passes with it.\n\n### 2. The `tokio` feature could not compile on two of three wasm\ntargets\n\nTokio 1.54 rejects the `net` feature on wasm\n(`Only features sync,macros,io-util,rt,time are supported on wasm`), and\nmio's\nnet modules do not build for Emscripten either. The dependency was only\nscoped\naway from browser `wasm32-unknown-unknown`, so `--features tokio` failed\nwith\nTokio/mio compile errors on `wasm32-wasip1` and\n`wasm32-unknown-emscripten`.\n\nFix: scope the dependency and both module gates away from `target_family\n= \"wasm\"`,\ndocument the no-op, and add `wasm32-wasip1` to the WASM CI matrix. The\ntokio\nno-op check now runs on every wasm row.\n\n- Red: `cargo check --target wasm32-wasip1 --no-default-features\n--features tokio`\nand `--target wasm32-unknown-emscripten` both exited 101 before the\nchange;\n  both are green after.\n- Local matrix verified: no-default, `sync-send`, `paranoid`, `json`,\n`hot-join`,\n`tokio`, plus `clippy -D warnings` on wasip1; browser wasm and\nEmscripten both\ncompile with `tokio` as a no-op; native `--features tokio` still builds.\n\n### 3. Pacing-cliff cells never checked the invariant oracle\n\n`pacing_cliff::measure` only read metrics. A divergence, stalled peer,\nor session\nerror in any ablation cell passed silently. It now calls\n`report.expect_pass(&schedule)`; all five pacing rows stay green.\n\n### 4. Smaller items\n\n- `send_confirmed_inputs_to_spectators` starts with an O(1) emptiness\ncheck on\nthe dedicated spectator map instead of an O(players) handle-registry\nwalk every\n  frame.\n- Corrected the concurrent-removal contract in\n`P2PSession::remove_player`\n  rustdoc, the user guide, and the wiki mirrors. The old text promised\ndeterministic serialization; the checked-in CAP row proves\ndifferent-target\nremovals sharing a coordinator fail closed. Applications must serialize\n  removals. (#461 tracks implementing real serialization.)\n\n## Evidence\n\n| Suite | Result |\n| --- | --- |\n| `cargo nextest run --workspace --features tokio,json` | 3250 passed,\n75 skipped |\n| `cargo nextest run --workspace --features tokio,json,hot-join` | 3544\npassed, 76 skipped |\n| `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings` | clean |\n| WASI feature matrix + clippy | clean |\n| `agent-preflight.py --full --auto-fix` | all checks passed |\n| `actionlint`, workflow contract tests | pass (31 tests) |\n| `check-links`, `check-doc-claims`, markdownlint, typos, changelog\nrules | pass |\n\n## Deep-analysis follow-ups (filed, out of scope)\n\n- #460 — lossy retirement quarantine: N=3 seed 428 wedge\n(`ConflictingHistory`\nfail-closed on every survivor) and N=2 target-tail history divergence,\nwith\n  exact harness repros.\n- #461 — concurrent different-target removals cannot both progress, and\na\nretried removed operation reuses its closed `DropOperationId`, so peers\nswallow\n  the retry and the initiator times out into fail-closed.\n- #463 — the post-prune fresh-ack HOLD can be bypassed when a prune is\napplied\n  after `drive_floor_round` in the same advance.\n- #464 — `advance_frame` drops an already-mutated rollback/save request\nbatch\n  when the spectator flush fails (hot-join serve driven by poll-only).\n\nNo production behavior changed outside the two fixes; wire bytes, trace\ndigests,\nand allocation contracts are unchanged.",
+          "timestamp": "2026-11-17T22:54:40Z",
+          "tree_id": "04c3b1e0d118724878decf588fc8b99b89691a66",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/8a4ec54c4db3a63f6d9c6bc9514f29ddc2a8123b"
+        },
+        "date": 1794956757472,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 24457,
+            "range": "± 386",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 16134,
+            "range": "± 680",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 449,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 561,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 5077,
+            "range": "± 162",
             "unit": "ns/iter"
           }
         ]
