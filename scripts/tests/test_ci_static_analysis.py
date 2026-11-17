@@ -37,7 +37,10 @@ CARGO_SHEAR_SHA256 = (
 # action must reference a full commit SHA so a moved tag cannot change what CI
 # runs. Dependabot rewrites the SHA and keeps the trailing version comment, so
 # these checks intentionally validate shape instead of pinning exact commits.
-FIRST_PARTY_ACTION_PREFIXES = ("actions/", "github/")
+# `Ambiguous-Interactive/.github` hosts this organization's shared reusable
+# workflows (for example the OpenAI review). They are first-party, not
+# third-party supply-chain surface, and are maintained by the same owners.
+FIRST_PARTY_ACTION_PREFIXES = ("actions/", "github/", "Ambiguous-Interactive/")
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 _ACTION_REFERENCE = re.compile(
     r"^\s*(?:-\s*)?uses:\s*(?P<reference>[^\s#]+)"

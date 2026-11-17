@@ -841,6 +841,10 @@ def test_generic_nightly_pin_is_not_duplicated_by_consumers() -> None:
                 job_name,
             ) in DIRECT_SPECIAL_PURPOSE_NIGHTLY_JOBS:
                 continue
+            # Reusable-workflow call jobs have no `steps`; the called workflow
+            # owns its own toolchain pins.
+            if "uses" in job:
+                continue
             for step in job["steps"]:
                 toolchain = str(step.get("with", {}).get("toolchain", ""))
                 run = str(step.get("run", ""))
