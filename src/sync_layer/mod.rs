@@ -3180,18 +3180,44 @@ mod sync_layer_tests {
     fn test_reset_prediction() {
         let mut sync_layer = SyncLayer::<TestConfig>::new(2, 8);
 
-        // Add some inputs
         let game_input = PlayerInput::new(Frame::new(0), TestInput { inp: 1 });
-        sync_layer.add_remote_input(PlayerHandle::new(0), game_input);
-        sync_layer.add_remote_input(PlayerHandle::new(1), game_input);
+        assert!(sync_layer.add_remote_input(PlayerHandle::new(0), game_input));
+        assert!(sync_layer.add_remote_input(PlayerHandle::new(1), game_input));
+        sync_layer.advance_frame();
 
-        // Get input for future frame (triggers prediction)
+        // No frame-1 inputs yet: this call predicts both slots and records a
+        // prediction episode in each queue.
         let connect_status = vec![ConnectionStatus::default(); 2];
-        let _ = sync_layer.synchronized_inputs(&connect_status);
+        let predicted = sync_layer
+            .synchronized_inputs(&connect_status)
+            .expect("predictions must be available");
+        assert_eq!(predicted[0].1, InputStatus::Predicted);
+        assert_eq!(predicted[1].1, InputStatus::Predicted);
 
-        // Reset predictions
+        // Deliver a conflicting real frame-1 input for slot 0. The queue must
+        // record the mispredicted frame so the next advance rolls back.
+        assert!(sync_layer.add_remote_input(
+            PlayerHandle::new(0),
+            PlayerInput::new(Frame::new(1), TestInput { inp: 9 })
+        ));
+        assert_eq!(
+            sync_layer
+                .input_queues
+                .first()
+                .expect("slot 0 queue")
+                .first_incorrect_frame(),
+            Frame::new(1),
+            "a conflicting arrival must be recorded as the first incorrect frame"
+        );
+
+        // Reset must clear both the misprediction and every queue's episode.
         sync_layer.reset_prediction();
-        // Should not panic and should clear prediction state
+        for (index, queue) in sync_layer.input_queues.iter().enumerate() {
+            assert!(
+                queue.first_incorrect_frame().is_null(),
+                "queue {index} must clear first_incorrect_frame on reset"
+            );
+        }
     }
 
     #[test]
