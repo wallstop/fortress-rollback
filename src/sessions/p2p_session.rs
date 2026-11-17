@@ -7971,11 +7971,16 @@ impl<T: Config> P2PSession<T> {
     /// A session runs at most one coordinated certificate at a time, and only
     /// the deterministic lowest participant may choose a cut. Two removals
     /// with different target sets therefore **cannot both make progress** when
-    /// they share that coordinator: the loser cannot obtain a cut and every
-    /// affected session fails closed (`Synchronizing`) rather than continuing
-    /// on a conflicting history. Serialize application-driven removals: issue
-    /// one, wait for its `PeerDropped`/`Disconnected` events, then issue the
-    /// next.
+    /// they share that coordinator.
+    ///
+    /// The exact race phase decides the outcome. A prepare that supersedes a
+    /// still-`Inventory` attempt queues the losing target for retry once the
+    /// winner clears, so the loser may still commit later. A conflicting
+    /// prepare or abort after an attempt has left `Inventory` instead fails the
+    /// affected session closed (`Synchronizing`) rather than continuing on a
+    /// conflicting history. Serialize application-driven removals that must
+    /// complete in order: issue one, wait for its
+    /// `PeerDropped`/`Disconnected` events, then issue the next.
     ///
     /// For automatic graceful drop on disconnect timeout, configure
     /// [`crate::SessionBuilder::with_disconnect_behavior`] with
@@ -9916,23 +9921,23 @@ impl<T: Config> P2PSession<T> {
         // Get the remote endpoint
         let remote = self.player_reg.remotes.get(addr)?;
 
-        // If desync detection is off, we can't determine sync health
-        if self.desync_detection == DesyncDetection::Off {
-            return Some(SyncHealth::Pending);
-        }
-
         // A confirmed-frame mismatch is a permanent divergence in the trusted
         // model. `compare_local_checksums_against_peers` consumes the pending
         // entry after reporting it, so without this latch the stale earlier
         // `last_verified_frame` would otherwise make this peer look `InSync`.
-        // Checked before the pending scan so no later comparison path can mask
-        // an already-observed confirmed divergence.
+        // Checked before every fallible/empty branch so no path can mask an
+        // already-observed confirmed divergence.
         if let Some((frame, local_checksum, remote_checksum)) = remote.checksum_mismatch_frame {
             return Some(SyncHealth::DesyncDetected {
                 frame,
                 local_checksum,
                 remote_checksum,
             });
+        }
+
+        // If desync detection is off, we can't determine sync health
+        if self.desync_detection == DesyncDetection::Off {
+            return Some(SyncHealth::Pending);
         }
 
         // Check for any pending checksums that don't match our local history
@@ -13190,11 +13195,17 @@ impl<T: Config> P2PSession<T> {
                             self.metrics
                                 .record_checksum_comparison(local_checksum == remote_checksum);
                             if local_checksum != remote_checksum {
-                                // Record this peer's first confirmed mismatch so
-                                // `sync_health` can never fall back to `InSync`
-                                // from an older match after this frame's pending
-                                // entry is consumed below.
-                                if remote.checksum_mismatch_frame.is_none() {
+                                // Latch the earliest confirmed mismatch so
+                                // `sync_health` reports the first divergence and
+                                // can never fall back to `InSync` from an older
+                                // match after this frame's pending entry is
+                                // consumed below. Frames are normally compared in
+                                // ascending order, but a retried/late report may
+                                // arrive out of order.
+                                let replace = remote
+                                    .checksum_mismatch_frame
+                                    .is_none_or(|(latched, _, _)| remote_frame < latched);
+                                if replace {
                                     remote.checksum_mismatch_frame =
                                         Some((remote_frame, local_checksum, remote_checksum));
                                 }
@@ -18480,6 +18491,7 @@ mod tests {
         let mut session = create_three_player_desync_session();
         let handle = PlayerHandle::new(1);
         let addr = test_addr(8080);
+        let addr_d = test_addr(8081);
 
         session.sync_layer.advance_frame();
         session.sync_layer.advance_frame();
@@ -18496,14 +18508,34 @@ mod tests {
         session
             .local_checksum_history
             .insert(diverging, local_diverging);
-        let remote = session
+
+        // Positive control: both remotes deliver a matching checksum, so the
+        // session reports InSync and is_synchronized() is true. This proves the
+        // later false assertion is caused by B's latch and not by an always-
+        // pending D.
+        for addr in [&addr, &addr_d] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(addr)
+                .expect("remote endpoint exists")
+                .pending_checksums
+                .insert(matching, local_match);
+        }
+        session.compare_local_checksums_against_peers();
+        assert_eq!(session.sync_health(handle), Some(SyncHealth::InSync));
+        assert!(
+            session.is_synchronized(),
+            "the positive control requires every connected remote to be verified"
+        );
+
+        session
             .player_reg
             .remotes
             .get_mut(&addr)
-            .expect("B endpoint exists");
-        remote.pending_checksums.insert(matching, local_match);
-        remote.pending_checksums.insert(diverging, remote_diverging);
-
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(diverging, remote_diverging);
         session.compare_local_checksums_against_peers();
 
         assert!(
@@ -18514,7 +18546,7 @@ mod tests {
                 .expect("B endpoint exists")
                 .pending_checksums
                 .is_empty(),
-            "both comparisons must have been consumed from pending_checksums"
+            "the mismatching comparison must have been consumed from pending_checksums"
         );
         assert_eq!(
             session.sync_health(handle),
