@@ -3034,13 +3034,15 @@ impl<T: Config> P2PSession<T> {
                 }
                 let is_coordinator = Self::coordinated_drop_coordinator(&active.participants)
                     == Some(active.local_participant);
-                if !is_coordinator
-                    || (active.ready.len() < active.participants.len()
-                        && !self.coordinated_drop_missing_ready_are_unresponsive(
-                            &active.participants,
-                            &active.ready,
-                        ))
-                {
+                let may_commit = if active.ready.len() == active.participants.len() {
+                    true
+                } else {
+                    self.coordinated_drop_missing_ready_are_unresponsive(
+                        &active.participants,
+                        &active.ready,
+                    )
+                };
+                if !is_coordinator || !may_commit {
                     return None;
                 }
                 Some(DropCommit {
@@ -16109,6 +16111,87 @@ mod tests {
             "two of four Ready witnesses are not a strict majority"
         );
         assert!(!session.local_connect_status[3].disconnected);
+    }
+
+    #[test]
+    fn coordinator_commit_waits_for_a_reachable_missing_witness() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        for frame_index in 0..=1 {
+            let frame = Frame::new(frame_index);
+            for handle in 0..5 {
+                session
+                    .sync_layer
+                    .add_remote_input(PlayerHandle::new(handle), PlayerInput::new(frame, 7_u8));
+            }
+            if frame_index == 0 {
+                session.sync_layer.advance_frame();
+            }
+        }
+        let targets = vec![DropTarget {
+            handle: 3,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let cut = Frame::new(0);
+        let now = session.coordinated_drop_now();
+        let mut ready = std::collections::BTreeSet::new();
+        let mut ready_transcripts = BTreeMap::new();
+        for participant in [0_u16, 1, 2] {
+            ready.insert(participant);
+            ready_transcripts.insert(participant, (cut, 0));
+        }
+        session.coordinated_drop.active = Some(CoordinatedDropAttempt {
+            operation,
+            target_addr: test_addr(9403),
+            targets,
+            participants: vec![0, 1, 2, 4],
+            quorum: 3,
+            local_participant: 0,
+            held_at: cut,
+            phase: CoordinatedDropPhase::Ready,
+            reports: BTreeMap::new(),
+            ready,
+            ready_transcripts,
+            committed_acks: std::collections::BTreeSet::new(),
+            cut: Some(cut),
+            cut_digest: Some(0),
+            pending_commit: None,
+            backfill_sent: false,
+            backfill_chunks: BTreeMap::new(),
+            relayed_backfill: BTreeMap::new(),
+            next_backfill_chunk: 0,
+            expected_backfill_chunks: None,
+            started_at: now,
+            last_broadcast_at: now,
+        });
+
+        // E=4 is still reachable, so a bare Ready quorum must not commit yet.
+        session.drive_coordinated_drop();
+        assert_eq!(
+            session.coordinated_drop.active.as_ref().map(|a| a.phase),
+            Some(CoordinatedDropPhase::Ready),
+            "a reachable missing witness must be awaited"
+        );
+
+        // Once E is locally unresponsive, the coordinator may proceed on the
+        // strict-majority quorum.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&test_addr(9404))
+            .expect("E endpoint")
+            .disconnect_remote();
+        session.drive_coordinated_drop();
+        assert_eq!(
+            session.coordinated_drop.active.as_ref().map(|a| a.phase),
+            Some(CoordinatedDropPhase::Committed),
+            "the coordinator may commit once the missing witness is unresponsive"
+        );
     }
 
     #[test]
