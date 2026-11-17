@@ -807,6 +807,14 @@ def test_cross_arch_runtime_executes_arm_and_32_bit_usize_targets() -> None:
             f"{lane} must execute the checked-in corpus replays, which exercise "
             "ring recycling and mixed transports under a non-x86_64 usize"
         )
+        assert (
+            "not test(checked_in_extended_ring_schedule_recycles_rings_and_replays_identically)"
+            in filter_text
+        ), (
+            f"{lane} must skip the duplicate extended-ring replay, which exceeds the "
+            "cross-arch per-test budget even though the default corpus test already "
+            "replays that schedule"
+        )
         assert "not test(network::multi_process::)" in filter_text
 
     env = job["env"]

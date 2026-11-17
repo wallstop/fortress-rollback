@@ -889,8 +889,10 @@ jobs:
   # excluded because its nightly shards are release-mode multi-thousand-step
   # loops, except for the pinned cross-architecture trace-digest test (which
   # folds the whole session/protocol/simulation stack into one value) and the
-  # checked-in corpus replays (ring recycling and mixed transports). Both must
-  # stay byte-identical on every lane.
+  # default/mixed-transport corpus replays (the default corpus already includes
+  # the extended-ring schedule; its separate duplicate replay exceeds the
+  # cross-arch per-test budget under QEMU). Both must stay byte-identical on
+  # every lane.
   cross-arch-runtime:
     name: Cross-Arch Runtime (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -905,7 +907,8 @@ jobs:
             filter: >-
               (not test(simulation::) or
               test(smoke_traces_match_checked_in_cross_architecture_digests) or
-              test(simulation::corpus_replay::))
+              (test(simulation::corpus_replay::) and
+              not test(checked_in_extended_ring_schedule_recycles_rings_and_replays_identically)))
               and not test(network::multi_process::)
               and not test(network::compression::property_tests::)
           - name: i686-32bit
@@ -914,7 +917,8 @@ jobs:
             filter: >-
               (not test(simulation::) or
               test(smoke_traces_match_checked_in_cross_architecture_digests) or
-              test(simulation::corpus_replay::))
+              (test(simulation::corpus_replay::) and
+              not test(checked_in_extended_ring_schedule_recycles_rings_and_replays_identically)))
               and not test(network::multi_process::)
 
     env:
