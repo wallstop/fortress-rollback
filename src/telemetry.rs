@@ -2707,16 +2707,24 @@ mod tests {
 
     #[test]
     fn test_report_violation_macro_basic() {
-        // Just ensure it compiles and doesn't panic
+        let observer = Arc::new(CollectingObserver::new());
+        let _scope = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
         report_violation!(
             ViolationSeverity::Warning,
             ViolationKind::FrameSync,
             "test message"
         );
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, ViolationSeverity::Warning);
+        assert_eq!(violations[0].kind, ViolationKind::FrameSync);
+        assert_eq!(violations[0].message, "test message");
     }
 
     #[test]
     fn test_report_violation_macro_with_format() {
+        let observer = Arc::new(CollectingObserver::new());
+        let _scope = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
         let expected = 10;
         let actual = 15;
         report_violation!(
@@ -2726,10 +2734,15 @@ mod tests {
             expected,
             actual
         );
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].message, "mismatch: expected=10, actual=15");
     }
 
     #[test]
     fn test_report_violation_macro_accepts_named_format_args() {
+        let observer = Arc::new(CollectingObserver::new());
+        let _scope = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
         let expected = 10;
         let actual = 15;
         report_violation!(
@@ -2739,10 +2752,15 @@ mod tests {
             expected = expected,
             actual = actual,
         );
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].message, "mismatch: expected=10, actual=15");
     }
 
     #[test]
     fn test_report_violation_macro_accepts_macro_format_args() {
+        let observer = Arc::new(CollectingObserver::new());
+        let _scope = push_violation_observer(Arc::clone(&observer) as Arc<dyn ViolationObserver>);
         macro_rules! sample_frame {
             () => {
                 42
@@ -2755,6 +2773,9 @@ mod tests {
             "sample frame: {}",
             sample_frame!(),
         );
+        let violations = observer.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].message, "sample frame: 42");
     }
 
     #[test]
@@ -2844,21 +2865,23 @@ mod tests {
 
     #[test]
     fn test_report_violation_to_macro_basic() {
-        let observer: Option<Arc<dyn ViolationObserver>> =
-            Some(Arc::new(CollectingObserver::new()));
+        let collector = Arc::new(CollectingObserver::new());
+        let observer: Option<Arc<dyn ViolationObserver>> = Some(collector.clone());
         report_violation_to!(
             &observer,
             ViolationSeverity::Warning,
             ViolationKind::FrameSync,
             "test message"
         );
-        // Just ensure it compiles and doesn't panic
+        let violations = collector.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].message, "test message");
     }
 
     #[test]
     fn test_report_violation_to_macro_with_format() {
-        let observer: Option<Arc<dyn ViolationObserver>> =
-            Some(Arc::new(CollectingObserver::new()));
+        let collector = Arc::new(CollectingObserver::new());
+        let observer: Option<Arc<dyn ViolationObserver>> = Some(collector.clone());
         let expected = 10;
         let actual = 15;
         report_violation_to!(
@@ -2869,7 +2892,9 @@ mod tests {
             expected,
             actual
         );
-        // Just ensure it compiles and doesn't panic
+        let violations = collector.violations();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].message, "mismatch: expected=10, actual=15");
     }
 
     #[test]
