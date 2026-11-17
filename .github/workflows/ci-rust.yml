@@ -574,6 +574,7 @@ jobs:
         target:
           - wasm32-unknown-unknown
           - wasm32-unknown-emscripten
+          - wasm32-wasip1
 
     steps:
       - uses: actions/checkout@v7
@@ -611,11 +612,11 @@ jobs:
       - name: Check WASM build (with hot-join feature)
         run: cargo check --target ${{ matrix.target }} --no-default-features --features hot-join
 
-      # `tokio`'s mio net backend does not support the browser
-      # `wasm32-unknown-unknown` target. The dependency is target-scoped, so
-      # enabling the feature there must compile as a documented no-op.
-      - name: Check browser WASM treats tokio as a no-op
-        if: matrix.target == 'wasm32-unknown-unknown'
+      # Tokio 1.54 rejects the `net` feature on wasm, and mio's net modules do
+      # not build for any wasm target (`wasip1`, browser, or Emscripten). The
+      # dependency is target-scoped away from the wasm family, so enabling the
+      # feature there must compile as a documented no-op.
+      - name: Check WASM targets treat tokio as a no-op
         run: cargo check --target ${{ matrix.target }} --no-default-features --features tokio
 
       - name: Check documented browser custom-socket example
@@ -888,11 +889,12 @@ jobs:
   # emulation; they already run on the native matrix. The simulation suite is
   # excluded because its nightly shards are release-mode multi-thousand-step
   # loops, except for the pinned cross-architecture trace-digest test (which
-  # folds the whole session/protocol/simulation stack into one value) and the
-  # default/mixed-transport corpus replays (the default corpus already includes
-  # the extended-ring schedule; its separate duplicate replay exceeds the
-  # cross-arch per-test budget under QEMU). Both must stay byte-identical on
-  # every lane.
+  # folds the whole session/protocol/simulation stack into one value), the
+  # partition/CAP PR gate (drop certificates, freeze convergence, and component
+  # classification under a non-x86_64 usize), and the default/mixed-transport
+  # corpus replays (the default corpus already includes the extended-ring
+  # schedule; its separate duplicate replay exceeds the cross-arch per-test
+  # budget under QEMU). All must stay byte-identical on every lane.
   cross-arch-runtime:
     name: Cross-Arch Runtime (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -907,6 +909,7 @@ jobs:
             filter: >-
               (not test(simulation::) or
               test(smoke_traces_match_checked_in_cross_architecture_digests) or
+              test(simulation::partition_sweep::partition_sweep_pr_gate) or
               (test(simulation::corpus_replay::) and
               not test(checked_in_extended_ring_schedule_recycles_rings_and_replays_identically)))
               and not test(network::multi_process::)
@@ -917,6 +920,7 @@ jobs:
             filter: >-
               (not test(simulation::) or
               test(smoke_traces_match_checked_in_cross_architecture_digests) or
+              test(simulation::partition_sweep::partition_sweep_pr_gate) or
               (test(simulation::corpus_replay::) and
               not test(checked_in_extended_ring_schedule_recycles_rings_and_replays_identically)))
               and not test(network::multi_process::)

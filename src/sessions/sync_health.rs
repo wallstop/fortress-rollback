@@ -35,10 +35,12 @@ use crate::Frame;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SyncHealth {
-    /// Checksums match at the most recently compared frame.
+    /// All compared checksums have matched so far.
     ///
-    /// This indicates that at the last checksum comparison, both peers
-    /// had identical game state. Note that this does not guarantee
+    /// This indicates that every checksum compared so far matched, so both
+    /// peers had identical game state at the last comparison. A confirmed-frame
+    /// mismatch is latched and keeps this peer reporting
+    /// [`SyncHealth::DesyncDetected`] instead. Note that this does not guarantee
     /// synchronization at the current frame - only at the last compared frame.
     InSync,
 

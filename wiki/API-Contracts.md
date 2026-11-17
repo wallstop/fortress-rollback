@@ -713,7 +713,7 @@ remote-frame aging assumes symmetric one-way delay (`RTT/2`), so asymmetric path
 **Notes:**
 
 - Always opts in to graceful-drop semantics regardless of the session's `DisconnectBehavior`. The configured `DisconnectBehavior` only governs the **automatic** disconnect-timeout path.
-- `poll_remote_clients()` drives prepare, inventory, backfill, ready, commit, retransmission, relay, and timeout processing. A one-survivor certificate may commit inside `remove_player`; larger certificates are asynchronous. Concurrent removals serialize deterministically.
+- `poll_remote_clients()` drives prepare, inventory, backfill, ready, commit, retransmission, relay, and timeout processing. A one-survivor certificate may commit inside `remove_player`; larger certificates are asynchronous. Concurrent removals with different targets cannot both obtain a cut; the losing removal fails closed rather than forking, so applications must serialize removals.
 - The `PeerDropped` event coexists with the legacy `Disconnected` event; new code should match on `PeerDropped` for graceful-drop-aware handling.
 - Operates on the **Remote** endpoint at the targeted address only. A `Spectator` endpoint registered at the same `T::Address` is an independent endpoint and is **not** affected — it remains running until it disconnects on its own. Co-locating a `Remote` and a `Spectator` at the same address is unusual; this note documents the behavior for that edge case.
 

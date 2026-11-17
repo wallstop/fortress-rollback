@@ -7964,9 +7964,23 @@ impl<T: Config> P2PSession<T> {
     /// [`FortressEvent::PeerDropped`] event per non-spectator handle is queued,
     /// followed by exactly one address-level [`FortressEvent::Disconnected`]
     /// event in the same batch. A one-survivor certificate may commit during
-    /// this call because it needs no network round trip. Concurrent removals
-    /// are serialized deterministically and may commit in a different order
-    /// from the calls that proposed them.
+    /// this call because it needs no network round trip.
+    ///
+    /// # Concurrent removals
+    ///
+    /// A session runs at most one coordinated certificate at a time, and only
+    /// the deterministic lowest participant may choose a cut. Two removals
+    /// with different target sets therefore **cannot progress concurrently**
+    /// when they share that coordinator.
+    ///
+    /// The exact race phase decides the outcome. A prepare that supersedes a
+    /// still-`Inventory` attempt queues the losing target for retry once the
+    /// winner clears, so the loser may still commit later. A conflicting
+    /// prepare or abort after an attempt has left `Inventory` instead fails the
+    /// affected session closed (`Synchronizing`) rather than continuing on a
+    /// conflicting history. Serialize application-driven removals that must
+    /// complete in order: issue one, wait for its
+    /// `PeerDropped`/`Disconnected` events, then issue the next.
     ///
     /// For automatic graceful drop on disconnect timeout, configure
     /// [`crate::SessionBuilder::with_disconnect_behavior`] with
@@ -9863,9 +9877,11 @@ impl<T: Config> P2PSession<T> {
     ///
     /// # Returns
     ///
-    /// * `Some(SyncHealth::InSync)` - Checksums match at the last compared frame.
+    /// * `Some(SyncHealth::InSync)` - Every checksum compared so far has matched.
     /// * `Some(SyncHealth::Pending)` - No checksum comparison available yet.
     /// * `Some(SyncHealth::DesyncDetected { .. })` - Checksums differ, indicating desync.
+    ///   A confirmed-frame mismatch is latched: it keeps being reported even
+    ///   after the report is consumed from the pending set.
     /// * `None` - The handle doesn't refer to a remote player.
     ///
     /// # Important Anti-Pattern Warning
@@ -9904,6 +9920,20 @@ impl<T: Config> P2PSession<T> {
 
         // Get the remote endpoint
         let remote = self.player_reg.remotes.get(addr)?;
+
+        // A confirmed-frame mismatch is a permanent divergence in the trusted
+        // model. `compare_local_checksums_against_peers` consumes the pending
+        // entry after reporting it, so without this latch the stale earlier
+        // `last_verified_frame` would otherwise make this peer look `InSync`.
+        // Checked before every fallible/empty branch so no path can mask an
+        // already-observed confirmed divergence.
+        if let Some((frame, local_checksum, remote_checksum)) = remote.checksum_mismatch_frame {
+            return Some(SyncHealth::DesyncDetected {
+                frame,
+                local_checksum,
+                remote_checksum,
+            });
+        }
 
         // If desync detection is off, we can't determine sync health
         if self.desync_detection == DesyncDetection::Off {
@@ -11118,7 +11148,10 @@ impl<T: Config> P2PSession<T> {
         &mut self,
         confirmed_frame: Frame,
     ) -> Result<(), FortressError> {
-        if self.num_spectators() == 0 {
+        // `spectators` is a dedicated map, so emptiness is O(1); walking the
+        // handle registry to count spectators charged an O(players) scan to
+        // every frame of every game that has none.
+        if self.player_reg.spectators.is_empty() {
             return Ok(());
         }
 
@@ -13162,6 +13195,20 @@ impl<T: Config> P2PSession<T> {
                             self.metrics
                                 .record_checksum_comparison(local_checksum == remote_checksum);
                             if local_checksum != remote_checksum {
+                                // Latch the earliest confirmed mismatch so
+                                // `sync_health` reports the first divergence and
+                                // can never fall back to `InSync` from an older
+                                // match after this frame's pending entry is
+                                // consumed below. Frames are normally compared in
+                                // ascending order, but a retried/late report may
+                                // arrive out of order.
+                                let replace = remote
+                                    .checksum_mismatch_frame
+                                    .is_none_or(|(latched, _, _)| remote_frame < latched);
+                                if replace {
+                                    remote.checksum_mismatch_frame =
+                                        Some((remote_frame, local_checksum, remote_checksum));
+                                }
                                 let event = FortressEvent::DesyncDetected {
                                     frame: remote_frame,
                                     local_checksum,
@@ -18433,6 +18480,172 @@ mod tests {
         let session = create_two_player_session();
         // Remote player is pending, so not synchronized
         assert!(!session.is_synchronized());
+    }
+
+    /// A confirmed-frame checksum mismatch is removed from `pending_checksums`
+    /// after it is reported. Without a latch, the next `sync_health` call falls
+    /// back to the stale earlier `last_verified_frame` and reports `InSync`,
+    /// green-lighting `is_synchronized()` on a permanently diverged session.
+    #[test]
+    fn sync_health_keeps_reporting_desync_after_mismatch_is_consumed() {
+        let mut session = create_three_player_desync_session();
+        let handle = PlayerHandle::new(1);
+        let addr = test_addr(8080);
+        let addr_d = test_addr(8081);
+
+        session.sync_layer.advance_frame();
+        session.sync_layer.advance_frame();
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(2), session.save_mode);
+
+        let matching = Frame::new(0);
+        let diverging = Frame::new(1);
+        let local_match: u128 = 0x1111;
+        let local_diverging: u128 = 0x2222;
+        let remote_diverging = local_diverging ^ 1;
+        session.local_checksum_history.insert(matching, local_match);
+        session
+            .local_checksum_history
+            .insert(diverging, local_diverging);
+
+        // Positive control: both remotes deliver a matching checksum, so the
+        // session reports InSync and is_synchronized() is true. This proves the
+        // later false assertion is caused by B's latch and not by an always-
+        // pending D.
+        for addr in [&addr, &addr_d] {
+            session
+                .player_reg
+                .remotes
+                .get_mut(addr)
+                .expect("remote endpoint exists")
+                .pending_checksums
+                .insert(matching, local_match);
+        }
+        session.compare_local_checksums_against_peers();
+        assert_eq!(session.sync_health(handle), Some(SyncHealth::InSync));
+        assert!(
+            session.is_synchronized(),
+            "the positive control requires every connected remote to be verified"
+        );
+
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(diverging, remote_diverging);
+        session.compare_local_checksums_against_peers();
+
+        assert!(
+            session
+                .player_reg
+                .remotes
+                .get(&addr)
+                .expect("B endpoint exists")
+                .pending_checksums
+                .is_empty(),
+            "the mismatching comparison must have been consumed from pending_checksums"
+        );
+        assert_eq!(
+            session.sync_health(handle),
+            Some(SyncHealth::DesyncDetected {
+                frame: diverging,
+                local_checksum: local_diverging,
+                remote_checksum: remote_diverging,
+            }),
+            "the consumed mismatch must remain the peer's reported sync health"
+        );
+        assert!(
+            !session.is_synchronized(),
+            "is_synchronized() must stay false for a peer with a confirmed mismatch"
+        );
+
+        // A later matching checksum in the pending set must not mask the latched
+        // confirmed divergence: the latch is checked before the pending scan.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(matching, local_match);
+        assert_eq!(
+            session.sync_health(handle),
+            Some(SyncHealth::DesyncDetected {
+                frame: diverging,
+                local_checksum: local_diverging,
+                remote_checksum: remote_diverging,
+            }),
+            "a pending match must not flip a latched confirmed mismatch back to InSync"
+        );
+        assert!(!session.is_synchronized());
+    }
+
+    /// The latch records the earliest confirmed divergence, not the first one
+    /// that happens to arrive: a delayed report for an earlier frame replaces a
+    /// later latched frame so `sync_health` names the first divergence.
+    #[test]
+    fn sync_health_reports_the_earliest_mismatch_regardless_of_arrival_order() {
+        let mut session = create_three_player_desync_session();
+        let handle = PlayerHandle::new(1);
+        let addr = test_addr(8080);
+
+        for _ in 0..4 {
+            session.sync_layer.advance_frame();
+        }
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(4), session.save_mode);
+
+        let earlier = Frame::new(1);
+        let later = Frame::new(3);
+        let earlier_local: u128 = 0xA1;
+        let earlier_remote: u128 = 0xA2;
+        let later_local: u128 = 0xB1;
+        let later_remote: u128 = 0xB2;
+        session
+            .local_checksum_history
+            .insert(earlier, earlier_local);
+        session.local_checksum_history.insert(later, later_local);
+
+        // The later frame's report arrives first.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(later, later_remote);
+        session.compare_local_checksums_against_peers();
+        assert_eq!(
+            session.sync_health(handle),
+            Some(SyncHealth::DesyncDetected {
+                frame: later,
+                local_checksum: later_local,
+                remote_checksum: later_remote,
+            })
+        );
+
+        // A delayed report for an earlier frame must replace the latch.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr)
+            .expect("B endpoint exists")
+            .pending_checksums
+            .insert(earlier, earlier_remote);
+        session.compare_local_checksums_against_peers();
+        assert_eq!(
+            session.sync_health(handle),
+            Some(SyncHealth::DesyncDetected {
+                frame: earlier,
+                local_checksum: earlier_local,
+                remote_checksum: earlier_remote,
+            }),
+            "the earliest confirmed mismatch must be reported"
+        );
     }
 
     // ==========================================

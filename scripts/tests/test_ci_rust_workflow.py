@@ -360,14 +360,18 @@ def test_miri_job_has_no_cross_target_apt_setup() -> None:
             )
 
 
-def test_wasm_job_covers_browser_and_emscripten_targets() -> None:
-    """WASM CI must compile both supported target families independently."""
+def test_wasm_job_covers_browser_emscripten_and_wasi_targets() -> None:
+    """WASM CI must compile every supported target family independently."""
     workflow = _load_ci_rust_workflow()
     wasm_job = workflow["jobs"]["wasm-check"]
 
     assert wasm_job["strategy"]["fail-fast"] is False
     assert Counter(wasm_job["strategy"]["matrix"]["target"]) == Counter(
-        ("wasm32-unknown-unknown", "wasm32-unknown-emscripten")
+        (
+            "wasm32-unknown-unknown",
+            "wasm32-unknown-emscripten",
+            "wasm32-wasip1",
+        )
     )
 
     steps = wasm_job["steps"]
@@ -398,6 +402,15 @@ def test_wasm_job_covers_browser_and_emscripten_targets() -> None:
             frozenset({"tokio"}),
         )
     )
+
+    # Tokio/mio do not build their net surface on any wasm target, so the
+    # feature must compile as a no-op on browser wasm, wasip1, and Emscripten.
+    tokio_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Check WASM targets treat tokio as a no-op"
+    )
+    assert "if" not in tokio_step
 
     clippy_commands = _cargo_commands(steps, "clippy")
     assert len(clippy_commands) == 1
@@ -803,6 +816,10 @@ def test_cross_arch_runtime_executes_arm_and_32_bit_usize_targets() -> None:
             "test(smoke_traces_match_checked_in_cross_architecture_digests)"
             in filter_text
         ), f"{lane} must execute the pinned cross-architecture trace digest"
+        assert (
+            "test(simulation::partition_sweep::partition_sweep_pr_gate)"
+            in filter_text
+        ), f"{lane} must execute the partition/CAP gate under a non-x86_64 usize"
         assert "test(simulation::corpus_replay::)" in filter_text, (
             f"{lane} must execute the checked-in corpus replays, which exercise "
             "ring recycling and mixed transports under a non-x86_64 usize"

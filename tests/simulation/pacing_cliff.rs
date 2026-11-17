@@ -58,6 +58,10 @@ fn measure(
     schedule.config.input_delay = input_delay;
     schedule.config.app_model = app_model;
     let report = run_with_input::<StubInput>(&schedule, &RunOptions::default());
+    // A measurement row is only meaningful if the run was also a correct run:
+    // silently accepting a divergence, a stalled peer, or a session error would
+    // let a pacing regression hide behind a plausible-looking metric row.
+    report.expect_pass(&schedule);
 
     let visual = metric_sum(&report, |metrics| metrics.visual_frames);
     let lag_sum = metric_sum(&report, |metrics| metrics.confirmation_lag_sum);
