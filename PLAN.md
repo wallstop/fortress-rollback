@@ -20,6 +20,10 @@
   because concurrent disjoint removals expose incompatible cuts. Exit: a deterministic
   majority-continues regression plus an asymmetric-timeout A/B/C-vs-E reconciliation test pass
   without forks, and the default plus `hot-join` D14 suites stay green.
+- Fix [issue #450](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/450): the
+  #448 OpenAI Review caller fails at startup with zero jobs because the private shared-workflow
+  repository is not reachable. Exit: a PR run produces at least one job/conclusion, or the caller
+  is pinned to a reachable workflow, without changing org policy.
 - Finish [issue #446](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/446): scan
   every zero-assertion/ignored-result test and give each one a falsifiable assertion or delete it
   if it duplicates a stronger test. Session 228 fixed the first four (RLE truncation, TimeSync
