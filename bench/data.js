@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794908139863,
+  "lastUpdate": 1794910590207,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "b960525f4c687de7522b10835f45567f95d0eb94",
-          "message": "test: add deterministic burst consistency evidence (#369)\n\n## Summary\n\n- Extend the expectation-aware consistency ledger to deterministic\ndirected burst loss at N=2/3/4/8/16.\n- Add saturating per-link/global burst-start evidence,\nbackward-compatible trace identity, exact independent payload-loss span\nchecks, replay comparison, and matched N=2/N=16 corruption controls.\n- Record the schema-v4 matrix in the tuning guide/wiki and remove only\nthe completed burst axis from `PLAN.md`.\n- Upgrade the exactly pinned Playwright browser probe from 1.64.1 to\n1.65.0.\n\n## Evidence\n\nFinal code SHA `6bef90ae9b6b5165f9a1808bf38be6459886912b` passed the\nrelease-mode full matrix:\n\n- 45 rows: 35 uninjected bases and ten matched controls.\n- 20 bounded recoveries, 15 safe failures, and ten intentional defect\ncontrols.\n- Every burst row observed eight starts and 24 policy drops only on\ndirected link 0→1, with a real three-input loss run.\n- Both in-window burst controls produced typed state divergence at peer\n1/frame 120.\n- Zero replay mismatches and zero premise violations; every row carries\nthe exact code SHA.\n\nThe independent SimNet oracle reconstructs missing payload spans,\naccepts only three-packet bursts or a truncated terminal burst, and\nderives exact event counts. The matrix also permits valid coalesced runs\nand one heal-truncated final burst. Three adversarial review rounds\nclosed the initial oracle and boundary findings; the final aggregate\nreview reported zero findings.\n\n## Validation\n\n- Focused SimNet/trace/schedule tests and 13-row PR gate: passed.\n- Exact-SHA `partition_sweep_full`: 45 rows passed in release mode.\n- `cargo clippy --workspace --all-targets --features tokio,json`:\npassed.\n- `cargo nextest run --no-capture`: 2,996 passed, 73 skipped.\n- `.venv/bin/pytest scripts/tests -q`: 2,191 passed.\n- `RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps`: passed; doc tests\n160 passed, 50 ignored.\n- Link check: 1,445 links, zero errors/warnings; doc claims, wiki\nconsistency, Markdownlint, plan hygiene, typos, and four workspace-lock\nchecks passed.\n- Explicit changed-file agent preflight: all selected checks passed\nwithout fallback.\n- Playwright 1.65.0: clean `npm ci`, zero audit vulnerabilities, and all\nthree browser tests discovered.\n- Latest `main` (`cab3078`): 90 successful checks, five accepted skips,\nzero pending/failures.\n\n## Scope\n\nNo production API or wire behavior changes are included, so no changelog\nentry is needed. Asymmetry, repeated flaps, poll stalls, exact timing,\nand host resource evidence remain in the active P0 plan. The only open\nissue, #365, remains the intentionally queued P2 Lean experiment.",
-          "timestamp": "2026-11-06T11:42:18-08:00",
-          "tree_id": "657597e6e6e75040625f7c32b47ee79c78e5beb9",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/b960525f4c687de7522b10835f45567f95d0eb94"
-        },
-        "date": 1793994650744,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 39546,
-            "range": "± 550",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24244,
-            "range": "± 672",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1090,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1246,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2772,
-            "range": "± 178",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3006,
             "range": "± 190",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "cf60d1c9d57a28909351e1a52d9a981b28f2304b",
+          "message": "test: kill the coordinator commit-gate boundary mutant (#459)\n\n## Description\n\nFollow-up to #458. The local diff-scoped mutation run reported one\nmissed boundary mutant in the new coordinator commit gate\n(`drive_coordinated_drop` all-ready `<`/`==`). The production check is\nrestructured to an explicit `may_commit` branch, and a regression pins\nthe intended CAP behavior:\n\n- with a bare Ready quorum but a still-reachable omitted witness, the\ncoordinator must **not** commit;\n- once the omitted witness is locally unresponsive, the coordinator may\ncommit.\n\nVerified the mutant (`==` → `!=`) fails the new test (`a reachable\nmissing witness must be awaited`). No user-observable behavior change.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n## Testing\n\n- new test + mutant check: pass/fail as intended\n- `cargo clippy --workspace --all-targets --features tokio,json -D\nwarnings`: clean\n- `cargo tf`: 2783 passed / 493 skipped\n\n## Related Issues\n\nRelates to #445",
+          "timestamp": "2026-11-17T10:03:48Z",
+          "tree_id": "2320d7474d93613bdd213b074309ac1a5f93c021",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/cf60d1c9d57a28909351e1a52d9a981b28f2304b"
+        },
+        "date": 1794910588673,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60757,
+            "range": "± 630",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 33358,
+            "range": "± 104",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1862,
+            "range": "± 107",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3142,
+            "range": "± 185",
             "unit": "ns/iter"
           }
         ]
