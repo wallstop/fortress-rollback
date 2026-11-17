@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794884907647,
+  "lastUpdate": 1794893227313,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "wallstop",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "wallstop",
-            "username": "wallstop"
-          },
-          "distinct": false,
-          "id": "0720b06e73b64d79419389de594e4fdc6d6c7e98",
-          "message": "ci(codeql): raise the analyze time budget above the 30-minute boundary\n\nRust CodeQL analysis compiles the whole crate; the last two runs took\n28m37s and then exceeded the 30-minute job cap. Raise the budget to 60\nminutes and assert a margin in the workflow contract test so the gate\nstops flaking on slower runners.",
-          "timestamp": "2026-11-01T22:19:05-08:00",
-          "tree_id": "80ab7833d2f253cb1d866ff93335b7a68d5d096c",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/0720b06e73b64d79419389de594e4fdc6d6c7e98"
-        },
-        "date": 1793603178166,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 50494,
-            "range": "± 236",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 33049,
-            "range": "± 687",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1407,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1603,
-            "range": "± 3",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3250,
-            "range": "± 213",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2772,
             "range": "± 170",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "d5370e1d6881480527003c8880b75ee6118f4b87",
+          "message": "fix: close #442 mutation survivors, fold poll-only relay floors, and budget N≥8 mesh frames (#449)\n\n## Description\n\nMain CI was red on Mutation Testing after #442 (17 missed mutants in the\nnewly added paths). This PR closes those survivors with tests, fixes the\n#444 poll-only disconnected-relay floor, adds the #443 warmed N≥8 mesh\n`advance_frame` budget, and starts the #446 vacuous-test sweep. The #445\nstrict-majority certificate experiment was explored and reverted\n(design/blocker recorded in PLAN) rather than shipping an unproven\nreconciliation.\n\n### Mutation Testing (main CI red)\nMain run `44006997272` failed `Mutation Testing Summary` with **17\nmissed mutants**, all in #442's new code:\n- `oldest_servable_input_frame`: empty reactivation window\n(`frozen_bound == activation_frame`) imposes no floor.\n- `poll_hot_join`: extracted\n`HotJoinState::carries_orchestration_state`; a table test makes each of\nthe nine operands independently significant.\n- `adjust_gamestate`: retained-floor equality/raised/above-floor rows\nwith sparse checkpoint gaps.\n- `GameStateCell::has_data`: cfg(loom)/cfg(kani) bodies use the\nestablished syntax-only `mutants::skip` marker (not compiled by the\nNextest mutation build); the default body stays mutation-tested.\n\n### #444 — disconnected relay fresh floor during a poll-only pause\nA relay polled without advancing can answer a fresh `FloorRequest` with\na floor below its un-mined `status.last_frame`. The consumer now folds\n`min(status.last_frame, fresh round floor)` for both connected and\ndisconnected relays. The `min` keeps the stale-HIGH reorder guarantee\n(status freeze wins).\n\n### #443 — warmed N≥8 `advance_frame`\n`benches/h16p_mesh.rs` times one warmed full-mesh pass at N=8/N=16;\nconstruction, sync, input staging, and polling run outside the timed\nsection. Local medians: **33 µs (N=8)**, **158 µs (N=16)**. CI enforces\ndocumented absolute budgets (300 µs / 1.5 ms, ~10x headroom) via\n`scripts/ci/check-mesh-advance-budget.py`.\n\n### #446 (first slice)\nRemoved four zero-assertion/ignored-result tests: RLE truncation now\nasserts `Err`; TimeSync negative-frame asserts the ring is untouched;\nthe two empty P2P poll tests assert state/frame preservation and event\nsilence.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy** (no new\n`unwrap`/`expect`/`panic!` in production code; new test code uses\nestablished test allowances)\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly (CHANGELOG + PLAN)\n- [x] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n- Mutation-survivor regressions: empty reactivation window; every\nhot-join orchestration field; retained-floor sparse-search\nequality/raised/above rows.\n- #444 red/green:\n`remote_slot_confirmed_bound_poll_only_disconnected_relay_consumes_fresh_floor`;\nexisting stale-HIGH unit and end-to-end guards still pass.\n- Bench budget: `scripts/tests/test_check_mesh_advance_budget.py`\n(within, over, missing, workflow contract).\n- #446 slice: RLE truncated decode, TimeSync negative frame, two P2P\nempty-poll tests.\n\n**Validation:**\n- `cargo tfull`: **3240 passed / 75 skipped**\n- hot-join suite: **3533 passed / 76 skipped**\n- clippy, rustdoc, doctests (169 passed), preflight `--full --auto-fix`:\nclean\n- wasm32-unknown-unknown feature-union check: pass; i686 and aarch64\nall-targets checks: pass\n- Bench budget script: N=8 33125 ns / 300000 ns; N=16 156548 ns /\n1500000 ns\n\n## Known out-of-scope red\n\n`.github/workflows/openai-review.yml` (added by #448) fails at startup\nwith zero jobs because the private `Ambiguous-Interactive/.github`\nshared workflow is not reachable from this repository. Evidence and\nacceptance criteria: #450. Fixing it requires shared-repo Actions access\nor an org settings change, which this work is not permitted to make;\nevery required check and every other workflow run is green.\n\n## Related Issues\n\nCloses #444\nCloses #443\nRelates to #446\nRelates to #445\nRelates to #450",
+          "timestamp": "2026-11-17T05:16:14Z",
+          "tree_id": "9791fb05a3468c2658693f72b50ccfda1fdb59ed",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/d5370e1d6881480527003c8880b75ee6118f4b87"
+        },
+        "date": 1794893226572,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 25449,
+            "range": "± 449",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 15578,
+            "range": "± 474",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 458,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 585,
+            "range": "± 35",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 5621,
+            "range": "± 164",
             "unit": "ns/iter"
           }
         ]
