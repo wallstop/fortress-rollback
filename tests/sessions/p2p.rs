@@ -45,7 +45,7 @@ fn test_add_more_players() -> Result<(), FortressError> {
     let remote_addr3: SocketAddr = ([127, 0, 0, 1], 10003).into();
     let spec_addr: SocketAddr = ([127, 0, 0, 1], 10004).into();
 
-    let _sess = SessionBuilder::<StubConfig>::new()
+    let sess = SessionBuilder::<StubConfig>::new()
         .with_protocol_config(protocol_config(&clock))
         .with_num_players(4)
         .unwrap()
@@ -55,6 +55,8 @@ fn test_add_more_players() -> Result<(), FortressError> {
         .add_player(PlayerType::Remote(remote_addr3), PlayerHandle::new(3))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(4))?
         .start_p2p_session(socket)?;
+    assert_eq!(sess.num_players(), 4);
+    assert_eq!(sess.current_state(), SessionState::Synchronizing);
     Ok(())
 }
 
@@ -65,12 +67,14 @@ fn test_start_session() -> Result<(), FortressError> {
     let remote_addr: SocketAddr = ([127, 0, 0, 1], 10001).into();
     let spec_addr: SocketAddr = ([127, 0, 0, 1], 10002).into();
 
-    let _sess = SessionBuilder::<StubConfig>::new()
+    let sess = SessionBuilder::<StubConfig>::new()
         .with_protocol_config(protocol_config(&clock))
         .add_player(PlayerType::Local, PlayerHandle::new(0))?
         .add_player(PlayerType::Remote(remote_addr), PlayerHandle::new(1))?
         .add_player(PlayerType::Spectator(spec_addr), PlayerHandle::new(2))?
         .start_p2p_session(socket)?;
+    assert_eq!(sess.num_players(), 2, "spectators do not count as players");
+    assert_eq!(sess.current_state(), SessionState::Synchronizing);
     Ok(())
 }
 
