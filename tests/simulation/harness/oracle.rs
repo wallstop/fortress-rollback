@@ -517,12 +517,24 @@ pub struct Oracle {
     /// Its **pre-retirement** observations still count — recorded states it
     /// produced before leaving are compared in (b), and its confirmed-input
     /// samples stand in (a) — so a peer that diverged before it left cannot
-    /// escape detection by being retired.
+    /// escape detection by being retired. A gracefully removed target's
+    /// samples above the survivor-visible cut are excluded by
+    /// [`Self::cap_retired_confirmed_inputs`]: that tail is private to the
+    /// leaving process and no survivor can expose it.
     dead: Vec<bool>,
     /// Certified removal cuts cap a retired generation's state comparisons.
     /// Later observations belong to the abandoned pre-removal trajectory and
     /// must not be compared with the survivor's frozen continuation.
     retired_state_ceilings: Vec<Option<i32>>,
+    /// Certified removal cuts cap a retired peer's confirmed-input **authorship**
+    /// too. A gracefully removed target can keep confirming its own real
+    /// inputs for a few frames after the survivors froze its slot; that
+    /// post-cut tail is private to a process leaving the match and must not
+    /// become the canonical value for a frame no survivor can expose. Samples
+    /// above the ceiling are ignored and any already-canonical frames authored
+    /// by the retired peer above it are dropped so a survivor re-establishes
+    /// the exposed value.
+    confirmed_input_ceilings: Vec<Option<i32>>,
     /// Peers whose live generation was replaced by a hot-join snapshot. Their
     /// pre-activation bridge frames are replayed as `Confirmed`, so a slot
     /// that was frozen before the snapshot shows its `Disconnected` run only
@@ -550,6 +562,7 @@ impl Oracle {
             per_class_cap: 8,
             dead: vec![false; n_players],
             retired_state_ceilings: vec![None; n_players],
+            confirmed_input_ceilings: vec![None; n_players],
             replacement_generations: vec![false; n_players],
             heal: HealLiveness::default(),
             violation_allowlist: DEFAULT_VIOLATION_ALLOWLIST,
@@ -589,8 +602,10 @@ impl Oracle {
 
     /// Caps a retired peer's state comparisons at the first post-cut state.
     /// Post-state `F+1` still consumes the nominal input at cut `F`; only the
-    /// abandoned generation from `F+2` onward is excluded. Input authorship
-    /// above the cut is pruned separately by [`Self::begin_replacement_generation`].
+    /// abandoned generation from `F+2` onward is excluded. Confirmed-input
+    /// authorship above the cut is pruned by
+    /// [`Self::cap_retired_confirmed_inputs`] (graceful removal) or
+    /// [`Self::begin_replacement_generation`] (hot-join replacement).
     pub fn cap_retired_state_comparison(&mut self, peer: usize, freeze_frame: i32) {
         assert!(
             peer < self.retired_state_ceilings.len(),
@@ -598,6 +613,22 @@ impl Oracle {
             self.retired_state_ceilings.len()
         );
         self.retired_state_ceilings[peer] = Some(freeze_frame);
+    }
+
+    /// Caps a gracefully removed peer's confirmed-input authorship at the
+    /// survivor-visible removal cut. Samples the retired peer records above
+    /// `ceiling` are ignored, and any frames it already authored above the
+    /// ceiling are dropped so a survivor's exposed (frozen) value becomes
+    /// canonical. Frames at or below the cut keep their full coverage.
+    pub fn cap_retired_confirmed_inputs(&mut self, peer: usize, ceiling: i32) {
+        assert!(
+            peer < self.confirmed_input_ceilings.len(),
+            "cap_retired_confirmed_inputs: peer {peer} out of range (len {})",
+            self.confirmed_input_ceilings.len()
+        );
+        self.confirmed_input_ceilings[peer] = Some(ceiling);
+        self.canonical_inputs
+            .retain(|frame, (first_author, _)| *first_author != peer || *frame <= ceiling);
     }
 
     /// Starts a new live generation for `peer` without marking it dead. A
@@ -714,6 +745,15 @@ impl Oracle {
         frame: i32,
         values: Vec<InputFingerprint>,
     ) {
+        if self
+            .confirmed_input_ceilings
+            .get(peer)
+            .copied()
+            .flatten()
+            .is_some_and(|ceiling| frame > ceiling)
+        {
+            return;
+        }
         match self.canonical_inputs.get(&frame) {
             None => {
                 self.canonical_inputs.insert(frame, (peer, values));

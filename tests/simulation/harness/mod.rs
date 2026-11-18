@@ -4315,6 +4315,33 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                     ),
                                 }
                             }
+                            // The gracefully removed target's post-cut local
+                            // confirmations are private to the process leaving
+                            // the match. Cap its confirmed-input authorship at
+                            // the survivor-visible cut: the last input frame the
+                            // remaining live peers actually received from it
+                            // (the freeze frame the certificate is built on).
+                            // A target that advanced an extra frame before
+                            // learning of the removal must not define the
+                            // canonical exposed history. See #460's option 1.
+                            let removed = PlayerHandle::new(*target);
+                            let removal_ceiling = (0..peers.len())
+                                .filter(|peer| *peer != *target && !dead[*peer])
+                                .filter_map(|peer| {
+                                    peers[peer].session.diagnostic_player_receipt_frame(removed)
+                                })
+                                .map(Frame::as_i32)
+                                .min();
+                            if let Some(ceiling) = removal_ceiling {
+                                oracle.cap_retired_confirmed_inputs(*target, ceiling);
+                                // Recorded state N+1 is the result of simulating
+                                // input N; the first state the survivors did not
+                                // necessarily reach is `cut + 1`.
+                                oracle.cap_retired_state_comparison(
+                                    *target,
+                                    ceiling.saturating_add(1),
+                                );
+                            }
                             retire_peer_for_lifecycle(
                                 *target,
                                 &peers,

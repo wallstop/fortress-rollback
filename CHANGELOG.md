@@ -135,6 +135,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempt, so it opens a fresh identity instead of re-deriving the target's generation-local one;
   peers accept the fresh certificate, and delayed artifacts from the closed attempt can no longer
   alias it (a stale `Superseded` abort no longer fail-closes the retry).
+- **Pre-existing:** a graceful-removal certificate no longer fails closed when a donor's backfill
+  chunk is reordered ahead of the inventory reports, or when the donor set is momentarily unknown.
+  Chunks that cannot be attributed yet are ignored and retransmitted, and a missing donor is only
+  terminal once every participant's inventory is known (or the missing ones are unresponsive), so
+  lossy N=3 retirement keeps both survivors `Running` with one confirmed history.
 - **Pre-existing:** a prune applied later in the same `advance_frame` (a silence-timeout
   `Event::Disconnected` or the propagated-disconnect fold) no longer leaves the confirmed-frame
   fold on a relay's pre-prune pessimistic floor. Prune detection runs again after the disconnect
