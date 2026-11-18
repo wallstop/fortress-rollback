@@ -1823,7 +1823,21 @@ impl<T: Config> P2PSession<T> {
             .iter()
             .any(|closed| *closed == prepare.operation)
         {
-            return Ok(());
+            // A closed operation whose target still validates is a LEGITIMATE
+            // RETRY after an abort/supersede: the identity is derived from the
+            // target's unchanged connected-era generation, so a retry of the
+            // same target necessarily reuses it. Replayed messages for a
+            // CONCLUDED operation no longer validate — a committed op left the
+            // target disconnected, and a rejoin moved its generation — so those
+            // stay ignored instead of re-opening the certificate. Without the
+            // retry arm, every peer silently swallowed the retry's `Prepare`
+            // and the removal timed out into a permanent fail-closed.
+            if !self.coordinated_drop_validate_prepare(&prepare) {
+                return Ok(());
+            }
+            self.coordinated_drop
+                .closed
+                .retain(|closed| *closed != prepare.operation);
         }
         if self
             .coordinated_drop
@@ -17476,6 +17490,58 @@ mod tests {
             session.confirmed_frame_cache,
             Some(Frame::new(50)),
             "outside the relay topology the fold is floor-independent"
+        );
+    }
+
+    #[test]
+    fn closed_operation_is_reaccepted_only_while_its_target_still_validates() {
+        let (mut session, _addr_b, _addr_c, _addr_d) = build_abcd_live_session();
+        let target = PlayerHandle::new(1);
+        session
+            .begin_coordinated_drop(target)
+            .expect("begin a coordinated drop");
+        let active = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("attempt opened");
+        let prepare = DropPrepare {
+            operation: active.operation,
+            targets: active.targets.clone(),
+            participants: active.participants.clone(),
+        };
+        // A supersede closes the operation without touching the target.
+        session.coordinated_drop_close_operation(prepare.operation);
+        session.coordinated_drop.active = None;
+
+        // The retry reuses the generation-derived identity. It must not be
+        // swallowed by `closed`: peers would never answer its Prepare and the
+        // removal would time out into a permanent fail-closed.
+        session
+            .coordinated_drop_accept_prepare(prepare.clone())
+            .expect("the retry prepare is accepted");
+        assert!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .is_some_and(|active| active.operation == prepare.operation),
+            "the retried operation must reopen on the accepting peer"
+        );
+
+        // A replayed Prepare for an operation whose target is already dropped
+        // cannot validate, so it stays ignored (no resurrection, no abort).
+        session.coordinated_drop_close_operation(prepare.operation);
+        session.coordinated_drop.active = None;
+        if let Some(status) = session.local_connect_status.get_mut(target.as_usize()) {
+            status.disconnected = true;
+        }
+        session
+            .coordinated_drop_accept_prepare(prepare)
+            .expect("the stale prepare is ignored");
+        assert!(
+            session.coordinated_drop.active.is_none(),
+            "a concluded operation must not reopen after its target is dropped"
         );
     }
 

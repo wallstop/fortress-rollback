@@ -130,6 +130,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delta buffer per packet. A warmed one-frame receive poll drops from 8 to 6 allocation operations
   (about 256 fewer bytes) at 2-16 players, and a warmed networked send drops from 4 to 3 operations
   at 2-4 players (5 to 4 at 16); encoded wire bytes and event ordering are unchanged.
+- **Pre-existing:** a coordinated graceful-drop retry no longer has its `Prepare` swallowed by the
+  terminal-operation history. The identity is derived from the target's unchanged connected-era
+  generation, so a retry after a supersede or abort necessarily reuses it; peers now re-accept the
+  retry while its target still validates, and still ignore replays of a concluded operation whose
+  target is dropped or whose generation moved.
 - **Pre-existing:** a prune applied later in the same `advance_frame` (a silence-timeout
   `Event::Disconnected` or the propagated-disconnect fold) no longer leaves the confirmed-frame
   fold on a relay's pre-prune pessimistic floor. Prune detection runs again after the disconnect
