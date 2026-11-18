@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794993814334,
+  "lastUpdate": 1794997030462,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "ede612d6a1988fad6f60dedbbc633e4799e4251b",
-          "message": "test(simulation): extend differential oracle to N-peer membership (#378)\n\n## Description\n\nAdvances the active P0 differential rollback-equivalence milestone\n(#377) by widening the bounded fixed-history oracle to N-peer\nmembership, spectator host failover, and queue-capacity boundaries.\n\n### Changes\n\n- **N-peer hot-join (n = 2 and 3).** The harness now models production's\nasynchronous all-survivor removal certificate: the replacement stays\noffline, the old generation is frozen out of the drive loop, the\ncertified cut is anchored when the coordinator observes the commit, and\nreference sampling is suspended until the cut is known. The independent\nreference is width-aware: a two-peer reactivation rewrites snapshot `A`,\nwhile an N-peer serve keeps `A` as a frozen bridge and activates at `A +\n1`. Activation validation now covers every survivor, and exact\ncoordinator/survivor event payloads are pinned.\n- **Three-peer explicit removal + redundant spectators.**\n`GracefulRemove` now supports asynchronous certificates on three-peer\nmeshes. Spectator rows cover host sets `[0]`, `[2]`, `[0, 2]`, and `[2,\n0]`, validating exact frozen fingerprints/statuses, host survival, exact\nreplay, and the certified cross-order projection. The removed player's\nown endpoint is explicitly rejected as a spectator source because\nproduction does not withdraw it and its stale stream correctly fails\nclosed.\n- **Spectator host silence and failover.** Schedule `Block`/`Hold` may\ntarget the spectator endpoint, isolating one host's observer feed.\nPost-removal rows silence the canonical and lower-priority hosts with a\ntimeout above the notify delay and below the outage length, proving the\nsurviving host advances the display, the blocked endpoint is observed as\nfailed, and the exact frozen history resumes with replay identity.\n- **Input-queue capacity boundaries.** New rows fill the queue from the\ndelay side (`delay 120 + prediction 7`) and the prediction side (`delay\n2 + prediction 125`, `MAX_FRAME_DELAY = 127`) and retain the exact\nnominal confirmed history past the boundary.\n- **Cross-order identity.** The bounded hot-join row's activation frame\nis proven order-stable and the complete normalized trajectory is\nidentical across forward/reverse/rotating drive orders.\n- `PLAN.md` is narrowed to the remaining\nhost-crash-as-second-membership-change row and further queue/ring\ncorners.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy** (no production code\nchanged)\n- [x] I have added tests that prove the coverage is effective\n- [x] `cargo fmt` and strict Clippy (`--workspace --all-targets\n--features tokio,json` and `...,hot-join`) pass with no warnings\n- [x] `cargo nextest run` passes\n\n### If Applicable\n\n- [x] `PLAN.md` updated (test-only change, so no changelog entry)\n\n## Testing\n\n- Differential suites: 37 default and 41 with `hot-join` at the first\ncommit; 38/42 after the host-failover addition, all passing.\n- Full Nextest: 3,036 default and 3,298 with `hot-join`, 73/74\nintentionally skipped.\n- Strict Clippy with `-D warnings` under both feature sets, `cargo fmt`,\nagent preflight, plan hygiene, doc links, typos, and markdownlint pass.\n- Red-green evidence: the N-peer removal initially failed the\nsynchronous-commit premise, then exposed the frozen bridge-frame\nboundary; both were fixed at the harness/reference level and restored\ngreen without production changes. The host-outage row initially failed\nthe builder's notify-delay bound and was corrected to a 600 ms timeout\nabove the 500 ms notify delay.\n\n## Related Issues\n\nRelates to #377. Remaining scope tracked there: a host crash that is\nitself a second membership change, the removed player's own spectator\nendpoint (documented fail-closed), and further queue/ring corners.",
-          "timestamp": "2026-11-09T15:23:39-08:00",
-          "tree_id": "5eea0a5444b70ce360011f33b9913fd3613744d1",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/ede612d6a1988fad6f60dedbbc633e4799e4251b"
-        },
-        "date": 1794267135244,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 60483,
-            "range": "± 5685",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 30054,
-            "range": "± 939",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1689,
-            "range": "± 112",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 115",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3144,
-            "range": "± 182",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3032,
             "range": "± 267",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "ae8b879232dfb31524d5958ec70d5acdb90e6563",
+          "message": "test: pin certified-cut rollback arming and checksum pruning (#475)\n\n## Summary\n\nFollow-up to #474: main mutation CI reported four missed mutants around\nthe certified-cut rollback and checksum purge. This extracts\n`arm_certified_cut_resimulation` so its contract is directly testable\nand adds a unit test that pins:\n\n- the certified cut becomes the rollback target (`disconnect_frame` only\nmoves earlier);\n- local checksums at or above the cut are discarded while earlier\nchecksums remain.\n\nThese assertions kill the checksum-retention and boundary mutants that\nsurvived the diff run.\n\n## Verification\n\n- `cargo tfull`: 3263 passed, 76 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json`: clean.\n- `cargo test --features hot-join --lib\ncertified_cut_resimulation_keeps_only_pre_cut_checksums`: pass.\n\nRefs: #473",
+          "timestamp": "2026-11-18T10:04:27Z",
+          "tree_id": "18215b446151f7f0755b30e605eea90eeb2b385e",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/ae8b879232dfb31524d5958ec70d5acdb90e6563"
+        },
+        "date": 1794997029169,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 43676,
+            "range": "± 5755",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 28348,
+            "range": "± 600",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1183,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1330,
+            "range": "± 23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2877,
+            "range": "± 160",
             "unit": "ns/iter"
           }
         ]
