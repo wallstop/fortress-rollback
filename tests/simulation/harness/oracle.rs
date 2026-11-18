@@ -629,6 +629,28 @@ impl Oracle {
         self.confirmed_input_ceilings[peer] = Some(ceiling);
         self.canonical_inputs
             .retain(|frame, (first_author, _)| *first_author != peer || *frame <= ceiling);
+        // Observations for the removal step can run before the event is applied
+        // (or the peer's final claims can be sampled in the same step), so a
+        // private-tail mismatch may already be recorded. Drop divergences that
+        // name this peer above the cut: neither an author nor an observer of a
+        // private post-cut tail is canonical evidence.
+        self.failures.retain(|failure| match failure {
+            OracleFailure::ConfirmedInputDivergence {
+                frame,
+                peer: observer,
+                first_author,
+                ..
+            } => *frame <= ceiling || (*observer != peer && *first_author != peer),
+            OracleFailure::StateDivergence {
+                frame,
+                peer: observer,
+                first_author,
+                ..
+            } => {
+                *frame <= ceiling.saturating_add(1) || (*observer != peer && *first_author != peer)
+            },
+            _ => true,
+        });
     }
 
     /// Starts a new live generation for `peer` without marking it dead. A
@@ -1875,6 +1897,48 @@ mod tests {
                 .any(|f| matches!(f, OracleFailure::EndProgress { peer: 1, .. })),
             "a live peer with the same shortfall must fail: {:?}",
             control.failures
+        );
+    }
+
+    /// A gracefully removed target's private post-cut tail cannot leave a
+    /// recorded divergence behind when the cut cap is applied after the
+    /// samples. Below-cut evidence stays.
+    #[test]
+    fn oracle_retired_input_cap_drops_already_recorded_private_tail_failures() {
+        let input = |value: u32| vec![InputFingerprint::from_bytes(value, b"slot")];
+        let mut oracle = Oracle::new(2);
+        // Below the cut the peers agree; above it the target authors a private
+        // value and the survivor's frozen value differs.
+        oracle.observe_confirmed_inputs(0, 4, input(7));
+        oracle.observe_confirmed_inputs(1, 4, input(7));
+        oracle.observe_confirmed_inputs(0, 5, input(8));
+        oracle.observe_confirmed_inputs(1, 5, input(9));
+        assert!(
+            oracle.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::ConfirmedInputDivergence { frame: 5, .. }
+            )),
+            "the pre-cap mismatch must be recorded"
+        );
+
+        oracle.cap_retired_confirmed_inputs(0, 4);
+
+        assert!(
+            !oracle
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, OracleFailure::ConfirmedInputDivergence { .. })),
+            "the private post-cut tail divergence must be dropped: {:?}",
+            oracle.failures
+        );
+        assert!(
+            !oracle.canonical_inputs.contains_key(&5),
+            "the target's post-cut canonical entry must be removed"
+        );
+        assert_eq!(
+            oracle.canonical_inputs.get(&4).map(|(author, _)| *author),
+            Some(0),
+            "below-cut coverage is retained"
         );
     }
 
