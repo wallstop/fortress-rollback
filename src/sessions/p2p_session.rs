@@ -2693,13 +2693,7 @@ impl<T: Config> P2PSession<T> {
         // value; the extra frame is one cheap step and makes the boundary exact
         // whether or not the local receipt already covered the cut.
         if self.sync_layer.current_frame() > commit.cut {
-            self.disconnect_frame = if self.disconnect_frame.is_null() {
-                commit.cut
-            } else {
-                std::cmp::min(self.disconnect_frame, commit.cut)
-            };
-            self.local_checksum_history
-                .retain(|&frame, _| frame < commit.cut);
+            self.arm_certified_cut_resimulation(commit.cut);
         }
 
         for target in &targets {
@@ -2750,6 +2744,23 @@ impl<T: Config> P2PSession<T> {
         }
 
         Ok(())
+    }
+
+    /// Arms the next advance to re-simulate `cut` after a certified drop.
+    ///
+    /// The cut frame's certified value may replace a prediction the survivor
+    /// already executed, so the frame is the rollback target. Every locally
+    /// stored checksum at or above that frame describes the speculative
+    /// trajectory and is discarded; a later corrected re-simulation repopulates
+    /// it. `disconnect_frame` only moves EARLIER here, matching the existing
+    /// multi-drop fold.
+    fn arm_certified_cut_resimulation(&mut self, cut: Frame) {
+        self.disconnect_frame = if self.disconnect_frame.is_null() {
+            cut
+        } else {
+            std::cmp::min(self.disconnect_frame, cut)
+        };
+        self.local_checksum_history.retain(|&frame, _| frame < cut);
     }
 
     fn drive_coordinated_drop(&mut self) {
@@ -16933,6 +16944,39 @@ mod tests {
         });
 
         assert_eq!(result, Err(DropAbortReason::ConflictingHistory));
+    }
+
+    #[test]
+    fn certified_cut_resimulation_keeps_only_pre_cut_checksums() {
+        let mut session = create_two_player_session();
+        for frame in 8..=12_i32 {
+            session
+                .local_checksum_history
+                .insert(Frame::new(frame), u128::from(frame.unsigned_abs()));
+        }
+        session.disconnect_frame = Frame::new(20);
+
+        session.arm_certified_cut_resimulation(Frame::new(10));
+
+        assert_eq!(
+            session.disconnect_frame,
+            Frame::new(10),
+            "the certified cut must become the rollback target"
+        );
+        assert_eq!(
+            session
+                .local_checksum_history
+                .keys()
+                .map(|frame| frame.as_i32())
+                .collect::<Vec<_>>(),
+            vec![8, 9],
+            "checksums at or above the re-simulated cut describe the speculative trajectory"
+        );
+
+        // An earlier pending drop frame is not raised by a later cut.
+        session.disconnect_frame = Frame::new(7);
+        session.arm_certified_cut_resimulation(Frame::new(11));
+        assert_eq!(session.disconnect_frame, Frame::new(7));
     }
 
     #[cfg(feature = "hot-join")]
