@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795002238682,
+  "lastUpdate": 1795009850297,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "84161e7692628c1773630835f6856be604ca1d26",
-          "message": "fix: survivor quorum for automatic drops + N-peer hot-join serve shape (close #383, #384) (#385)\n\n## Summary\n\nCloses the #383 red case and the #384 rejoin-during-membership-change\nrow. Leaves #382 open for the new asymmetric-partition finding (#386).\n\n### 1. Survivor quorum for automatic graceful drops (#383)\n\nA symmetric partition that outlives the disconnect timeout let each\ncomponent commit a complementary automatic drop certificate: every side\nhad an independent witness (its same-component partner), so both peers\nresumed on divergent confirmed histories after the link healed.\n\n- Automatic `ContinueWithout` timeouts now require both an independent\nwitness **and** a strict majority of the agreed membership epoch to\nremain locally reachable.\n- `UdpProtocol::has_reported_disconnect` exposes the latched\nsilence-timeout verdict so a timed-out (or recovered) endpoint cannot\ncount as a witness it never answered.\n- The quorum is re-checked when a queued automatic intent starts, not\nonly when it is enqueued.\n- Explicit `remove_player` keeps its application-directed one-survivor\npath.\n\nBefore (issue #383 schedule, 4 peers, cross-component block steps\n100-300):\n\n```\ntrace_hash=cdc59fcbac88641f\nfinal_confirmed=[94, 696, 94, 695]\nfinal_states=[Synchronizing, Running, Synchronizing, Running]\nForked { frame: 96, component: 0, other_component: 1 }\n```\n\nAfter:\n\n```\ntrace_hash=8ada5925d2449f99\nfinal_confirmed=[94, 94, 94, 94]\nfinal_states=[Synchronizing, Synchronizing, Synchronizing, Synchronizing]\nFailedClosed { shared_prefix: 94 }\nevents: zero Disconnected/PeerDropped, NetworkResumed observed\n```\n\nMajority shapes: N=3 2/1 → `final_confirmed=[774, 774, 94]`, `SplitMatch\n{ shared_prefix: 94, continued: [0] }`; N=8 6/2 → `[498 × 6, 94, 94]`,\nsame split match.\n\nMutation control: forcing the quorum helper to `true` fails the new\neven-split row, so it is load-bearing. Rewriting a component's value on\nthe shared frame flips both new rows to `Forked`.\n\n### 2. Hot-join rejoin during another removal certificate (#384, last\n#382 row)\n\nA 3+-machine joiner always builds as an N-peer joiner and requires\nbridge inputs. The host chose its serve arm by the currently reachable\nsurvivor set, so once the last other survivor left it fell back to the\n2-peer frame rewrite and every snapshot was rejected as \"the 2-peer\nserve shape\". The arm is now selected by the registered remote-machine\ncount; two-machine meshes keep the 2-peer flow.\n\nNew bounded differential row: three peers, `GracefulRemove { by: 0,\ntarget: 2 }` and `HotJoin { slot: 1 }` at step 100, `ContinueWithout`,\n`EveryFrame`. Both certificates commit independently (explicit removal\ncut 48 at commit step 108; hot-join removal 52, snapshot 95), the\ntrajectory is drive-order identical and exactly replayable, and a\nfrozen-slot lie plus a wrong post-activation state are both detected.\nMutation control: restoring the old `survivors.is_empty()` arm selection\nfails the row with the exact snapshot-shape violation.\n\nHarness modeling needed for the composition: the old generation keeps\npolling until its own removal commits (it may witness another\ncertificate); the offline replacement no longer consumes the live slot's\ninbox; the pending hot-join commit bounds only the sampled history by\nthe freeze cut; and the freeze-frame oracle compares only the freeze\nvalue for a replacement generation.\n\n## Verification\n\n- `cargo fmt --check`: clean.\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`: clean.\n- `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n-- -D warnings`: clean.\n- Full `cargo nextest run` (default features): 3061 tests, zero failures\n(73 intentional skips).\n- Full `cargo nextest run --features hot-join`: 3324 tests, zero\nfailures (74 intentional skips).\n- `check-changelog-unreleased.py`, `check-plan-hygiene.py`,\n`sync-version.sh --check`: pass.\n- `markdownlint` and `typos` on every changed documentation file: clean.\n\n## Notes and follow-up\n\n- No wire-format or public API changes.\n- Docs/changelog cover both pre-existing behavior fixes.\n- A one-way partition sweep found a new red case: the isolated peer can\nstill receive, so it confirms ~8 frames past the majority's certified\ndrop before failing closed, exposing a divergent prefix. Filed as #386\nwith the exact schedule, measured evidence, and suggested directions;\nPLAN.md now records it as the remaining #382 row.\n\nCloses #383, #384. Refs #382, #386.",
-          "timestamp": "2026-11-10T15:59:55-08:00",
-          "tree_id": "1d9b67a711f0e984e7b6ed5d0907dbcdb7336217",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/84161e7692628c1773630835f6856be604ca1d26"
-        },
-        "date": 1794355648432,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 39235,
-            "range": "± 2704",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 17505,
-            "range": "± 165",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 535,
-            "range": "± 71",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 720,
-            "range": "± 0",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 5522,
-            "range": "± 294",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3136,
             "range": "± 160",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "778eb1a36d69825094f7d27ab467eb6deec6d36b",
+          "message": "fix: serialize concurrent graceful removals through the coordinator (#479)\n\n## Summary\n\nCloses #477. Under Rough loss, two disjoint removals could still\nfail-close a participant of the losing certificate because aborts were\none-shot and non-coordinator prepares opened conflicting attempts on\ndifferent subsets. This makes the deterministic coordinator the single\nadmission point and keeps the losing operation's abort answerable.\n\n## Changes\n\n- Non-coordinator requesters send `Prepare` only to the coordinator;\nother participants ignore prepares from any non-coordinator source.\nConcurrent removals are ordered by the coordinator's admission sequence.\n- Rejected/superseded operations are retained in a bounded (one per\nplayer) journal. Retransmitted prepares and reports for them get another\n`Superseded` abort, so a participant that missed the first abort under\nloss closes before its Inventory timeout.\n- Backfill donor selection falls back to the participant's **current**\nretained range when no start-of-attempt report advertises the full\nrange.\n- Backfill install accepts an evicted, already-confirmed overlap prefix\nwhile still installing the suffix; a still-retained overlap mismatch\nremains a conflict, and a fully stale chunk is a no-op.\n- Live-target premature-exit detection only fires after the target has\nbeen observed `Running` at least once, avoiding false positives for a\ntarget still joining at the removal step.\n\n## Tests\n\n- The live-target nightly regression now includes the deterministic\nRough N=4 concurrent-removal row (both survivors `Running`, both targets\nretired, two `PeerDropped` each) plus seeds `12345333` (backfill\neviction) and `12345758` (target still synchronizing at removal).\n- New unit tests: coordinator-source admission, rejected-operation\njournal, current-retained donor selection, and evicted-overlap backfill.\n- H-RING and the PCT lagging-survivor expectations no longer pin\nunrelated control-plane timing; the capacity fail-closed invariant is\nretained.\n\n## Verification\n\n- `cargo tfull`: 3267 passed, 76 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json`: clean.\n- Agent preflight: all checks pass.\n- Local `cargo mutants --in-diff origin/main`: 0 missed (15 caught, 16\nunviable).\n- Nightly shards 0-7 at `FORTRESS_SIM_SEED_BASE=12345`: all green with\nlive-target mode.\n- Three-seed plus lossy concurrent-removal regression: pass.",
+          "timestamp": "2026-11-18T13:36:58Z",
+          "tree_id": "9b10577116716f44013f5a1eb1c5b25393534e0e",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/778eb1a36d69825094f7d27ab467eb6deec6d36b"
+        },
+        "date": 1795009848573,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 41792,
+            "range": "± 1508",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25474,
+            "range": "± 312",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 683,
+            "range": "± 85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 873,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 6851,
+            "range": "± 298",
             "unit": "ns/iter"
           }
         ]
