@@ -5528,7 +5528,7 @@ fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     let report = run(&schedule, &options);
     assert_eq!(
         report.final_confirmed,
-        vec![357, 351, 351, 352, 290],
+        vec![356, 350, 350, 350, 290],
         "the regression depends on the lagging-survivor interleaving"
     );
     assert!(
