@@ -200,8 +200,18 @@ fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Sche
 }
 
 fn nightly_run_options(schedule: &Schedule) -> RunOptions {
+    // Production keeps a gracefully removed target running until it observes
+    // its own committed certificate. Nightly lifecycle rows must model that
+    // interval (issue #473), not the historical request-boundary retirement.
+    let live_graceful_target = schedule
+        .events
+        .iter()
+        .any(|(_, event)| matches!(event, ScheduleEvent::GracefulRemove { .. }));
     if schedule.config.noise == BackgroundNoise::Clean {
-        return RunOptions::default();
+        return RunOptions {
+            live_graceful_target,
+            ..RunOptions::default()
+        };
     }
     // A crash is explicit and permanent: survivors must reach the production
     // disconnect timeout so the automatic drop can retire the dead peer.
@@ -213,13 +223,17 @@ fn nightly_run_options(schedule: &Schedule) -> RunOptions {
             ScheduleEvent::PeerKill { .. } | ScheduleEvent::SpectatorHostKill { .. }
         )
     }) {
-        return RunOptions::default();
+        return RunOptions {
+            live_graceful_target,
+            ..RunOptions::default()
+        };
     }
     let run_duration = Duration::from_millis(
         u64::from(schedule.config.steps).saturating_mul(schedule.config.step_dt_ms),
     );
     RunOptions {
         disconnect_timeout: Some(run_duration.saturating_add(Duration::from_secs(1))),
+        live_graceful_target,
         ..RunOptions::default()
     }
 }
@@ -296,6 +310,69 @@ nightly_shard_test!(nightly_seed_shard_4_holds_invariants, 4);
 nightly_shard_test!(nightly_seed_shard_5_holds_invariants, 5);
 nightly_shard_test!(nightly_seed_shard_6_holds_invariants, 6);
 nightly_shard_test!(nightly_seed_shard_7_holds_invariants, 7);
+
+/// PR-scale smoke for the production live-target removal model (issue #473):
+/// a Rough-loss lifecycle row whose removed target keeps polling and authoring
+/// inputs until its committed certificate moves it out of `Running`. The
+/// survivors must certify one cut without in-band desync or state divergence.
+#[test]
+fn live_target_graceful_removal_smoke_keeps_the_mesh_certified() {
+    let config = SimConfig {
+        n_players: 4,
+        steps: 900,
+        noise: BackgroundNoise::Rough,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        scenario_mix: ScenarioMix::Lifecycle,
+        ..SimConfig::smoke(4)
+    };
+    let schedule = generate(3, config);
+    assert!(
+        schedule
+            .events
+            .iter()
+            .any(|(_, event)| matches!(event, ScheduleEvent::GracefulRemove { .. })),
+        "seed 3 must materialize a graceful removal"
+    );
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(20)),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    report.expect_pass(&schedule);
+}
+
+/// Regression for issue #473: the nightly seeds whose lifecycle event is a
+/// graceful removal, driven with the production live-target model. The removed
+/// target keeps polling and authoring inputs until its committed certificate
+/// moves it out of `Running`; every survivor must still certify one shared cut
+/// with no in-band checksum desync and no state divergence.
+#[test]
+#[ignore = "nightly-scale live-target regression; run with FORTRESS_SIM_TIER=nightly"]
+fn live_target_graceful_removal_under_rough_loss_certifies_without_desync() {
+    assert_eq!(
+        std::env::var("FORTRESS_SIM_TIER").as_deref(),
+        Ok("nightly"),
+        "nightly simulation tests require FORTRESS_SIM_TIER=nightly"
+    );
+    for seed in [12_345_038_u64, 12_345_098, 12_345_118] {
+        let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
+        let schedule = nightly_schedule(seed, n_players, nightly_noise(seed));
+        assert!(
+            schedule
+                .events
+                .iter()
+                .any(|(_, event)| matches!(event, ScheduleEvent::GracefulRemove { .. })),
+            "seed {seed} must exercise a graceful removal"
+        );
+        let options = RunOptions {
+            live_graceful_target: true,
+            ..nightly_run_options(&schedule)
+        };
+        let report = run(&schedule, &options);
+        report.expect_pass(&schedule);
+    }
+}
 
 #[test]
 fn fixed_lan_negative_control_has_exactly_five_missing_states() {

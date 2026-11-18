@@ -222,6 +222,7 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         // may minimize to a same-class failure reached through a different
         // interleaving rather than the original trace.
         pct: options.pct,
+        live_graceful_target: options.live_graceful_target,
     }
 }
 
@@ -1245,6 +1246,7 @@ mod tests {
             }),
             differential: None,
             pct: None,
+            live_graceful_target: true,
         };
         let (candidate, mapped) = remove_peer(&schedule, &options, 1).expect("can remove peer");
 

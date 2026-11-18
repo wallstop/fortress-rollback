@@ -2559,26 +2559,32 @@ fn majority_component_continues_after_single_automatic_drop() {
 }
 
 /// CAP matrix row 4: two independent graceful removals started at the same step
-/// in disjoint pairs. Concurrent drop certificates must not silently fork the
-/// mesh: both live coordinators fail closed at the shared cut.
+/// in disjoint pairs. Both removed targets keep polling and authoring inputs
+/// until they observe their own certificates (the production
+/// `RunOptions::live_graceful_target` model), so each certificate can collect
+/// the inventory reports it needs from the peer the other removal targets. Both
+/// removals must commit in a deterministic order without forking the mesh.
 ///
-/// The alternative from issue #461 — keep every gracefully removed target
-/// polling as an inventory witness until its own commit — was evaluated and
-/// rejected. A live target keeps authoring inputs while the certificate is in
-/// flight, and under Rough loss survivors apply different post-request target
-/// frames. Nightly seed `12345098` (N=10) reproduced in-band checksum desyncs
-/// as the certificate cut landed.
+/// The CAP rule selected for graceful removal (issue #473): a removed target
+/// keeps polling and authoring inputs until it observes its own committed
+/// certificate, matching production `remove_player`. Survivors keep accepting
+/// those post-request frames until they apply the certificate, then freeze the
+/// slot at the certified cut and re-simulate that cut frame itself with the
+/// certified value. That last step is required because the cut is the
+/// *maximum* receipt across survivors, so a survivor whose own receipt trailed
+/// the cut necessarily simulated that frame speculatively before the backfill
+/// supplied it. Re-simulating only above the cut would keep the contaminated
+/// boundary on the speculative side and split the first post-cut state (nightly
+/// seed `12345118`, N=15 Rough). The live-target harness mode drives this
+/// production interval; the nightly fleet enables it for every generated
+/// graceful-removal row, and
+/// `live_target_graceful_removal_under_rough_loss_certifies_without_desync`
+/// pins the lossy seed rows.
 ///
-/// This row models the harness's request-boundary retirement choice. Production
-/// `remove_player` starts an asynchronous certificate and the target keeps
-/// running until it receives the commit; that live-target interval is not
-/// exercised here and is tracked in issue #473. The row pins the fail-closed
-/// certificate outcome for a minority that cannot certify the drop: it must
-/// not continue on its own history. The retry-side of #461 (fresh identity,
-/// report collection, and commit) is pinned by
-/// `retried_removal_after_supersede_collects_reports_and_commits`.
+/// The retry-side of #461 (fresh identity, report collection, and commit) is
+/// pinned by `retried_removal_after_supersede_collects_reports_and_commits`.
 #[test]
-fn concurrent_disjoint_graceful_removals_fail_closed_without_fork() {
+fn concurrent_disjoint_graceful_removals_certify_both_without_fork() {
     let schedule = disruption_schedule(
         4,
         vec![
@@ -2586,58 +2592,63 @@ fn concurrent_disjoint_graceful_removals_fail_closed_without_fork() {
             (120, ScheduleEvent::GracefulRemove { by: 2, target: 3 }),
         ],
     );
-    let mut options = disruption_options(vec![0, 0, 1, 1]);
-    options.disconnect_timeout = Some(DISCONNECT_TIMEOUT);
+    let options = RunOptions {
+        disconnect_timeout: Some(DISCONNECT_TIMEOUT),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
 
     let report = run_with_input::<StubInput>(&schedule, &options);
-    let evidence = report
-        .component_scope
-        .as_ref()
-        .expect("component-scoped evidence was requested");
-    assert_eq!(
-        evidence.cut_confirmed.len(),
-        4,
-        "the concurrent removals must actually fire"
-    );
-    assert_eq!(
-        classify_component_scope(evidence, 2),
-        ComponentOutcome::FailedClosed {
-            shared_prefix: evidence
-                .confirmed_inputs
-                .iter()
-                .filter_map(|history| history.keys().next_back().copied())
-                .min()
-                .expect("confirmed history"),
-        },
-        "concurrent drop certificates must fail closed on every component"
-    );
+    let last = report
+        .trace_tail
+        .last()
+        .expect("the concurrent-removal row records trace snapshots");
     assert!(
+        report.verdict.failures.is_empty(),
+        "both concurrent removals must certify and keep the survivors healthy: {:?}",
+        report.verdict.failures
+    );
+    for survivor in [0, 2] {
+        assert_eq!(
+            last.session_states[survivor],
+            TraceSessionState::Running,
+            "survivor {survivor} must stay Running after both removals"
+        );
+        assert!(
+            report.final_confirmed[survivor] > i32::try_from(CUT_STEP).unwrap_or(i32::MAX),
+            "survivor {survivor} must keep confirming past the concurrent cut: {:?}",
+            report.final_confirmed
+        );
+        assert_eq!(
+            report
+                .peer_event_counts_by_peer
+                .get(survivor)
+                .and_then(|counts| counts.get(&EventKind::PeerDropped))
+                .copied(),
+            Some(2),
+            "survivor {survivor} must observe both certified removals"
+        );
+    }
+    for target in [1, 3] {
+        assert_eq!(
+            last.session_states[target],
+            TraceSessionState::Synchronizing,
+            "removed target {target} must learn of its own certified removal and stop"
+        );
+        assert!(
+            last.dead[target],
+            "removed target {target} must be retired after learning of its removal"
+        );
+    }
+    assert_eq!(
         report
             .peer_event_counts
             .get(&EventKind::DesyncDetected)
             .copied()
-            .unwrap_or(0)
-            == 0,
-        "a failed-closed concurrent drop must not present a desync: {:?}",
+            .unwrap_or(0),
+        0,
+        "certified concurrent removals must not present a desync: {:?}",
         report.peer_event_counts
-    );
-    assert!(
-        typed_safe_failure_diagnostics_hold(
-            &report,
-            false,
-            true,
-            schedule.config.recovery_window_steps(),
-        ),
-        "the terminal failures must stay the reviewed drop-timeout/EndProgress set: {:?}",
-        report.verdict.failures
-    );
-    assert!(
-        !report.verdict.failures.iter().any(|failure| matches!(
-            failure,
-            OracleFailure::ConfirmedInputDivergence { .. } | OracleFailure::StateDivergence { .. }
-        )),
-        "the failing-closed peers must keep one confirmed history: {:?}",
-        report.verdict.failures
     );
 }
 
