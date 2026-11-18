@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794969825659,
+  "lastUpdate": 1794986052963,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "1af6062c20f76662830344655c12a8f714a6de84",
-          "message": "test(simulation): prove graceful removal equivalence (#375)\n\n## What\n\nExtends the bounded two-peer differential rollback oracle to one\nexplicit graceful removal. The independent reference now models the\ncertified freeze cut, including exact input and `StateStub` boundaries,\nrather than relying only on peer agreement.\n\nAlso keeps session evidence in the local, gitignored progress log and\nnarrows the active P0 item in `PLAN.md` to the remaining membership\nscenarios. Per review, all previously tracked progress logs are removed\nfrom git and canonical agent guidance now explicitly keeps them\nmachine-local.\n\n## Why\n\nA mesh can agree on the same wrong frozen input or state. This change\nadvances the active rollback-equivalence milestone by checking the\nsurviving fixed-membership trajectory against an independent nominal\nhistory and by proving that abandoned pre-removal observations cannot\ncreate false divergence.\n\n## Reference semantics\n\nFor certified cut `F`:\n\n- Input `F` remains nominal; frames after `F` repeat that value for the\nremoved target.\n- Post-state `F+1` consumes nominal input `F` and remains\nboundary-valid.\n- Post-state `F+2` is the first state that can observe frozen input.\n- The departed peer's required `F+1` state remains checked when\nconfirmed and simulated; its abandoned `F+2+` generation is excluded\nfrom reference and legacy cross-peer state comparisons.\n- Target-authored confirmed inputs above `F` cannot define the\nsurvivor's frozen continuation.\n\nThe two-peer commit guard requires synchronous disconnection, a Running\nsurvivor, a cut equal to the pre-call direct receipt, and pre-call\nsurvivor confirmed/sampled history bounded by the cut.\n\n## Coverage and controls\n\n- EveryFrame/delay-0/reordered and Sparse/delay-2/delayed schedules\n- Forward, reverse, and rotating drive orders\n- Exact trace, trajectory, control, and failure-vector artifact replay\n- Matched no-removal input/state controls and post-removal\nrollback/load/resimulation evidence\n- Frozen-input, wrong-state, missing-state, and final-frame mutation\ncontrols\n- Explicit non-vacuity evidence for target-authored inputs above `F` and\nabandoned target states at `F+2+`\n\nThe claim remains bounded to two peers and Lockstep cadence. Automatic\ndisconnects/timeouts, spectator membership changes, hot-join, and the\nother active P0 scenarios remain in `PLAN.md`.\n\n## External reconciliation\n\n- Only open issue: #365, intentionally P2 behind the active correctness\nwork\n- No pre-existing open, draft, or dependency PRs\n- No compatible Cargo or npm updates; fuzz, Loom, and Godot standalone\nworkspaces are current\n- Main CodeQL push cancellation was caused by replacement with the\nscheduled run at the same SHA; that scheduled run completed\nsuccessfully, so no source/workflow fix was needed\n\n## Validation\n\n- Focused differential selection: 32 passed\n- Full simulation target: 399 passed, 26 skipped\n- Full Nextest: 3,029 passed, 73 skipped\n- `cargo clippy --workspace --all-targets --features tokio,json`: passed\nwithout warnings\n- Rustdoc: passed; documentation tests: 160 passed, 50 ignored\n- Agent preflight, formatting, diff checks, plan hygiene, typos,\nsemantic doc claims, and 1,442 documentation links: passed\n- All four workspace lock checks, `cargo audit`, `cargo deny check`, and\n`npm audit`: passed\n- Independent adversarial review iterated through all findings; final\nre-review reported zero issues\n\nNo production or public API code changed, so no changelog entry is\nrequired.\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS (no production diff)\n- Determinism: PASS (seeded schedules and ordered histories)\n- Error handling: PASS (structured oracle failures and explicit commit\nguard)\n- Test breadth: PASS (nominal matrix, exact replay, boundaries, and\nnegative controls)\n- Agent preflight: PASS\n- Design log reviewed: N/A (test-only oracle extension)\n- Changelog reviewed: N/A (no user-observable/public change)",
-          "timestamp": "2026-11-07T22:55:19-08:00",
-          "tree_id": "1560cc841c7610a370172436b9a3217ba5c286c2",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/1af6062c20f76662830344655c12a8f714a6de84"
-        },
-        "date": 1794121401979,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 60480,
-            "range": "± 1323",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 30940,
-            "range": "± 1068",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1863,
-            "range": "± 113",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 112",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3141,
-            "range": "± 205",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2992,
             "range": "± 213",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "1a674d6c60cd479b841d38b405be8a3509e5bf11",
+          "message": "test: un-quarantine lossy crash retirement and pin removal retry commit (#472)\n\n## Summary\n\nUn-quarantines lossy crash retirement in the deterministic fleet (closes\n#470) and records the CAP decision for cross-peer concurrent graceful\nremovals while adding a full retry-commit regression (#461).\n\n### Crash retirement (#470)\n\n- `nightly_schedule` now rewrites `PeerKill` / `SpectatorHostKill` only\nfor the two-peer shape. Every `n >= 3` mesh keeps its real crash event;\na kill leaves a strict majority.\n- `nightly_run_options` uses the production 2 s disconnect timeout\nwhenever a row contains a crash. The inflated modeled-run timeout is\ntransport-only: a crashed peer never resumes, so the inflated timeout\nstarved the automatic drop and froze every survivor at the prediction\nlimit.\n- Added `lossy_crash_retirement_rows_keep_one_history_and_recover`\nacross `PeerKill` and `SpectatorHostKill` under Rough, ReliableFifo, and\nSwarm.\n- Added `two_peer_crash_retirement_fails_closed_without_fork`: the\nexcluded two-peer shape halts in `Synchronizing` at the shared cut with\nno divergence or desync.\n- Narrowed the quarantine test to the two-peer rewrite and assert a\nfive-peer mesh keeps its crash event.\n\n### Concurrent removals and retry (#461)\n\n- Current behavior is retained: cross-peer concurrent different-target\nremovals fail closed. The issue's option 2 (keep the removed target\npolling as an inventory witness until its own commit) was implemented\nand rejected with data. A live target keeps authoring inputs during the\ncertificate; under Rough loss survivors apply different post-request\ntarget frames.\n- seed `12345038` (N=10) reproduced in-band checksum desync at frame\n2130;\n- seed `12345098` (N=10) reproduced in-band checksum desync at frame\n2190;\n  - both rows pass with request-boundary retirement.\n- Added `retried_removal_after_supersede_collects_reports_and_commits`:\naccept op A, supersede with op B, queue/start the retry with a fresh\nidentity, collect Inventory/Ready/Committed reports, commit, and stay\n`Running`.\n\n## Verification\n\n- `cargo tfull` -> 3,260 passed, 75 skipped.\n- `cargo nextest run --release --features\ntokio,json,hot-join,violation-census --test simulation --no-fail-fast`\n-> 484 passed, 27 skipped.\n- Nightly shard 0 at seed base `12345` with `--profile ci --run-ignored\nignored-only` -> 1 passed (163 s), all 125 seeds including the newly\nun-quarantined crash rows.\n- `cargo clippy --workspace --all-targets --features\ntokio,json,hot-join,violation-census -- -D warnings` -> clean.\n- `cargo check --target wasm32-unknown-unknown --no-default-features\n--features hot-join` -> clean.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` -> all checks\npassed.\n\n## CAP notes\n\n- `n == 2` crash retirement has no surviving strict majority (1/2) and\nremains a deliberate fail-closed partition at the shared cut. The row\npins no fork and no desync.\n- Cross-peer concurrent removals remain fail-closed until a protocol\ndesign can keep a leaving target's post-request stream from reaching\ndifferent survivors at different times. The live-witness experiment\nabove is the falsifiable evidence for keeping the halt.\n\n- Follow-up: the live-target desync class found while evaluating option\n2 is tracked in #473.",
+          "timestamp": "2026-11-18T07:03:25Z",
+          "tree_id": "fbfa00d55eed45f516e89f15f552ca7346d93d6d",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/1a674d6c60cd479b841d38b405be8a3509e5bf11"
+        },
+        "date": 1794986052120,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 40118,
+            "range": "± 113",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 24588,
+            "range": "± 3090",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1245,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2778,
+            "range": "± 186",
             "unit": "ns/iter"
           }
         ]
