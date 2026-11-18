@@ -12,8 +12,8 @@ use super::harness::schedule::{
 };
 use super::harness::{
     oracle::{OracleFailure, ViolationAllowlistEntry, ViolationSignature, POST_HEAL_MIN_ADVANCE},
-    phase_control_progress_interval, phase_control_sample_capacity, run, PctOptions, RunOptions,
-    RunReport, TraceSessionState,
+    phase_control_progress_interval, phase_control_sample_capacity, run, PctOptions,
+    PeerEventPayload, RunOptions, RunReport, TraceSessionState,
 };
 use super::sometimes_state::{
     publish_targeted_probe, write_organic_shard, write_violation_sites_shard, CensusAccumulator,
@@ -100,17 +100,25 @@ fn scheduled_graceful_removal(schedule: &Schedule) -> (usize, usize) {
 /// the intent: the requester observed `PeerDropped`, and the target was retired
 /// after it left `Running` (the harness gates live-target retirement on a
 /// survivor's certified removal).
+fn peer_dropped_handles(report: &RunReport, peer: usize) -> BTreeSet<usize> {
+    report
+        .peer_event_payload_counts_by_peer
+        .get(peer)
+        .into_iter()
+        .flat_map(|counts| counts.iter())
+        .filter(|(key, count)| key.kind == EventKind::PeerDropped && **count > 0)
+        .filter_map(|(key, _)| match key.payload {
+            PeerEventPayload::PlayerAddr { handle, .. } => Some(handle.as_usize()),
+            PeerEventPayload::Addr(_) => None,
+        })
+        .collect()
+}
+
 fn assert_scheduled_removal_committed(report: &RunReport, by: usize, target: usize) {
     assert!(
-        report
-            .peer_event_counts_by_peer
-            .get(by)
-            .and_then(|counts| counts.get(&EventKind::PeerDropped))
-            .copied()
-            .unwrap_or(0)
-            > 0,
+        peer_dropped_handles(report, by).contains(&target),
         "requester {by} must observe the certified removal of {target}: {:?}",
-        report.peer_event_counts_by_peer
+        report.peer_event_payload_counts_by_peer
     );
     let last = report
         .trace_tail
@@ -443,13 +451,19 @@ fn live_target_graceful_removal_under_rough_loss_certifies_without_desync() {
         .expect("the lossy concurrent-removal row records trace snapshots");
     for survivor in [0, 2] {
         assert_eq!(
+            peer_dropped_handles(&report, survivor),
+            BTreeSet::from([1, 3]),
+            "lossy survivor {survivor} must observe a committed drop for each scheduled target: {:?}",
+            report.peer_event_payload_counts_by_peer
+        );
+        assert_eq!(
             report
                 .peer_event_counts_by_peer
                 .get(survivor)
                 .and_then(|counts| counts.get(&EventKind::PeerDropped))
                 .copied(),
             Some(2),
-            "lossy survivor {survivor} must observe both certified removals: {:?}",
+            "lossy survivor {survivor} must observe exactly the two certified removals: {:?}",
             report.peer_event_counts_by_peer
         );
         assert_eq!(
@@ -5514,7 +5528,7 @@ fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     let report = run(&schedule, &options);
     assert_eq!(
         report.final_confirmed,
-        vec![357, 351, 351, 352, 290],
+        vec![356, 350, 350, 350, 290],
         "the regression depends on the lagging-survivor interleaving"
     );
     assert!(

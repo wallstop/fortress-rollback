@@ -731,7 +731,19 @@ impl<T: Config> InputQueue<T> {
                 // evicted from the ring. Its value is fixed in local history and
                 // the chunk's copy is never installed, so the comparison is
                 // skipped; a still-retained overlap is always compared above.
-                Err(RetainedHistoryError::MissingRetainedInput { .. }) => {},
+                // The single reclaimed rollback-floor slot is still observable
+                // through `confirmed_input` even when it is no longer
+                // contiguous with the ring, so a conflicting backfill for that
+                // frame must still be rejected instead of silently accepted.
+                Err(RetainedHistoryError::MissingRetainedInput { .. }) => {
+                    if let Some(reclaimed) = self.reclaimed_floor_input {
+                        if reclaimed.frame == incoming.frame && reclaimed.input != incoming.input {
+                            return Err(RetainedHistoryError::ConflictingOverlap {
+                                frame: incoming.frame,
+                            });
+                        }
+                    }
+                },
                 Err(error) => return Err(error),
             }
         }
@@ -4226,6 +4238,86 @@ mod input_queue_tests {
                 .input,
             TestInput { inp: 3 }
         );
+    }
+
+    #[test]
+    fn reclaimed_floor_overlap_conflict_is_rejected() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 4).expect("valid test queue");
+        fill_sequential(&mut queue, 3);
+        // Evict frames 0 and 1 while keeping frame 0 in the reclaimed rollback
+        // slot: the ring then holds 2..=5 and `confirmed_input(0)` still
+        // returns the frame-0 value.
+        assert_eq!(
+            queue
+                .install_missing_backfill(
+                    &[PlayerInput::new(Frame::new(4), TestInput { inp: 4 })],
+                    Frame::new(0),
+                )
+                .expect("frame 4 fits by evicting the floor"),
+            1
+        );
+        assert_eq!(
+            queue
+                .install_missing_backfill(
+                    &[PlayerInput::new(Frame::new(5), TestInput { inp: 5 })],
+                    Frame::new(2),
+                )
+                .expect("frame 5 fits by evicting frame 1"),
+            1
+        );
+        assert!(
+            queue.retained_confirmed_input(Frame::new(0)).is_err(),
+            "frame 0 is no longer contiguous with the retained ring"
+        );
+        assert_eq!(
+            queue
+                .confirmed_input(Frame::new(0))
+                .expect("the reclaimed floor slot remains observable")
+                .input,
+            TestInput { inp: 0 }
+        );
+        let before = queue.clone();
+
+        assert_eq!(
+            queue.install_missing_backfill(
+                &[PlayerInput::new(Frame::new(0), TestInput { inp: 99 })],
+                Frame::new(0),
+            ),
+            Err(RetainedHistoryError::ConflictingOverlap {
+                frame: Frame::new(0),
+            }),
+            "a conflicting backfill for the reclaimed floor must not be skipped"
+        );
+        assert_queue_unchanged(&queue, &before);
+    }
+
+    #[test]
+    fn evicted_prefix_then_retained_conflict_rejects_transactionally() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
+        fill_sequential(&mut queue, 2);
+        queue.discard_confirmed_frames(Frame::new(1));
+        let before = queue.clone();
+
+        // Frame 0 is evicted (skip), frame 1 is retained and conflicts, and the
+        // suffix is otherwise valid. The conflict must still abort the whole
+        // install and leave the queue byte-for-byte unchanged; skipping the
+        // evicted prefix must not skip subsequent overlap comparisons.
+        let backfill = [
+            PlayerInput::new(Frame::new(0), TestInput { inp: 0 }),
+            PlayerInput::new(Frame::new(1), TestInput { inp: 99 }),
+            PlayerInput::new(Frame::new(2), TestInput { inp: 2 }),
+            PlayerInput::new(Frame::new(3), TestInput { inp: 3 }),
+        ];
+        assert_eq!(
+            queue.install_missing_backfill(&backfill, Frame::new(0)),
+            Err(RetainedHistoryError::ConflictingOverlap {
+                frame: Frame::new(1),
+            }),
+            "a retained conflict after an evicted prefix must reject the install"
+        );
+        assert_queue_unchanged(&queue, &before);
     }
 
     #[test]
