@@ -2608,6 +2608,11 @@ fn coordinator_link_loss_relays_prepare_and_commits() {
         "a relayed prepare must certify without failing closed: {:?}",
         report.verdict.failures
     );
+    let replay = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the relayed-removal row must reproduce its exact trace"
+    );
     assert!(
         report
             .blocked_drops_by_link
