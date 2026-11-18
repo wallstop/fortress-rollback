@@ -222,6 +222,7 @@ fn remap_options(options: &RunOptions, removed: usize, steps: u32) -> RunOptions
         // may minimize to a same-class failure reached through a different
         // interleaving rather than the original trace.
         pct: options.pct,
+        live_graceful_target: options.live_graceful_target,
     }
 }
 
@@ -1245,6 +1246,7 @@ mod tests {
             }),
             differential: None,
             pct: None,
+            live_graceful_target: true,
         };
         let (candidate, mapped) = remove_peer(&schedule, &options, 1).expect("can remove peer");
 
@@ -1257,6 +1259,7 @@ mod tests {
         assert_eq!(mapped.probe_confirmed_at, Some(19));
         assert_eq!(mapped.receive_message_limit, Some(512));
         assert_eq!(mapped.disconnect_timeout, Some(Duration::from_secs(90)));
+        assert!(mapped.live_graceful_target);
         assert_eq!(mapped.pending_output_probe_link, Some((2, 0)));
         assert_eq!(mapped.receipt_range_probe_target, Some(1));
         assert_eq!(

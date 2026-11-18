@@ -130,6 +130,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delta buffer per packet. A warmed one-frame receive poll drops from 8 to 6 allocation operations
   (about 256 fewer bytes) at 2-16 players, and a warmed networked send drops from 4 to 3 operations
   at 2-4 players (5 to 4 at 16); encoded wire bytes and event ordering are unchanged.
+- **Pre-existing:** a gracefully removed target that stays alive until its certificate commits
+  can no longer split the survivors. The certified cut is the maximum target receipt across
+  participants, so a survivor whose own receipt trailed the cut may have simulated that frame
+  from a prediction; survivors now re-simulate the cut frame itself with the certified value
+  instead of only re-simulating above it, which kept the contaminated boundary on the speculative
+  side and desynchronized the first post-cut state on lossy meshes. When a live target
+  retransmits a frame that its backfill already installed, the survivor adopts the retained value
+  only if the bytes match and advances its receipt high-water; a mismatch still fails closed.
+  Copies at or below an already-advanced receipt are ignored at trace level rather than reported
+  as protocol violations.
+- **Pre-existing:** concurrent graceful removals with disjoint target sets now commit in
+  deterministic order instead of fail-closing every certificate. A session still runs one
+  certificate at a time: while the first removal of peer 1 is active, its target peer 3 remains a
+  live participant and reports the inventory the first certificate needs; after that commit, the
+  queued retry for peer 3 runs against the remaining membership. A conflict after an attempt has
+  left inventory (for example, a required participant removed by an earlier commit) still fails
+  closed rather than forking.
 - **Pre-existing:** a coordinated graceful-drop retry no longer has its `Prepare` swallowed by the
   terminal-operation history. The retry advances the coordinator-local sequence past the closed
   attempt, so it opens a fresh identity instead of re-deriving the target's generation-local one;

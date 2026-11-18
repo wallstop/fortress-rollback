@@ -416,6 +416,12 @@ pub struct RunOptions {
     /// reference order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pct: Option<PctOptions>,
+    /// Drive a gracefully removed target like production: keep polling and
+    /// authoring inputs until the committed certificate moves it out of
+    /// `Running`, then retire it. `false` keeps the historical harness model,
+    /// which retires the target at the request step.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub live_graceful_target: bool,
 }
 
 /// Inclusive input-history interval retained by one observer at the receipt
@@ -3875,6 +3881,10 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     // commits, then the oracle anchors the certified cut.
     let mut differential_graceful_pending: Option<(usize, usize)> = None;
     let mut differential_graceful_committed = vec![false; n];
+    // Gracefully removed targets still running under
+    // `RunOptions::live_graceful_target`. Each is retired on the first step
+    // where the committed certificate has moved it out of `Running`.
+    let mut live_removal_targets: Vec<usize> = Vec::new();
     let mut differential_hot_join_control: Option<DifferentialHotJoinControl> = None;
     #[cfg(feature = "hot-join")]
     let mut pending_hot_join: Option<PendingHotJoin<I>> = None;
@@ -4342,13 +4352,26 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                     ceiling.saturating_add(1),
                                 );
                             }
-                            retire_peer_for_lifecycle(
-                                *target,
-                                &peers,
-                                &mut dead,
-                                &mut oracle,
-                                spectator_enabled.then_some(&mut spectator_required_min_frame),
-                            );
+                            // Production `remove_player` starts an
+                            // asynchronous certificate while the target keeps
+                            // running until it observes its own commit. The
+                            // historical harness model retired the target at
+                            // the request step; `live_graceful_target` keeps it
+                            // alive and defers retirement until the certificate
+                            // moves it out of `Running`.
+                            if options.live_graceful_target {
+                                if !live_removal_targets.contains(target) {
+                                    live_removal_targets.push(*target);
+                                }
+                            } else {
+                                retire_peer_for_lifecycle(
+                                    *target,
+                                    &peers,
+                                    &mut dead,
+                                    &mut oracle,
+                                    spectator_enabled.then_some(&mut spectator_required_min_frame),
+                                );
+                            }
                         }
                     }
                 },
@@ -4927,6 +4950,46 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             if run_c && step == recovery_anchor_at {
                 confirmed_after_recovery[i] = confirmed.as_i32();
             }
+        }
+
+        // A gracefully removed target driven like production keeps polling and
+        // authoring inputs until it observes its own committed certificate
+        // (which moves it out of `Running`). Retire it only once a survivor has
+        // certified the removal; a target that leaves `Running` before any
+        // survivor commits was not driven through the intended live interval
+        // and must surface as a regression rather than being silently retired.
+        if !live_removal_targets.is_empty() {
+            for target in &live_removal_targets {
+                if dead[*target] || peers[*target].session.current_state() == SessionState::Running
+                {
+                    continue;
+                }
+                let handle = PlayerHandle::new(*target);
+                let certified_by_survivor = peers.iter().enumerate().any(|(observer, slot)| {
+                    observer != *target
+                        && !dead[observer]
+                        && slot.session.diagnostic_player_connected(handle) == Some(false)
+                });
+                if !certified_by_survivor {
+                    oracle.observe_runner_error(
+                        "live_target_premature_exit",
+                        *target,
+                        step,
+                        format!(
+                            "live graceful-removal target left Running before any survivor certified its removal (state={:?})",
+                            peers[*target].session.current_state()
+                        ),
+                    );
+                }
+                retire_peer_for_lifecycle(
+                    *target,
+                    &peers,
+                    &mut dead,
+                    &mut oracle,
+                    spectator_enabled.then_some(&mut spectator_required_min_frame),
+                );
+            }
+            live_removal_targets.retain(|target| !dead[*target]);
         }
 
         // A pending replacement whose slot is still connected shares the live
