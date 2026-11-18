@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794986052963,
+  "lastUpdate": 1794993814334,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "5403150f84175c4271a92521b5f4a1cb7ee9bc81",
-          "message": "test(simulation): prove bounded membership equivalence (#376)\n\n## What\n\nAdvances the active differential rollback-equivalence milestone along\nall bounded membership paths that are currently testable, plus\ncompatible tool updates:\n\n- Three-peer automatic disconnect/timeout (`ContinueWithout`) with an\nindependently certified freeze cut.\n- Spectator-visible explicit removal with exact frozen fingerprints and\n`Disconnected` statuses.\n- Bounded two-peer hot-join with a certified removal cut, snapshot\nactivation, replacement state floor, and authoritative activation-frame\nrewrite.\n- Loom 0.7.3 and MkDocs Material 9.8.1 test/docs updates.\n\n## Why\n\nA mesh can agree on the same wrong frozen input or state. These\nscenarios compare the confirmed trajectory against an independent\nnominal model and prove their boundaries with mutation controls, rather\nthan treating peer agreement as correctness.\n\nTwo-peer automatic timeouts intentionally fail closed for lack of an\nindependent live witness, so the timeout scenario uses three real\nsessions. Spectator equivalence is restricted to the surviving host\nbecause a removed player's spectator endpoint is not withdrawn by\n`remove_player`. Hot-join remains bounded to the currently proven\ntwo-peer/forward shape.\n\n## Coverage\n\n### Automatic disconnect\n\n- Actual post-poll certified cut `F`; both survivors must agree on\ntarget and cut.\n- Pre-poll confirmed/sampled history bounded by `F`.\n- EveryFrame/delay-0/reordered and Sparse/delay-2/delayed schedules\nacross forward, reverse, and rotating orders.\n- Exact target-specific interruption/drop/disconnect events, >20\npost-cut confirmed frames, post-commit rollback/resimulation/load, exact\nreplay, and artifact roundtrip.\n- Shared frozen-input, wrong-state, and missing-state mutation controls.\n\n### Spectator removal\n\n- Frame `F` nominal and `Confirmed`; frames `F+1..` frozen and\n`Disconnected` for the target only.\n- Matrix across both removal rows and all three drive orders, with\nmatched no-removal baselines.\n- Exact replay and survivor-plus-spectator cross-order projection.\n- Shared frozen-input lie remains visible in the spectator stream;\nspectator-only status lie at `F+1` is rejected.\n\n### Hot-join\n\n- Freeze `F < k < A` at the removed generation's cut input; activation\nframe `A` is rewritten to the replacement's nominal input; recorded\nreplacement states begin at `A+1`.\n- The activation frame is sampled as soon as confirmed and retried until\nthe rewrite is visible, so long drains cannot evict it or retain a stale\nfreeze.\n- Held-handshake row forces a multi-frame freeze window; exact replay,\n400-step long-drain check, mutation controls, replacement-floor\ncontrols, and artifact roundtrip.\n- Validation bounds the scenario to two peers, slot 1, zero delay,\nEveryFrame, clean links, one replacement, and no composed\nlifecycle/spectator events.\n\nRemaining N-peer hot-join and redundant-spectator failover are tracked\nin [#377](https://github.com/wallstop/fortress-rollback/issues/377) and\n`PLAN.md`.\n\n## External and dependency reconciliation\n\n- Paginated open issues: only #365, intentionally P2 behind correctness\nwork.\n- No pre-existing open or draft PRs. The stale parking_lot Dependabot\nbranch was already merged and is now MSRV-incompatible.\n- Latest `main` SHA `1af6062c20f76662830344655c12a8f714a6de84`: 90\nsuccessful checks, five intentional skips, no failures.\n- Loom 0.7.3 updated in all four workspace locks. Other newer direct\nCargo releases retain their documented MSRV holds.\n\n## Validation\n\n- Differential suites: 36 default, 39 with `hot-join`, passed.\n- Full simulation: 404 default, 417 with `hot-join`, passed (26\nskipped).\n- Full Nextest: 3,034 default and 3,295 with `hot-join`, passed (73/74\nskipped).\n- Loom 0.7.3 release tests: 19 passed.\n- Strict Clippy all workspace/targets with `tokio,json` and with\n`hot-join,tokio,json`: passed without warnings.\n- Rust 1.86 `cargo check --locked --all-targets`: passed.\n- Rustdoc: passed; documentation tests: 160 passed, 50 ignored.\n- MkDocs build with Material 9.8.1: passed.\n- Agent preflight, formatting, diff checks, plan hygiene, typos,\nsemantic doc claims, and documentation links: passed.\n- All four workspace lock checks, Cargo audit, Cargo deny, and npm\naudit: passed.\n- Independent adversarial review iterated through all findings; final\nreviews reported no behavioral issues.\n\nNo production or public API code changed, so no changelog entry is\nrequired.\n\n## Review readiness\n\n- Build/tests: PASS\n- Zero-panic: PASS (test-only oracle changes)\n- Determinism: PASS (seeded virtual-time schedules, exact replay\neverywhere)\n- Error handling: PASS (typed oracle failures and bounded validation)\n- Test breadth: PASS (nominal matrices, boundaries, event identity,\nexact replay, negative controls)\n- Agent preflight: PASS\n- Design log reviewed: N/A (test-only oracle extension)\n- Changelog reviewed: N/A (no user-observable/public change)",
-          "timestamp": "2026-11-09T11:50:15-08:00",
-          "tree_id": "77303b6e64e946fe1fa7589bcdff4ba121d6f7c7",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/5403150f84175c4271a92521b5f4a1cb7ee9bc81"
-        },
-        "date": 1794254242762,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 25956,
-            "range": "± 673",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 17311,
-            "range": "± 1286",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 489,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 607,
-            "range": "± 12",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 5744,
-            "range": "± 180",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2778,
             "range": "± 186",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "646bf83741bedcdcc990b198d81f0de7dba425f4",
+          "message": "fix: keep live graceful-removal targets certified without post-cut forks (#474)\n\n## Summary\n\nProduction `remove_player` lets the removed target keep polling and\nauthoring inputs until it observes its own committed certificate. The\nsimulation harness retired the target at the request step, so that\ninterval was never exercised. This PR models the production interval,\nreproduces the post-cut split reported in #473, fixes it, and re-checks\nthe concurrent-removal liveness gap in #461.\n\nCloses #473. Closes #461.\n\n## Root cause\n\nThe certified cut is the **maximum** target receipt across participants.\nA survivor whose own receipt trailed the cut backfilled that frame, but\nit may already have simulated it from a prediction.\n`disconnect_player_at_frames` armed the rollback at `cut + 1`, which\nkeeps the contaminated `state@cut+1` on the speculative side. Nightly\nseed `12345118` (N=15 Rough) shows the split exactly at the first\npost-cut state: peers 0/6 applied the target's predicted value at frame\n1944 while every other survivor applied the certified value; in-band\nchecksums diverged at 1950.\n\nA live target also exposed two receipt-path faults: a retransmission of\na frame the backfill already installed failed the input queue's\nnon-sequential guard and fail-closed the survivor, and benign\nduplicate/late inputs were reported as Error-severity protocol\nviolations.\n\n## Changes\n\n- Re-simulate the certified cut frame itself with the certified value\nwhenever the session already advanced past it, and purge local checksums\nat/above the cut.\n- Advance the receipt high-water when a live target retransmits a frame\nthe backfill already installed; a genuine gap still fails closed.\n- Treat inputs at/below the receipt high-water as benign duplicates at\ntrace level.\n- Add `RunOptions::live_graceful_target`; the nightly fleet enables it\nfor every generated graceful-removal row.\n- Rewrite CAP row 4: two disjoint concurrent removals with live targets\nboth commit in deterministic order (each survivor observes two\n`PeerDropped` events, both targets stop, survivors stay `Running`, no\ndesync).\n- Docs/CHANGELOG describe the certified-cut re-simulation and concurrent\ncertification.\n\n## Verification\n\n- `cargo tfull`: 3261 passed, 76 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json`: clean.\n- `python3 scripts/ci/agent-preflight.py --auto-fix`: all checks pass.\n- Live-target nightly regression\n(`live_target_graceful_removal_under_rough_loss_certifies_without_desync`):\nseeds 12345038, 12345098, 12345118 pass.\n- Nightly shards 0-7 (`FORTRESS_SIM_SEED_BASE=12345`, 125 seeds each)\nwith live-target mode enabled for graceful rows: all green.\n- `live_target_graceful_removal_smoke_keeps_the_mesh_certified` (N=4\nRough) passes in the PR suite.\n- `concurrent_disjoint_graceful_removals_certify_both_without_fork`\npasses with both certificates committed.",
+          "timestamp": "2026-11-18T09:10:52Z",
+          "tree_id": "572c924d72c4fbfded4847e0ef50d035d1e7a5fb",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/646bf83741bedcdcc990b198d81f0de7dba425f4"
+        },
+        "date": 1794993813411,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60596,
+            "range": "± 581",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31686,
+            "range": "± 180",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1672,
+            "range": "± 106",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 102",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3032,
+            "range": "± 267",
             "unit": "ns/iter"
           }
         ]
