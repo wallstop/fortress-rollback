@@ -16161,6 +16161,45 @@ mod tests {
         assert_eq!(session.current_state(), SessionState::Synchronizing);
     }
 
+    #[test]
+    fn backfilled_frame_retransmission_advances_receipt_without_failing_closed() {
+        let mut session = create_two_player_session();
+        session.state = SessionState::Running;
+        let handle = PlayerHandle::new(1);
+        let backfill: Vec<_> = (0..=2_u8)
+            .map(|value| PlayerInput::new(Frame::new(i32::from(value)), value))
+            .collect();
+        session
+            .sync_layer
+            .install_missing_backfill(handle, &backfill)
+            .expect("contiguous backfill");
+        // The backfill installs ring history without touching the receipt
+        // high-water, exactly as the coordinated-drop donor path does.
+        session.local_connect_status[handle.as_usize()].last_frame = Frame::new(1);
+        let handles: Arc<[PlayerHandle]> = Arc::from(vec![handle]);
+
+        session.handle_event(
+            Event::Input {
+                input: PlayerInput::new(Frame::new(2), 2),
+                player: handle,
+                peer_connect_status: vec![ConnectionStatus::default(); 2].into(),
+            },
+            handles,
+            test_addr(8080),
+        );
+
+        assert_eq!(
+            session.local_connect_status[handle.as_usize()].last_frame,
+            Frame::new(2),
+            "a retransmission of a backfilled frame must adopt the retained value"
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Running,
+            "adopting a backfilled retransmission must not fail the session closed"
+        );
+    }
+
     // ==========================================
     // Constant Tests
     // ==========================================
