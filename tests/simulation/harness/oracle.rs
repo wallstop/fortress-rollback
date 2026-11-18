@@ -668,6 +668,15 @@ impl Oracle {
         );
         self.canonical_inputs
             .retain(|frame, (first_author, _)| *first_author != peer || *frame < input_from_frame);
+        // The replacement is a new live generation at the same slot: the old
+        // generation's removal cut no longer caps either its confirmed-input
+        // authorship or its state comparisons.
+        if let Some(ceiling) = self.confirmed_input_ceilings.get_mut(peer) {
+            *ceiling = None;
+        }
+        if let Some(ceiling) = self.retired_state_ceilings.get_mut(peer) {
+            *ceiling = None;
+        }
         if let Some(replaced) = self.replacement_generations.get_mut(peer) {
             *replaced = true;
         }
@@ -1940,6 +1949,33 @@ mod tests {
             Some(0),
             "below-cut coverage is retained"
         );
+    }
+
+    /// A hot-join replacement is a new live generation: the previous
+    /// generation's removal cut must not keep suppressing the slot's inputs or
+    /// states above it.
+    #[test]
+    fn oracle_replacement_generation_clears_retirement_ceilings() {
+        let input = |value: u32| vec![InputFingerprint::from_bytes(value, b"slot")];
+        let mut oracle = Oracle::new(2);
+        oracle.observe_confirmed_inputs(0, 4, input(1));
+        oracle.cap_retired_confirmed_inputs(0, 4);
+        oracle.cap_retired_state_comparison(0, 5);
+        oracle.observe_confirmed_inputs(0, 6, input(2));
+        assert!(
+            !oracle.canonical_inputs.contains_key(&6),
+            "the pre-replacement sample is capped"
+        );
+
+        oracle.begin_replacement_generation(0, 5);
+        oracle.observe_confirmed_inputs(0, 6, input(3));
+
+        assert_eq!(
+            oracle.canonical_inputs.get(&6).map(|(author, _)| *author),
+            Some(0),
+            "the replacement generation's inputs above the old cut are canonical"
+        );
+        assert_eq!(oracle.retired_state_ceilings[0], None);
     }
 
     /// A retired peer remains evidence through its own confirmed prefix, but
