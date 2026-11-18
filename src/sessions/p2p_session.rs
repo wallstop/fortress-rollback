@@ -1606,9 +1606,12 @@ impl<T: Config> P2PSession<T> {
                     kind: InternalErrorKind::Custom("coordinated drop participant set is empty"),
                 })?;
         // Every survivor independently derives the same logical sequencer and
-        // generation-local sequence. Therefore simultaneous user requests for
-        // the same endpoint coalesce into one operation instead of racing two
-        // certificates; a sole non-sequencer caller may still submit it.
+        // generation-local sequence for a FIRST attempt. Therefore simultaneous
+        // user requests for the same endpoint coalesce into one operation
+        // instead of racing two certificates; a sole non-sequencer caller may
+        // still submit it. A retry deliberately advances past this session's
+        // closed history below, so a retry racing a concurrent first attempt is
+        // ordered by the operation comparator.
         let mut sequence = targets
             .iter()
             .map(|target| u32::from(target.generation))
