@@ -11577,6 +11577,23 @@ impl<T: Config> P2PSession<T> {
     /// window is a sound strict subset of the model-verified unconditional
     /// `AsyncSoundTarget`. Reserved hot-join endpoints (a slot awaiting its
     /// joiner) are neither a prune nor a relay, so they are excluded from both.
+    fn pessimistic_floor_relay_topology(&self) -> bool {
+        let mut observer_pruned_a_peer = false;
+        let mut running_remote_count = 0_usize;
+        for endpoint in self.player_reg.remotes.values() {
+            #[cfg(feature = "hot-join")]
+            if self.hot_join.endpoint_is_reserved(endpoint) {
+                continue;
+            }
+            if endpoint.is_running() {
+                running_remote_count += 1;
+            } else {
+                observer_pruned_a_peer = true;
+            }
+        }
+        observer_pruned_a_peer && running_remote_count >= 2
+    }
+
     /// Detects running→pruned endpoint transitions and, when any occurred,
     /// resets EVERY endpoint's floor freshness (the spec's whole-row `ackFresh`
     /// reset) so the observer re-completes a post-prune round before trusting
@@ -11671,23 +11688,6 @@ impl<T: Config> P2PSession<T> {
             let request_needed = relay_topology && endpoint.is_running() && !reserved;
             endpoint.set_floor_request_needed(request_needed);
         }
-    }
-
-    fn pessimistic_floor_relay_topology(&self) -> bool {
-        let mut observer_pruned_a_peer = false;
-        let mut running_remote_count = 0_usize;
-        for endpoint in self.player_reg.remotes.values() {
-            #[cfg(feature = "hot-join")]
-            if self.hot_join.endpoint_is_reserved(endpoint) {
-                continue;
-            }
-            if endpoint.is_running() {
-                running_remote_count += 1;
-            } else {
-                observer_pruned_a_peer = true;
-            }
-        }
-        observer_pruned_a_peer && running_remote_count >= 2
     }
 
     /// Returns `true` when slot `handle` must take the **post-prune fresh-ack
