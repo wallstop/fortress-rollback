@@ -2692,9 +2692,7 @@ impl<T: Config> P2PSession<T> {
         // (issue #473). Re-simulate frame `cut` itself with the now-certified
         // value; the extra frame is one cheap step and makes the boundary exact
         // whether or not the local receipt already covered the cut.
-        if self.sync_layer.current_frame() > commit.cut {
-            self.arm_certified_cut_resimulation(commit.cut);
-        }
+        self.arm_certified_cut_resimulation(self.sync_layer.current_frame(), commit.cut);
 
         for target in &targets {
             let handle = PlayerHandle::new(usize::from(target.handle));
@@ -2754,13 +2752,21 @@ impl<T: Config> P2PSession<T> {
     /// trajectory and is discarded; a later corrected re-simulation repopulates
     /// it. `disconnect_frame` only moves EARLIER here, matching the existing
     /// multi-drop fold.
-    fn arm_certified_cut_resimulation(&mut self, cut: Frame) {
+    ///
+    /// Returns `false` without touching state when `current <= cut`: the
+    /// session has not simulated the cut frame yet, so it consumes the
+    /// certified value on its first simulation instead of rolling back.
+    fn arm_certified_cut_resimulation(&mut self, current: Frame, cut: Frame) -> bool {
+        if current <= cut {
+            return false;
+        }
         self.disconnect_frame = if self.disconnect_frame.is_null() {
             cut
         } else {
             std::cmp::min(self.disconnect_frame, cut)
         };
         self.local_checksum_history.retain(|&frame, _| frame < cut);
+        true
     }
 
     fn drive_coordinated_drop(&mut self) {
@@ -16956,7 +16962,7 @@ mod tests {
         }
         session.disconnect_frame = Frame::new(20);
 
-        session.arm_certified_cut_resimulation(Frame::new(10));
+        assert!(session.arm_certified_cut_resimulation(Frame::new(20), Frame::new(10)));
 
         assert_eq!(
             session.disconnect_frame,
@@ -16973,9 +16979,21 @@ mod tests {
             "checksums at or above the re-simulated cut describe the speculative trajectory"
         );
 
+        // A session that has not simulated the cut frame yet consumes the
+        // certified value on its first simulation; there is nothing to roll
+        // back, so neither the boundary nor an earlier current frame may arm.
+        for current in [Frame::new(10), Frame::new(9)] {
+            session.disconnect_frame = Frame::new(7);
+            assert!(
+                !session.arm_certified_cut_resimulation(current, Frame::new(10)),
+                "current {current} must not arm a rollback for cut 10"
+            );
+            assert_eq!(session.disconnect_frame, Frame::new(7));
+        }
+
         // An earlier pending drop frame is not raised by a later cut.
         session.disconnect_frame = Frame::new(7);
-        session.arm_certified_cut_resimulation(Frame::new(11));
+        assert!(session.arm_certified_cut_resimulation(Frame::new(20), Frame::new(11)));
         assert_eq!(session.disconnect_frame, Frame::new(7));
     }
 
