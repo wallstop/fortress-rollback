@@ -21,7 +21,7 @@ use super::sometimes_state::{
     H_SKEW_PROBE, SOMETIMES_STATE_COUNT, SOMETIMES_STATE_IDS,
 };
 use crate::common::sim_net::{BandwidthPolicy, LinkPolicy};
-use fortress_rollback::{telemetry::ViolationSeverity, SessionState};
+use fortress_rollback::{telemetry::ViolationSeverity, EventKind, SessionState};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -83,6 +83,43 @@ fn nightly_noise(seed: u64) -> BackgroundNoise {
 /// prediction-limit and input-ring states.
 fn nightly_rare_state_coverage_seed(seed: u64) -> bool {
     NIGHTLY_RARE_STATE_COVERAGE_RESIDUES.contains(&(seed % 100))
+}
+
+fn scheduled_graceful_removal(schedule: &Schedule) -> (usize, usize) {
+    schedule
+        .events
+        .iter()
+        .find_map(|(_, event)| match event {
+            ScheduleEvent::GracefulRemove { by, target } => Some((*by, *target)),
+            _ => None,
+        })
+        .expect("schedule must exercise a graceful removal")
+}
+
+/// Proves the scheduled removal actually certified instead of only accepting
+/// the intent: the requester observed `PeerDropped`, and the target was retired
+/// after it left `Running` (the harness gates live-target retirement on a
+/// survivor's certified removal).
+fn assert_scheduled_removal_committed(report: &RunReport, by: usize, target: usize) {
+    assert!(
+        report
+            .peer_event_counts_by_peer
+            .get(by)
+            .and_then(|counts| counts.get(&EventKind::PeerDropped))
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "requester {by} must observe the certified removal of {target}: {:?}",
+        report.peer_event_counts_by_peer
+    );
+    let last = report
+        .trace_tail
+        .last()
+        .expect("the removal regression records trace snapshots");
+    assert!(
+        last.dead[target],
+        "target {target} must be retired after observing its own commit"
+    );
 }
 
 fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Schedule {
@@ -326,13 +363,7 @@ fn live_target_graceful_removal_smoke_keeps_the_mesh_certified() {
         ..SimConfig::smoke(4)
     };
     let schedule = generate(3, config);
-    assert!(
-        schedule
-            .events
-            .iter()
-            .any(|(_, event)| matches!(event, ScheduleEvent::GracefulRemove { .. })),
-        "seed 3 must materialize a graceful removal"
-    );
+    let (by, target) = scheduled_graceful_removal(&schedule);
     let options = RunOptions {
         disconnect_timeout: Some(Duration::from_secs(20)),
         live_graceful_target: true,
@@ -340,6 +371,7 @@ fn live_target_graceful_removal_smoke_keeps_the_mesh_certified() {
     };
     let report = run(&schedule, &options);
     report.expect_pass(&schedule);
+    assert_scheduled_removal_committed(&report, by, target);
 }
 
 /// Regression for issue #473: the nightly seeds whose lifecycle event is a
@@ -358,19 +390,14 @@ fn live_target_graceful_removal_under_rough_loss_certifies_without_desync() {
     for seed in [12_345_038_u64, 12_345_098, 12_345_118] {
         let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
         let schedule = nightly_schedule(seed, n_players, nightly_noise(seed));
-        assert!(
-            schedule
-                .events
-                .iter()
-                .any(|(_, event)| matches!(event, ScheduleEvent::GracefulRemove { .. })),
-            "seed {seed} must exercise a graceful removal"
-        );
+        let (by, target) = scheduled_graceful_removal(&schedule);
         let options = RunOptions {
             live_graceful_target: true,
             ..nightly_run_options(&schedule)
         };
         let report = run(&schedule, &options);
         report.expect_pass(&schedule);
+        assert_scheduled_removal_committed(&report, by, target);
     }
 }
 

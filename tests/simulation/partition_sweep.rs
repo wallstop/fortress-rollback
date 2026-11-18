@@ -15,8 +15,9 @@ use super::harness::schedule::{
 };
 use super::harness::{
     classify_component_scope, classify_component_scope_with_tail, run_with_input, ComponentOutcome,
-    ComponentScopeOptions, HealRecoveryObservation, PeerStallObservation, PeerWireTotals,
-    RunOptions, RunReport, SimInput, TraceNetStats, TraceSessionState, TraceSnapshot,
+    ComponentScopeOptions, HealRecoveryObservation, PeerEventPayload, PeerStallObservation,
+    PeerWireTotals, RunOptions, RunReport, SimInput, TraceNetStats, TraceSessionState,
+    TraceSnapshot,
 };
 use crate::common::sim_net::{LinkPolicy, SimReceiveStats};
 use crate::common::stubs::StubInput;
@@ -2572,10 +2573,11 @@ fn majority_component_continues_after_single_automatic_drop() {
 /// slot at the certified cut and re-simulate that cut frame itself with the
 /// certified value. That last step is required because the cut is the
 /// *maximum* receipt across survivors, so a survivor whose own receipt trailed
-/// the cut necessarily simulated that frame speculatively before the backfill
-/// supplied it. Re-simulating only above the cut would keep the contaminated
-/// boundary on the speculative side and split the first post-cut state (nightly
-/// seed `12345118`, N=15 Rough). The live-target harness mode drives this
+/// the cut may already have simulated that frame speculatively before the
+/// backfill supplied it. Re-simulating only above the cut would keep the
+/// contaminated boundary on the speculative side and split the first post-cut
+/// state (nightly seed `12345118`, N=15 Rough); a survivor still behind the cut
+/// simply consumes the certified value when it first simulates that frame. The live-target harness mode drives this
 /// production interval; the nightly fleet enables it for every generated
 /// graceful-removal row, and
 /// `live_target_graceful_removal_under_rough_loss_certifies_without_desync`
@@ -2615,8 +2617,9 @@ fn concurrent_disjoint_graceful_removals_certify_both_without_fork() {
             "survivor {survivor} must stay Running after both removals"
         );
         assert!(
-            report.final_confirmed[survivor] > i32::try_from(CUT_STEP).unwrap_or(i32::MAX),
-            "survivor {survivor} must keep confirming past the concurrent cut: {:?}",
+            report.final_confirmed[survivor]
+                > i32::try_from(CUT_STEP.saturating_mul(4)).unwrap_or(i32::MAX),
+            "survivor {survivor} must keep confirming well past the concurrent cut: {:?}",
             report.final_confirmed
         );
         assert_eq!(
@@ -2628,7 +2631,26 @@ fn concurrent_disjoint_graceful_removals_certify_both_without_fork() {
             Some(2),
             "survivor {survivor} must observe both certified removals"
         );
+        let mut dropped_handles = BTreeSet::new();
+        for (key, count) in &report.peer_event_payload_counts_by_peer[survivor] {
+            if key.kind == EventKind::PeerDropped && *count > 0 {
+                if let PeerEventPayload::PlayerAddr { handle, .. } = key.payload {
+                    dropped_handles.insert(handle.as_usize());
+                }
+            }
+        }
+        assert_eq!(
+            dropped_handles,
+            BTreeSet::from([1, 3]),
+            "survivor {survivor} must observe a committed drop for each scheduled target"
+        );
     }
+    assert!(
+        report.final_confirmed[0].abs_diff(report.final_confirmed[2])
+            <= POST_HEAL_MIN_ADVANCE.unsigned_abs(),
+        "both survivors must converge on the same confirmed frontier: {:?}",
+        report.final_confirmed
+    );
     for target in [1, 3] {
         assert_eq!(
             last.session_states[target],

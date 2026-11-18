@@ -8058,25 +8058,36 @@ impl<T: Config> P2PSession<T> {
     /// event in the same batch. A one-survivor certificate may commit during
     /// this call because it needs no network round trip.
     ///
+    /// The certified cut is the maximum target receipt across participants, so
+    /// a survivor whose own receipt trailed the cut may already have simulated
+    /// that frame from a prediction. The commit therefore arms a rollback of the
+    /// cut frame itself; the next [`Self::advance_frame`] returns the
+    /// load/re-simulation requests that apply the certified value. Callers must
+    /// keep advancing and processing requests after draining the drop events.
+    ///
     /// # Concurrent removals
     ///
     /// A session runs at most one coordinated certificate at a time, and only
-    /// the deterministic lowest participant may choose a cut. A different-target
-    /// prepare that arrives while the active attempt is still `Inventory`
-    /// queues the losing target for a retry once the winner clears; the retry
-    /// advances past the closed identity and therefore opens a genuinely fresh
-    /// certificate.
+    /// the deterministic lowest participant may choose a cut.
+    ///
+    /// An incoming prepare that sorts **after** the active attempt loses: the
+    /// receiver broadcasts a `Superseded` abort and keeps its active attempt. It
+    /// does not queue the arriving target. A sender that had opened its own
+    /// attempt for that target queues the target locally when it receives the
+    /// matching abort, so the losing operation retries after the winner clears.
+    /// An incoming prepare that sorts **before** an active `Inventory` attempt
+    /// wins: the receiver aborts the previous attempt with `Superseded` and
+    /// queues that attempt's target. A conflicting prepare or abort after the
+    /// active attempt has left `Inventory` instead fails the affected session
+    /// closed (`Synchronizing`) rather than continuing on a conflicting
+    /// history.
     ///
     /// The removed target keeps polling and authoring inputs until it observes
     /// its own commit, so a queued certificate can still collect the inventory
     /// reports it needs and disjoint-target removals commit in deterministic
-    /// order. A prepare or abort that conflicts after an attempt has left
-    /// `Inventory` (for example, a membership change removed a participant the
-    /// second certificate requires) still fails the affected session closed
-    /// (`Synchronizing`) rather than continuing on a conflicting history.
-    /// Applications that need a strict local ordering can serialize their own
-    /// calls: issue one removal, wait for its `PeerDropped`/`Disconnected`
-    /// events, then issue the next.
+    /// order. Applications that need a strict local ordering can serialize their
+    /// own calls: issue one removal, wait for its
+    /// `PeerDropped`/`Disconnected` events, then issue the next.
     ///
     /// For automatic graceful drop on disconnect timeout, configure
     /// [`crate::SessionBuilder::with_disconnect_behavior`] with

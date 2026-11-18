@@ -135,17 +135,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   participants, so a survivor whose own receipt trailed the cut may have simulated that frame
   from a prediction; survivors now re-simulate the cut frame itself with the certified value
   instead of only re-simulating above it, which kept the contaminated boundary on the speculative
-  side and desynchronized the first post-cut state on lossy meshes. A live target's
-  retransmission of a frame that the backfill already installed advances the survivor's receipt
-  high-water instead of fail-closing, and duplicate or late target retransmissions are ignored at
-  trace level rather than reported as protocol violations.
+  side and desynchronized the first post-cut state on lossy meshes. When a live target
+  retransmits a frame that its backfill already installed, the survivor adopts the retained value
+  only if the bytes match and advances its receipt high-water; a mismatch still fails closed.
+  Copies at or below an already-advanced receipt are ignored at trace level rather than reported
+  as protocol violations.
 - **Pre-existing:** concurrent graceful removals with disjoint target sets now commit in
   deterministic order instead of fail-closing every certificate. A session still runs one
-  certificate at a time and queues the losing target; because each removed target keeps polling
-  until it observes its own commit, the queued certificate can collect the inventory reports it
-  needs from the peer the first removal targets. A conflict after an attempt has left inventory
-  (for example, a required participant removed by an earlier commit) still fails closed rather
-  than forking.
+  certificate at a time: while the first removal of peer 1 is active, its target peer 3 remains a
+  live participant and reports the inventory the first certificate needs; after that commit, the
+  queued retry for peer 3 runs against the remaining membership. A conflict after an attempt has
+  left inventory (for example, a required participant removed by an earlier commit) still fails
+  closed rather than forking.
 - **Pre-existing:** a coordinated graceful-drop retry no longer has its `Prepare` swallowed by the
   terminal-operation history. The retry advances the coordinator-local sequence past the closed
   attempt, so it opens a fresh identity instead of re-deriving the target's generation-local one;

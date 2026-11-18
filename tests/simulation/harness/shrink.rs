@@ -1259,6 +1259,7 @@ mod tests {
         assert_eq!(mapped.probe_confirmed_at, Some(19));
         assert_eq!(mapped.receive_message_limit, Some(512));
         assert_eq!(mapped.disconnect_timeout, Some(Duration::from_secs(90)));
+        assert!(mapped.live_graceful_target);
         assert_eq!(mapped.pending_output_probe_link, Some((2, 0)));
         assert_eq!(mapped.receipt_range_probe_target, Some(1));
         assert_eq!(
