@@ -13248,6 +13248,26 @@ impl<T: Config> P2PSession<T> {
                         // change history; reporting it as a protocol violation
                         // would turn benign redundancy into a hard failure.
                         if input.frame <= current_remote_frame {
+                            // A replayed frame that no longer matches the
+                            // retained authoritative value is peer equivocation:
+                            // never apply it, but do not hide it as benign
+                            // redundancy. Evicted history cannot be compared and
+                            // is a plain stale duplicate.
+                            if let Ok(retained) =
+                                self.sync_layer.confirmed_input(player, input.frame)
+                            {
+                                if retained.input != input.input {
+                                    report_violation!(
+                                        ViolationSeverity::Error,
+                                        ViolationKind::NetworkProtocol,
+                                        "Conflicting duplicate remote input for player {} at frame {} (receipt high-water {})",
+                                        player,
+                                        input.frame,
+                                        current_remote_frame
+                                    );
+                                    return;
+                                }
+                            }
                             trace!(
                                 "Ignoring duplicate remote input for player {} at frame {} (receipt high-water {})",
                                 player,
@@ -32287,6 +32307,32 @@ mod tests {
                     && e.message.contains("Input sequence violation")),
                 "a duplicate at the receipt high-water must not report Error \
                  severity (claim {claim})"
+            );
+
+            // The same frame with different bytes is peer equivocation: it must
+            // stay Error severity even though the frame is never applied.
+            let retained = c2
+                .session
+                .sync_layer
+                .confirmed_input(PlayerHandle::new(0), claim)
+                .expect("the receipt high-water input is retained")
+                .input;
+            let (recorded, ()) = record_tracing(|| {
+                c2.session.handle_event(
+                    Event::Input {
+                        input: PlayerInput::new(claim, retained.wrapping_add(1)),
+                        player: PlayerHandle::new(0),
+                        peer_connect_status: vec![ConnectionStatus::default(); 3].into(),
+                    },
+                    Arc::clone(&handles),
+                    addr_a(),
+                );
+            });
+            assert!(
+                recorded.iter().any(|e| e.level == tracing::Level::ERROR
+                    && e.message.contains("Conflicting duplicate remote input")),
+                "a conflicting replay at the receipt high-water must report \
+                 Error severity (claim {claim})"
             );
 
             // A stale duplicate BELOW the floor (a sub-F frame the snapshot +

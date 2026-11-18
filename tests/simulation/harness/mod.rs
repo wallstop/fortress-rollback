@@ -4954,20 +4954,40 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
 
         // A gracefully removed target driven like production keeps polling and
         // authoring inputs until it observes its own committed certificate
-        // (which moves it out of `Running`). Retire it at that boundary so the
-        // oracle no longer requires it to keep confirming.
+        // (which moves it out of `Running`). Retire it only once a survivor has
+        // certified the removal; a target that leaves `Running` before any
+        // survivor commits was not driven through the intended live interval
+        // and must surface as a regression rather than being silently retired.
         if !live_removal_targets.is_empty() {
             for target in &live_removal_targets {
-                if !dead[*target] && peers[*target].session.current_state() != SessionState::Running
+                if dead[*target] || peers[*target].session.current_state() == SessionState::Running
                 {
-                    retire_peer_for_lifecycle(
+                    continue;
+                }
+                let handle = PlayerHandle::new(*target);
+                let certified_by_survivor = peers.iter().enumerate().any(|(observer, slot)| {
+                    observer != *target
+                        && !dead[observer]
+                        && slot.session.diagnostic_player_connected(handle) == Some(false)
+                });
+                if !certified_by_survivor {
+                    oracle.observe_runner_error(
+                        "live_target_premature_exit",
                         *target,
-                        &peers,
-                        &mut dead,
-                        &mut oracle,
-                        spectator_enabled.then_some(&mut spectator_required_min_frame),
+                        step,
+                        format!(
+                            "live graceful-removal target left Running before any survivor certified its removal (state={:?})",
+                            peers[*target].session.current_state()
+                        ),
                     );
                 }
+                retire_peer_for_lifecycle(
+                    *target,
+                    &peers,
+                    &mut dead,
+                    &mut oracle,
+                    spectator_enabled.then_some(&mut spectator_required_min_frame),
+                );
             }
             live_removal_targets.retain(|target| !dead[*target]);
         }
