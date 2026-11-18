@@ -8102,9 +8102,13 @@ impl<T: Config> P2PSession<T> {
     /// The removed target keeps polling and authoring inputs until it observes
     /// its own commit, so a queued certificate can still collect the inventory
     /// reports it needs and disjoint-target removals commit in deterministic
-    /// order. Applications that need a strict local ordering can serialize their
-    /// own calls: issue one removal, wait for its
-    /// `PeerDropped`/`Disconnected` events, then issue the next.
+    /// order while the control messages arrive. Aborts are best-effort: a
+    /// participant of the losing certificate that misses its `Superseded` abort
+    /// under lossy delivery reaches the bounded Inventory timeout and fails
+    /// closed rather than risk continuing on a conflicting history.
+    /// Applications that need a strict local ordering can serialize their own
+    /// calls: issue one removal, wait for its `PeerDropped`/`Disconnected`
+    /// events, then issue the next.
     ///
     /// For automatic graceful drop on disconnect timeout, configure
     /// [`crate::SessionBuilder::with_disconnect_behavior`] with
