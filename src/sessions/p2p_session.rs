@@ -11617,16 +11617,13 @@ impl<T: Config> P2PSession<T> {
         for endpoint in self.player_reg.remotes.values_mut() {
             endpoint.reset_floor_freshness();
         }
-        // A prune re-arms the post-prune fresh-ack round. In the relay topology
-        // a connected relay's round floor (or the incomplete-round hold cap)
-        // contributes to `confirmed_frame`, so a fold cached earlier in this
-        // poll (the gossip nudge in `poll_remote_clients`) was taken before the
-        // reset and must not be reused by the advance: it can exceed the
-        // re-armed hold. Outside the relay topology the fold never consumes
-        // round-floor state, so the cached fold stays valid.
-        if self.pessimistic_floor_relay_topology() {
-            self.confirmed_frame_cache = None;
-        }
+        // A prune invalidates any cached fold. When the relay topology was
+        // active before the prune, the fold may have consumed a relay's
+        // pre-prune `round_floor`; and the prune itself can drop the topology
+        // below the gate, so testing only the post-prune topology is not
+        // enough. Clearing outside the relay topology costs one recompute on a
+        // prune, which is strictly cheaper than risking an over-confirmed fold.
+        self.confirmed_frame_cache = None;
         true
     }
 
@@ -17446,7 +17443,7 @@ mod tests {
     }
 
     #[test]
-    fn drive_floor_round_drops_the_cached_fold_only_in_the_pruned_relay_topology() {
+    fn drive_floor_round_drops_the_cached_fold_on_every_prune() {
         // Relay topology: a prune re-arms the fresh-ack round, so a fold taken
         // before the prune must be discarded.
         let (mut session, addr_b, _addr_c, _addr_d) = build_abcd_live_session();
@@ -17468,8 +17465,10 @@ mod tests {
             "a prune in the relay topology must drop the cached fold"
         );
 
-        // Non-relay control: pruning down to one running remote cannot consume
-        // round-floor state, so the cached fold survives the prune.
+        // A prune that drops the session BELOW the relay topology can still
+        // leave a fold cached from when the topology was active. The
+        // conditional post-prune check would keep it; the prune's status and
+        // possible round-floor consumption invalidate it unconditionally.
         let (mut session, addr_b, addr_c, _addr_d) = build_abcd_live_session();
         session.drive_floor_round();
         session.confirmed_frame_cache = Some(Frame::new(50));
@@ -17486,10 +17485,9 @@ mod tests {
             !session.pessimistic_floor_relay_topology(),
             "one running remote is not the relay topology"
         );
-        assert_eq!(
-            session.confirmed_frame_cache,
-            Some(Frame::new(50)),
-            "outside the relay topology the fold is floor-independent"
+        assert!(
+            session.confirmed_frame_cache.is_none(),
+            "a topology-dropping prune must still drop the cached fold"
         );
     }
 
