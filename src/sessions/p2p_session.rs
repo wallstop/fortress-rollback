@@ -17531,6 +17531,66 @@ mod tests {
     }
 
     #[test]
+    fn drive_coordinated_drop_fails_closed_when_only_unresponsive_reports_are_missing() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let (mut session, _addr_b, _addr_c, addr_d) = build_abcd_live_session();
+        session
+            .begin_coordinated_drop(PlayerHandle::new(1))
+            .expect("begin a coordinated drop");
+        let active = session
+            .coordinated_drop
+            .active
+            .as_mut()
+            .expect("attempt opened");
+        let operation = active.operation;
+        let target = *active.targets.first().expect("one target");
+        active.cut = Some(Frame::new(10));
+        // Participant 2's report is present but covers nothing near the cut;
+        // participant 3's endpoint is down, so its missing report is
+        // unresponsive rather than merely in flight.
+        active.reports.insert(
+            2,
+            DropReport {
+                operation,
+                participant: 2,
+                stage: DropReportStage::Inventory,
+                exposed_confirmed: Frame::new(0),
+                cut: Frame::NULL,
+                cut_digest: 0,
+                receipts: vec![DropReceipt {
+                    target: target.handle,
+                    available_from: Frame::new(0),
+                    contiguous_through: Frame::new(0),
+                }],
+            },
+        );
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_d)
+            .expect("D endpoint")
+            .disconnect_remote();
+
+        session.drive_coordinated_drop();
+
+        assert_eq!(
+            session.current_state(),
+            SessionState::Synchronizing,
+            "a genuinely missing donor with only unresponsive reporters is terminal"
+        );
+        assert!(
+            observer
+                .violations()
+                .iter()
+                .any(|violation| violation.message.contains("failed closed: MissingHistory")),
+            "the missing-donor diagnosis must be reported"
+        );
+    }
+
+    #[test]
     fn retried_operation_uses_a_fresh_identity_that_stale_artifacts_cannot_alias() {
         let (mut session, _addr_b, _addr_c, _addr_d) = build_abcd_live_session();
         let target = PlayerHandle::new(1);
