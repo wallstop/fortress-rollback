@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794997030462,
+  "lastUpdate": 1794998861308,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "6050a99cf07296ca14f5a2318d66b0175c040925",
-          "message": "test: warm allocation control before measuring exact sensitivity (#379)\n\n## Description\n\nRCA for the `Build & Test (macos-latest)` failure on main (`ede612d`,\njob 129511543039):\n\n```\nthread 'warmed_hot_paths_obey_allocation_contracts' panicked at tests/allocation_contract.rs:447:\nassertion `left == right` failed: known-allocation control: Stats { allocations: 6, ..., bytes_allocated: 5052, ... }\n  left: 6\n right: 1\n```\n\n`stats_alloc` materializes its per-thread accounting lazily on first\nuse, so the first measured region on that macOS runner was charged six\none-time allocations (956 bytes beyond the known 4 KiB). The same code\npassed on the PR's macOS job minutes earlier, and the\nallocation-contract binary is independent of the simulation-harness\nchanges in that merge.\n\nThe fix charges that one-time setup to a discarded warm-up region before\nthe exact sensitivity control. The control remains exact (one\nallocation, 4,096 bytes, zero reallocations) on every platform, and all\nzero-allocation assertions keep their full teeth.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n- [x] `cargo fmt` and strict Clippy pass\n- [x] `cargo nextest run -E\n'test(warmed_hot_paths_obey_allocation_contracts)'` passes\n- [x] No production code changed; no changelog entry required\n\n## Testing\n\n- `warmed_hot_paths_obey_allocation_contracts` passes locally.\n- Strict Clippy (`--workspace --all-targets --features tokio,json`)\npasses with `-D warnings`.\n- macOS CI in this PR validates the runner-specific RCA.",
-          "timestamp": "2026-11-09T16:01:11-08:00",
-          "tree_id": "7c51e6c1d9fbb92bbf9713bfa6e9a5bf2fe2f311",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/6050a99cf07296ca14f5a2318d66b0175c040925"
-        },
-        "date": 1794269337912,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 39564,
-            "range": "± 72",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 23709,
-            "range": "± 803",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1091,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1242,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2765,
-            "range": "± 166",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2877,
             "range": "± 160",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b3bf11900471af546e6fea9f90d22f02687b23fe",
+          "message": "test: move the cut boundary into the tested arming helper (#476)\n\n## Summary\n\nThe #475 mutation run still reported two missed boundary mutants at the\n`current_frame() > commit.cut` call site: replacing `>` with `==` or\n`>=` either skipped the rollback or armed it at the untested equality\nboundary. This moves the `current <= cut` decision into\n`arm_certified_cut_resimulation` and asserts both sides of the boundary\ndirectly, leaving the caller with no untested branch.\n\n## Verification\n\n- `cargo tfull`: 3263 passed, 76 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json`: clean.\n- Local `cargo mutants --in-diff` against `main`: 0 missed (1 caught, 3\nunviable).\n\nRefs: #473 (#475 follow-up)",
+          "timestamp": "2026-11-18T10:36:18Z",
+          "tree_id": "5d2918a69da0e7cea4255aff5d2c1691d0157fc4",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/b3bf11900471af546e6fea9f90d22f02687b23fe"
+        },
+        "date": 1794998860335,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60815,
+            "range": "± 1710",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 32041,
+            "range": "± 299",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1674,
+            "range": "± 106",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 107",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3141,
+            "range": "± 183",
             "unit": "ns/iter"
           }
         ]
