@@ -4366,6 +4366,18 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                             if options.live_graceful_target {
                                 if !live_removal_targets.contains(target) {
                                     live_removal_targets.push(*target);
+                                    // Capture the live interval even when the
+                                    // request-step poll is the first thing that
+                                    // moves the target out of `Running`: a
+                                    // target that was already running when the
+                                    // removal was requested must not be treated
+                                    // as an initial-sync exception later.
+                                    if !dead[*target]
+                                        && peers[*target].session.current_state()
+                                            == SessionState::Running
+                                    {
+                                        live_removal_seen_running[*target] = true;
+                                    }
                                 }
                             } else {
                                 retire_peer_for_lifecycle(
@@ -4964,8 +4976,15 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         // and must surface as a regression rather than being silently retired.
         if !live_removal_targets.is_empty() {
             for target in &live_removal_targets {
-                if dead[*target] || peers[*target].session.current_state() == SessionState::Running
-                {
+                if dead[*target] {
+                    continue;
+                }
+                // Record the Running interval before the retirement guard can
+                // skip it. Without this the guard's `Running` early-continue
+                // makes the later write unreachable and every exit before a
+                // survivor certificate looks like an initial-sync exception.
+                if peers[*target].session.current_state() == SessionState::Running {
+                    live_removal_seen_running[*target] = true;
                     continue;
                 }
                 let handle = PlayerHandle::new(*target);
@@ -4975,10 +4994,6 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                         && slot.session.diagnostic_player_connected(handle) == Some(false)
                 });
                 if !certified_by_survivor {
-                    if peers[*target].session.current_state() == SessionState::Running {
-                        live_removal_seen_running[*target] = true;
-                        continue;
-                    }
                     if !live_removal_seen_running[*target] {
                         // Still synchronizing for the first time; the removal
                         // may simply be waiting for it to join.

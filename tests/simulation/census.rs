@@ -2642,11 +2642,11 @@ fn frozen_queue_survivors_resume_after_network_blip() {
 
 /// H-RING: directly measure the target-receipt stagger admitted by the N=4
 /// double-failure-relay topology. The low connected receipt pins the source at
-/// the ring boundary; the sampler observes the boundary on the first spread at
-/// or above it, which can be one frame past the exact edge when control-plane
-/// traffic shifts the schedule. The invariant under test is the explicit
-/// capacity fail-closed path: the queue must never evict the frozen value or
-/// silently confirm divergent state when the next input arrives.
+/// the ring boundary; the sampler retains the latest step whose spread is at
+/// least the running maximum, which can sit one frame past the exact edge when
+/// control-plane traffic shifts the schedule. The invariant under test is the
+/// explicit capacity fail-closed path: the queue must never evict the frozen
+/// value or silently confirm divergent state when the next input arrives.
 #[test]
 fn full_ring_receipt_stagger_fails_closed_at_retained_boundary() {
     const OBSERVER: usize = 0;
@@ -2722,8 +2722,7 @@ fn full_ring_receipt_stagger_fails_closed_at_retained_boundary() {
         } => {
             *peer < 4
                 && (violation.contains("Input queue capacity 128 exhausted")
-                    || violation.contains("Input sequence violation")
-                    || violation.contains("coordinated graceful drop"))
+                    || violation.contains("Input sequence violation"))
         },
         OracleFailure::EndProgress { peer, state, .. } => {
             *peer < 4 && *state == SessionState::Synchronizing

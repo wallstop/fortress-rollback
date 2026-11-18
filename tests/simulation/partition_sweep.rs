@@ -2584,12 +2584,13 @@ fn majority_component_continues_after_single_automatic_drop() {
 /// pins the lossy seed rows plus a Rough-loss concurrent-removal row.
 ///
 /// Concurrent admission is coordinator-serialized: a non-coordinator requester
-/// sends its prepare only to the deterministic coordinator, and other
-/// participants ignore prepares from any other source. Rejected/superseded
-/// operations stay in a bounded journal and answer retransmitted prepares and
-/// reports with another `Superseded` abort, so a participant that missed the
-/// one-shot abort under loss closes the losing attempt instead of timing out
-/// into `Synchronizing` (issue #477).
+/// sends its prepare only to the deterministic coordinator, other participants
+/// ignore admits from any other source (they may relay a prepare to the
+/// coordinator without admitting it), and rejected/superseded operations stay
+/// in a bounded journal and answer retransmitted prepares and reports with
+/// another `Superseded` abort, so a participant that missed the one-shot abort
+/// under loss still closes the losing attempt instead of timing out into
+/// `Synchronizing` (issue #477).
 ///
 /// The retry-side of #461 (fresh identity, report collection, and commit) is
 /// pinned by `retried_removal_after_supersede_collects_reports_and_commits`.

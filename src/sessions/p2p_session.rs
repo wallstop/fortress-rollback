@@ -281,11 +281,23 @@ struct RejectedDropOperation {
     targets: Vec<DropTarget>,
 }
 
+/// A prepare held until the active committed certificate clears.
+///
+/// The original admission source is retained with the prepare so re-admission
+/// after the deferred phase still validates the same authority. Recomputing the
+/// source as the coordinator at dequeue time would let an intermediate
+/// participant admit a prepare the coordinator never forwarded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DeferredDropPrepare {
+    prepare: DropPrepare,
+    source: Option<u16>,
+}
+
 #[derive(Debug)]
 struct CoordinatedDropState<A> {
     active: Option<CoordinatedDropAttempt<A>>,
     queued: std::collections::BTreeSet<PlayerHandle>,
-    deferred_prepares: VecDeque<DropPrepare>,
+    deferred_prepares: VecDeque<DeferredDropPrepare>,
     committed: BTreeMap<PlayerHandle, CoordinatedDropFence>,
     /// Canonical connected-era generation retained after a dropped slot
     /// successfully rejoins. Unlike spectator epochs, this advances exactly
@@ -1311,6 +1323,11 @@ impl<T: Config> P2PSession<T> {
         {
             return;
         }
+        // Trim before insertion so the deque never grows past its bound even
+        // transiently; a full deque must not allocate on `push_back`.
+        while self.coordinated_drop.rejected.len() >= self.num_players {
+            self.coordinated_drop.rejected.pop_front();
+        }
         let mut copied = Vec::new();
         if copied.try_reserve_exact(targets.len()).is_err() {
             report_violation!(
@@ -1327,9 +1344,6 @@ impl<T: Config> P2PSession<T> {
                 operation,
                 targets: copied,
             });
-        while self.coordinated_drop.rejected.len() > self.num_players {
-            self.coordinated_drop.rejected.pop_front();
-        }
     }
 
     fn coordinated_drop_broadcast(&mut self, message: DropControlMessage, targets: &[DropTarget]) {
@@ -1354,8 +1368,8 @@ impl<T: Config> P2PSession<T> {
 
     /// Sends a prepare only through its admission authority: the coordinator
     /// broadcasts to every participant, while any other requester sends solely
-    /// to the coordinator until it admits the operation. This makes the
-    /// coordinator the single ordering point for concurrent removals; without
+    /// to the coordinator until it admits the operation. Each operation's
+    /// coordinator is the single ordering point for that operation; without
     /// it, a requester's retransmissions can open a conflicting attempt on a
     /// participant before the coordinator has ordered it.
     fn coordinated_drop_send_prepare(
@@ -1369,6 +1383,14 @@ impl<T: Config> P2PSession<T> {
             self.coordinated_drop_broadcast(DropControlMessage::Prepare(prepare), targets);
             return;
         }
+        self.coordinated_drop_send_prepare_direct(prepare, coordinator);
+    }
+
+    /// Forwards one prepare to the deterministic coordinator without admitting
+    /// it locally. A participant that cannot admit an operation may still relay
+    /// a peer's request, so a lost direct link between the requester and the
+    /// coordinator does not stall the removal while a relay path exists.
+    fn coordinated_drop_send_prepare_direct(&mut self, prepare: DropPrepare, coordinator: u16) {
         let Some(PlayerType::Remote(coordinator_addr)) = self
             .player_reg
             .handles
@@ -1963,15 +1985,20 @@ impl<T: Config> P2PSession<T> {
         prepare: DropPrepare,
         source: Option<u16>,
     ) -> Result<(), DropAbortReason> {
+        // The rejection journal must be consulted before the terminal-history
+        // check: an operation that was superseded during Inventory lives in
+        // BOTH collections, and only the journal can answer a retransmitted
+        // prepare with another abort after the first one is lost. Closed
+        // operations without a journal entry still fall through as no-ops.
+        if self.coordinated_drop_reject_retransmission(prepare.operation) {
+            return Ok(());
+        }
         if self
             .coordinated_drop
             .closed
             .iter()
             .any(|closed| *closed == prepare.operation)
         {
-            return Ok(());
-        }
-        if self.coordinated_drop_reject_retransmission(prepare.operation) {
             return Ok(());
         }
         if self
@@ -2014,6 +2041,12 @@ impl<T: Config> P2PSession<T> {
         let coordinator = Self::coordinated_drop_coordinator(&prepare.participants)
             .ok_or(DropAbortReason::GenerationChanged)?;
         if local_participant != coordinator && source != Some(coordinator) {
+            // This participant cannot admit the operation, but it can relay it
+            // to the coordinator. Forwarding preserves reachability through a
+            // relay when the requester's direct link to the coordinator is
+            // down; admission stays restricted to the coordinator, so the
+            // relay cannot open a conflicting attempt.
+            self.coordinated_drop_send_prepare_direct(prepare, coordinator);
             return Ok(());
         }
 
@@ -2031,12 +2064,14 @@ impl<T: Config> P2PSession<T> {
                     .coordinated_drop
                     .deferred_prepares
                     .iter()
-                    .any(|pending| pending.operation == prepare.operation)
+                    .any(|pending| pending.prepare.operation == prepare.operation)
                 {
                     if self.coordinated_drop.deferred_prepares.len() >= self.num_players {
                         return Err(DropAbortReason::ResourceLimit);
                     }
-                    self.coordinated_drop.deferred_prepares.push_back(prepare);
+                    self.coordinated_drop
+                        .deferred_prepares
+                        .push_back(DeferredDropPrepare { prepare, source });
                 }
                 return Ok(());
             }
@@ -2909,8 +2944,11 @@ impl<T: Config> P2PSession<T> {
     /// The cut frame's certified value may replace a prediction the survivor
     /// already executed, so the frame is the rollback target. Every locally
     /// stored checksum at or above that frame describes the speculative
-    /// trajectory and is discarded; a later corrected re-simulation repopulates
-    /// it. `disconnect_frame` only moves EARLIER here, matching the existing
+    /// trajectory and is discarded. Checksum collection resumes on the existing
+    /// schedule after the rollback; an entry that was already reported before
+    /// the cut is not restored to the comparison history, while frames that
+    /// have not yet been sent can still be collected when they become eligible.
+    /// `disconnect_frame` only moves EARLIER here, matching the existing
     /// multi-drop fold.
     ///
     /// Returns `false` without touching state when `current <= cut`: the
@@ -2931,9 +2969,10 @@ impl<T: Config> P2PSession<T> {
 
     fn drive_coordinated_drop(&mut self) {
         while self.coordinated_drop.active.is_none() {
-            let Some(prepare) = self.coordinated_drop.deferred_prepares.pop_front() else {
+            let Some(deferred) = self.coordinated_drop.deferred_prepares.pop_front() else {
                 break;
             };
+            let prepare = deferred.prepare;
             if !self.coordinated_drop_prepare_matches_current_membership(&prepare) {
                 if let Some(target) = prepare.targets.first() {
                     let handle = PlayerHandle::new(usize::from(target.handle));
@@ -2948,8 +2987,7 @@ impl<T: Config> P2PSession<T> {
                 self.coordinated_drop_close_operation(prepare.operation);
                 continue;
             }
-            let source = Self::coordinated_drop_coordinator(&prepare.participants);
-            if let Err(reason) = self.coordinated_drop_accept_prepare(prepare, source) {
+            if let Err(reason) = self.coordinated_drop_accept_prepare(prepare, deferred.source) {
                 self.coordinated_drop_fail_closed(reason, true);
                 return;
             }
@@ -8252,13 +8290,16 @@ impl<T: Config> P2PSession<T> {
     ///
     /// # Concurrent removals
     ///
-    /// A session runs at most one coordinated certificate at a time, and only
-    /// the deterministic coordinator (the lowest participant) admits an
-    /// operation and chooses a cut. A non-coordinator requester sends its
-    /// `Prepare` solely to the coordinator until the coordinator broadcasts the
-    /// admitted operation; every other participant ignores a prepare that did
-    /// not come from that coordinator. The coordinator is therefore the single
-    /// ordering point for concurrent removals.
+    /// Each operation has its own coordinator: the lowest participant handle
+    /// among that operation's participants, which exclude its targets. A
+    /// non-coordinator requester sends its `Prepare` solely to the coordinator
+    /// until the coordinator broadcasts the admitted operation; every other
+    /// participant ignores a prepare that did not come from that coordinator.
+    /// A participant may relay a prepare to the coordinator without admitting
+    /// it, so a lost direct requester-to-coordinator link does not stall the
+    /// operation while a relay path exists. Operations that share a
+    /// coordinator are serialized there; operations with different
+    /// coordinators are ordered by operation identity at each participant.
     ///
     /// An incoming prepare that sorts **after** the coordinator's active
     /// attempt loses: the coordinator broadcasts a `Superseded` abort and keeps
@@ -8267,22 +8308,32 @@ impl<T: Config> P2PSession<T> {
     /// the matching abort, so the losing operation retries after the winner
     /// clears. An incoming prepare that sorts **before** an active `Inventory`
     /// attempt wins: the coordinator aborts the previous attempt with
-    /// `Superseded` and queues that attempt's target. A conflicting prepare or
-    /// abort after the active attempt has left `Inventory` instead fails the
-    /// affected session closed (`Synchronizing`) rather than continuing on a
-    /// conflicting history.
+    /// `Superseded` and queues that attempt's target. An incoming prepare that
+    /// sorts **before** an active `Ready` attempt instead fails the affected
+    /// session closed (`Synchronizing`) rather than continuing on a conflicting
+    /// history. While an attempt is `Committed`, an incoming prepare is held
+    /// and re-evaluated after the committed certificate clears.
     ///
     /// Rejected and superseded operations are retained in a bounded journal.
-    /// Any retransmitted prepare or report for one of them is answered with
-    /// another `Superseded` abort, so a participant that missed the first abort
-    /// under lossy delivery can still close the losing attempt before its
-    /// bounded `Inventory` timeout. Once the abort arrives, the removed target
-    /// keeps polling and authoring inputs until it observes its own commit, and
-    /// disjoint-target removals commit in deterministic order.
+    /// While an entry is retained, any retransmitted prepare or report for it
+    /// is answered with another `Superseded` abort, so a participant that
+    /// missed the first abort under lossy delivery can still close the losing
+    /// attempt before its bounded `Inventory` timeout. A losing-certificate
+    /// participant that misses even the repeated abort fails closed at that
+    /// timeout unless a lower-sorting winning prepare reaches it while the
+    /// losing attempt is still in `Inventory`; it then abandons the losing
+    /// attempt and accepts the winner. Once the abort arrives, the removed
+    /// target keeps polling and authoring inputs until it observes its own
+    /// commit. If every copy of the commit is lost, the target stops only when
+    /// its peer links time out; either way it cannot contribute to the
+    /// survivors' post-certificate history.
     ///
     /// Applications that need a strict local ordering can serialize their own
     /// calls: issue one removal, wait for its `PeerDropped`/`Disconnected`
-    /// events, then issue the next.
+    /// events, then issue the next. If [`Self::current_state`] returns
+    /// [`SessionState::Synchronizing`] and no `PeerDropped` event arrives, the
+    /// removal failed closed; report or rebuild the session instead of waiting
+    /// indefinitely.
     ///
     /// For automatic graceful drop on disconnect timeout, configure
     /// [`crate::SessionBuilder::with_disconnect_behavior`] with
@@ -12690,8 +12741,9 @@ impl<T: Config> P2PSession<T> {
                 .coordinated_drop
                 .deferred_prepares
                 .iter()
-                .any(|prepare| {
-                    prepare
+                .any(|deferred| {
+                    deferred
+                        .prepare
                         .targets
                         .iter()
                         .any(|target| usize::from(target.handle) == handle_idx)
@@ -16592,6 +16644,25 @@ mod tests {
         session
     }
 
+    /// Total datagrams of one kind queued by every remote endpoint. Tests use
+    /// the cumulative per-kind send counter so a journal response is
+    /// distinguishable from an acceptance no-op.
+    fn sent_message_count(
+        session: &P2PSession<TestConfig>,
+        kind: crate::metrics::MessageKind,
+    ) -> u64 {
+        session
+            .player_reg
+            .remotes
+            .values()
+            .map(|endpoint| endpoint.peer_metrics().messages_sent_by_kind.get(kind))
+            .sum()
+    }
+
+    fn drop_abort_sends(session: &P2PSession<TestConfig>) -> u64 {
+        sent_message_count(session, crate::metrics::MessageKind::DropAbort)
+    }
+
     #[test]
     fn coordinated_drop_quorum_is_strict_majority() {
         for (participants, expected) in [(1, 1), (2, 2), (3, 2), (4, 3), (5, 3), (6, 4)] {
@@ -18059,12 +18130,18 @@ mod tests {
             participants: vec![0, 1, 2, 3],
         };
 
+        let before = sent_message_count(&session, crate::metrics::MessageKind::DropPrepare);
         session
             .coordinated_drop_accept_prepare(prepare.clone(), Some(2))
             .expect("a non-coordinator prepare is ignored, not rejected");
         assert!(
             session.coordinated_drop.active.is_none(),
             "only the coordinator may admit a prepare"
+        );
+        assert_eq!(
+            sent_message_count(&session, crate::metrics::MessageKind::DropPrepare),
+            before.saturating_add(1),
+            "an intermediate participant must relay the prepare to the coordinator without admitting it"
         );
 
         session
@@ -18073,6 +18150,105 @@ mod tests {
         assert!(
             session.coordinated_drop.active.is_some(),
             "the coordinator's admitted prepare opens the attempt"
+        );
+    }
+
+    #[test]
+    fn superseded_closed_operation_answers_retransmission_with_fresh_abort() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(1))
+            .expect("op A opens");
+        let (first, first_targets) = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .map(|active| (active.operation, active.targets.clone()))
+            .expect("op A is active");
+        let supersede = [2_usize, 3]
+            .into_iter()
+            .find_map(|handle| {
+                let targets = vec![DropTarget {
+                    handle: u16::try_from(handle).ok()?,
+                    generation: 0,
+                }];
+                let operation = DropOperationId {
+                    coordinator: 0,
+                    coordinator_generation: 0,
+                    sequence: 1,
+                    target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
+                        &targets,
+                    ),
+                };
+                (P2PSession::<TestConfig>::coordinated_drop_operation_cmp(operation, first)
+                    == std::cmp::Ordering::Less)
+                    .then(|| DropPrepare {
+                        operation,
+                        targets,
+                        participants: (0_u16..5)
+                            .filter(|participant| usize::from(*participant) != handle)
+                            .collect(),
+                    })
+            })
+            .expect("one different-target prepare sorts before op A");
+        session
+            .coordinated_drop_accept_prepare(supersede, None)
+            .expect("op B supersedes op A during Inventory");
+
+        // Superseding during Inventory records op A in BOTH the rejection
+        // journal and the terminal-operation history. The journal must win so
+        // a lost first abort is replaced when op A is retransmitted.
+        assert!(
+            session.coordinated_drop.closed.contains(&first),
+            "the superseded operation is terminal"
+        );
+        assert!(
+            session
+                .coordinated_drop
+                .rejected
+                .iter()
+                .any(|rejected| rejected.operation == first),
+            "the superseded operation is journaled for abort retransmission"
+        );
+        let before = drop_abort_sends(&session);
+        session
+            .coordinated_drop_accept_prepare(
+                DropPrepare {
+                    operation: first,
+                    targets: first_targets,
+                    participants: vec![0, 2, 3, 4],
+                },
+                None,
+            )
+            .expect("the retransmitted superseded prepare is a no-op");
+        assert!(
+            drop_abort_sends(&session) > before,
+            "the journal must answer the retransmission with a fresh Superseded abort"
+        );
+
+        // A terminal operation with no journal entry stays a silent no-op.
+        let unknown = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 99,
+            target_set_digest: 0,
+        };
+        session.coordinated_drop_close_operation(unknown);
+        let before = drop_abort_sends(&session);
+        session
+            .coordinated_drop_accept_prepare(
+                DropPrepare {
+                    operation: unknown,
+                    targets: Vec::new(),
+                    participants: Vec::new(),
+                },
+                None,
+            )
+            .expect("a closed non-journaled prepare is a no-op");
+        assert_eq!(
+            drop_abort_sends(&session),
+            before,
+            "a closed operation without a journal entry must not emit an abort"
         );
     }
 
@@ -18141,10 +18317,19 @@ mod tests {
         );
 
         // A repeated prepare and a retransmitted report for the losing
-        // operation are answered from the journal without reopening it.
+        // operation are answered from the journal without reopening it. Both
+        // responses must send a fresh abort: if the first abort was lost, the
+        // journal is the only recovery path before the losing attempt's
+        // Inventory timeout.
+        let before_prepare = drop_abort_sends(&session);
         session
             .coordinated_drop_accept_prepare(loser.clone(), None)
             .expect("the repeated prepare is rejected");
+        assert!(
+            drop_abort_sends(&session) > before_prepare,
+            "a retransmitted prepare must be answered with another Superseded abort"
+        );
+        let before_report = drop_abort_sends(&session);
         session
             .coordinated_drop_accept_report(DropReport {
                 operation: loser.operation,
@@ -18156,6 +18341,10 @@ mod tests {
                 receipts: Vec::new(),
             })
             .expect("the losing report is rejected");
+        assert!(
+            drop_abort_sends(&session) > before_report,
+            "a retransmitted report must be answered with another Superseded abort"
+        );
         assert_eq!(session.coordinated_drop.rejected.len(), 1);
         assert_eq!(
             session
@@ -18428,10 +18617,13 @@ mod tests {
         session
             .coordinated_drop
             .deferred_prepares
-            .push_back(DropPrepare {
-                operation,
-                targets: Vec::new(),
-                participants: Vec::new(),
+            .push_back(DeferredDropPrepare {
+                prepare: DropPrepare {
+                    operation,
+                    targets: Vec::new(),
+                    participants: Vec::new(),
+                },
+                source: None,
             });
         assert!(
             session.coordinated_drop_may_change_confirmation(),
