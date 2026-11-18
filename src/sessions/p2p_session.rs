@@ -17670,6 +17670,165 @@ mod tests {
     }
 
     #[test]
+    fn retried_removal_after_supersede_collects_reports_and_commits() {
+        let (mut session, _addr_b, _addr_c, _addr_d) = build_abcd_live_session();
+        let first_target = PlayerHandle::new(1);
+        session
+            .begin_coordinated_drop(first_target)
+            .expect("begin op A");
+        let (first, first_targets) = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .map(|active| (active.operation, active.targets.clone()))
+            .expect("op A is active");
+
+        // A concurrent different-target removal (op B) sorts before op A and
+        // supersedes it, exactly as the real accept path does.
+        let supersede = [2_usize, 3]
+            .into_iter()
+            .find_map(|handle| {
+                let targets = vec![DropTarget {
+                    handle: u16::try_from(handle).ok()?,
+                    generation: 0,
+                }];
+                let participants = (0_u16..4)
+                    .filter(|participant| usize::from(*participant) != handle)
+                    .collect();
+                let operation = DropOperationId {
+                    coordinator: 0,
+                    coordinator_generation: 0,
+                    sequence: 1,
+                    target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
+                        &targets,
+                    ),
+                };
+                ((
+                    operation.target_set_digest,
+                    operation.coordinator,
+                    operation.coordinator_generation,
+                    operation.sequence,
+                ) < (
+                    first.target_set_digest,
+                    first.coordinator,
+                    first.coordinator_generation,
+                    first.sequence,
+                ))
+                    .then_some(DropPrepare {
+                        operation,
+                        targets,
+                        participants,
+                    })
+            })
+            .expect("one different-target prepare must sort before op A");
+        session
+            .coordinated_drop_accept_prepare(supersede)
+            .expect("op B supersedes op A");
+        let superseding = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .map(|active| active.operation)
+            .expect("op B is active");
+        assert_ne!(superseding, first);
+
+        // The application retries A while B is still active. B is then itself
+        // superseded, and the queued retry starts with a fresh identity.
+        session
+            .begin_coordinated_drop(first_target)
+            .expect("queue retry A");
+        session.coordinated_drop_accept_abort(DropAbort {
+            operation: superseding,
+            reason: DropAbortReason::Superseded,
+        });
+        session.drive_coordinated_drop();
+        let retry_active = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("retry A is active");
+        assert_eq!(retry_active.targets, first_targets);
+        let retry = retry_active.operation;
+        assert_ne!(retry, first, "the retry must use a fresh identity");
+        let participants = retry_active.participants.clone();
+        let receipts: Vec<DropReceipt> = retry_active
+            .targets
+            .iter()
+            .map(|target| DropReceipt {
+                target: target.handle,
+                available_from: Frame::new(0),
+                contiguous_through: Frame::new(0),
+            })
+            .collect();
+
+        // Collect the other participants' inventory certificates. The retry
+        // must not be swallowed by the closed identity's history.
+        for participant in participants.iter().copied().filter(|peer| *peer != 0) {
+            session
+                .coordinated_drop_accept_report(DropReport {
+                    operation: retry,
+                    participant,
+                    stage: DropReportStage::Inventory,
+                    exposed_confirmed: Frame::new(0),
+                    cut: Frame::NULL,
+                    cut_digest: 0,
+                    receipts: receipts.clone(),
+                })
+                .expect("retry inventory is accepted");
+        }
+        session.drive_coordinated_drop();
+        let (cut, cut_digest) = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .and_then(|active| Some((active.cut?, active.cut_digest?)))
+            .expect("the coordinator certifies a cut for the retry");
+
+        for participant in participants.iter().copied().filter(|peer| *peer != 0) {
+            session
+                .coordinated_drop_accept_report(DropReport {
+                    operation: retry,
+                    participant,
+                    stage: DropReportStage::Ready,
+                    exposed_confirmed: Frame::NULL,
+                    cut,
+                    cut_digest,
+                    receipts: Vec::new(),
+                })
+                .expect("retry ready is accepted");
+        }
+        session.drive_coordinated_drop();
+        for participant in participants.iter().copied().filter(|peer| *peer != 0) {
+            session
+                .coordinated_drop_accept_report(DropReport {
+                    operation: retry,
+                    participant,
+                    stage: DropReportStage::Committed,
+                    exposed_confirmed: Frame::NULL,
+                    cut,
+                    cut_digest,
+                    receipts: Vec::new(),
+                })
+                .expect("retry commit acknowledgement is accepted");
+        }
+        session.drive_coordinated_drop();
+
+        assert!(
+            session.coordinated_drop.active.is_none(),
+            "the retried removal must commit and clear its attempt"
+        );
+        assert!(
+            session.local_connect_status[first_target.as_usize()].disconnected,
+            "the retried removal must fence the original target"
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Running,
+            "a committed retry keeps the survivor session running"
+        );
+    }
+
+    #[test]
     fn coordinated_drop_confirmation_invalidation_covers_every_live_state() {
         let mut session = create_two_player_session();
         let handle = PlayerHandle::new(1);

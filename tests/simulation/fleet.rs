@@ -115,9 +115,21 @@ fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Sche
 
     // D14 lossy retirement under background traffic. Graceful removals now
     // run as themselves (the backfill reorder and removed-target tail fixes
-    // below); crash/host-kill retirement remains quarantined until its own
-    // red class (no majority in a 2-peer mesh after a kill) is resolved.
-    if noise != BackgroundNoise::Clean {
+    // below). Crash retirement needs two conditions to stay healthy:
+    //
+    // - N >= 3: one killed peer leaves a strict majority alive, so the
+    //   surviving component can certify the drop and keep confirming.
+    // - The production disconnect timeout: crashed peers never resume, so the
+    //   survivors must observe the bounded timeout and retire them (see
+    //   `nightly_run_options`). Inflating that timeout for transport rows
+    //   starves the automatic drop and freezes the mesh.
+    //
+    // At N == 2 the sole survivor cannot form a strict majority (1/2), so the
+    // designed outcome is fail-closed at the shared cut. Mass-generating that
+    // terminal shape has no liveness oracle, so rewrite it to a stall here and
+    // pin the fail-closed outcome explicitly in
+    // `two_peer_crash_retirement_fails_closed_without_fork`.
+    if noise != BackgroundNoise::Clean && n_players == 2 {
         for (_, event) in &mut schedule.events {
             let retired_peer = match event {
                 ScheduleEvent::PeerKill { peer } => Some(*peer),
@@ -189,6 +201,18 @@ fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Sche
 
 fn nightly_run_options(schedule: &Schedule) -> RunOptions {
     if schedule.config.noise == BackgroundNoise::Clean {
+        return RunOptions::default();
+    }
+    // A crash is explicit and permanent: survivors must reach the production
+    // disconnect timeout so the automatic drop can retire the dead peer.
+    // Stretching this timeout past the modeled run freezes every survivor at
+    // the prediction limit instead.
+    if schedule.events.iter().any(|(_, event)| {
+        matches!(
+            event,
+            ScheduleEvent::PeerKill { .. } | ScheduleEvent::SpectatorHostKill { .. }
+        )
+    }) {
         return RunOptions::default();
     }
     let run_duration = Duration::from_millis(
@@ -498,29 +522,136 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
     }
 }
 
+/// Lossy crash retirement is a first-class green-tier class whenever a strict
+/// majority survives the kill (`n >= 3`). Both crash shapes must keep their
+/// real `PeerKill`/`SpectatorHostKill` event, retire the dead peer through the
+/// production disconnect timeout, keep one confirmed history, and recover
+/// after the heal.
 #[test]
-fn non_clean_nightly_lifecycle_quarantines_only_crash_retirement() {
+fn lossy_crash_retirement_rows_keep_one_history_and_recover() {
+    for (seed, noise) in [
+        (2_u64, BackgroundNoise::Rough),
+        (19, BackgroundNoise::ReliableFifo),
+        (34, BackgroundNoise::Rough),
+        (47, BackgroundNoise::Swarm),
+    ] {
+        let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
+        assert!(n_players >= 3, "these rows require a survivor majority");
+        let mut schedule = nightly_schedule(seed, n_players, noise);
+        assert!(
+            schedule.events.iter().any(|(_, event)| matches!(
+                event,
+                ScheduleEvent::PeerKill { .. } | ScheduleEvent::SpectatorHostKill { .. }
+            )),
+            "seed {seed} must keep its crash event instead of a stall rewrite"
+        );
+        // The nightly row plants its lifecycle event before step 100. Shorten
+        // the 5,000-step fleet row so the debug-tier regression stays inside
+        // the per-test timeout while preserving the crash, the production
+        // timeout, and a full post-heal recovery window.
+        schedule.config.steps = 1_000;
+        schedule.heal_at = 750;
+        schedule.events.retain(|(step, _)| *step < 750);
+        schedule.events.push((750, ScheduleEvent::HealAll));
+        let options = nightly_run_options(&schedule);
+        assert_eq!(
+            options,
+            RunOptions::default(),
+            "seed {seed} must use the production disconnect timeout so the crash is retired"
+        );
+        let report = run(&schedule, &options);
+        report.expect_pass(&schedule);
+    }
+}
+
+/// The only crash shape that remains impossible to mass-generate is `n == 2`:
+/// after one crash the sole survivor has no strict majority (1/2), so the
+/// designed outcome is a fail-closed halt at the shared cut. The rewrite is
+/// narrowed to that mesh size; every larger nightly mesh keeps its real crash.
+#[test]
+fn non_clean_nightly_quarantines_only_two_peer_crash_retirement() {
     for noise in [
         BackgroundNoise::Mild,
         BackgroundNoise::Rough,
         BackgroundNoise::ReliableFifo,
         BackgroundNoise::Swarm,
     ] {
-        for seed in [2, 3, 4] {
-            let schedule = nightly_schedule(seed, 5, noise);
+        for seed in [2, 4, 7, 9] {
+            let two_peer = nightly_schedule(seed, 2, noise);
             assert!(
-                !schedule.events.iter().any(|(_, event)| matches!(
+                !two_peer.events.iter().any(|(_, event)| matches!(
                     event,
                     ScheduleEvent::PeerKill { .. } | ScheduleEvent::SpectatorHostKill { .. }
                 )),
-                "non-clean crash retirement escaped quarantine: noise={noise:?} seed={seed}"
+                "two-peer crash retirement must stay rewritten: noise={noise:?} seed={seed}"
             );
             assert!(
-                schedule.effective_lifecycle_event_count().unwrap_or(0) > 0,
+                two_peer.effective_lifecycle_event_count().unwrap_or(0) > 0,
                 "retirement rewrite erased lifecycle coverage: noise={noise:?} seed={seed}"
+            );
+
+            let majority = nightly_schedule(seed, 5, noise);
+            assert!(
+                majority.events.iter().any(|(_, event)| matches!(
+                    event,
+                    ScheduleEvent::PeerKill { .. } | ScheduleEvent::SpectatorHostKill { .. }
+                )),
+                "a survivor majority must keep its crash event: noise={noise:?} seed={seed}"
             );
         }
     }
+}
+
+/// CAP pin for the excluded shape: a two-peer crash leaves no surviving strict
+/// majority, so the survivor must halt in `Synchronizing` at the shared cut.
+/// It must never fork or expose a desync; those would be silent second
+/// histories rather than a deliberate fail-closed partition response.
+#[test]
+fn two_peer_crash_retirement_fails_closed_without_fork() {
+    let config = SimConfig {
+        steps: 1_000,
+        noise: BackgroundNoise::Rough,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        scenario_mix: ScenarioMix::Lifecycle,
+        ..SimConfig::smoke(2)
+    };
+    let schedule = generate(2, config);
+    assert!(
+        schedule
+            .events
+            .iter()
+            .any(|(_, event)| matches!(event, ScheduleEvent::PeerKill { peer: 0 })),
+        "the pinned row must exercise the crash: {:?}",
+        schedule.events
+    );
+    let report = run(&schedule, &RunOptions::default());
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. } | OracleFailure::StateDivergence { .. }
+        )),
+        "a fail-closed two-peer crash must keep one confirmed history: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        report.verdict.failures.iter().all(|failure| matches!(
+            failure,
+            OracleFailure::EndProgress { peer: 1, .. }
+                | OracleFailure::PostHealLiveness { peer: 1, .. }
+        )),
+        "only the surviving peer's terminal halt may fail: {:?}",
+        report.verdict.failures
+    );
+    let final_states = report
+        .trace_tail
+        .last()
+        .map(|snapshot| snapshot.session_states.clone())
+        .expect("the run records a trace tail");
+    assert_eq!(
+        final_states,
+        vec![TraceSessionState::Running, TraceSessionState::Synchronizing],
+        "the survivor must halt in Synchronizing while the crashed slot stays out"
+    );
 }
 
 #[test]
