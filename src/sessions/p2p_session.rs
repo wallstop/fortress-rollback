@@ -1606,10 +1606,13 @@ impl<T: Config> P2PSession<T> {
                     kind: InternalErrorKind::Custom("coordinated drop participant set is empty"),
                 })?;
         // Every survivor independently derives the same logical sequencer and
-        // generation-local sequence. Therefore simultaneous user requests for
-        // the same endpoint coalesce into one operation instead of racing two
-        // certificates; a sole non-sequencer caller may still submit it.
-        let sequence = targets
+        // generation-local sequence for a FIRST attempt. Therefore simultaneous
+        // user requests for the same endpoint coalesce into one operation
+        // instead of racing two certificates; a sole non-sequencer caller may
+        // still submit it. A retry deliberately advances past this session's
+        // closed history below, so a retry racing a concurrent first attempt is
+        // ordered by the operation comparator.
+        let mut sequence = targets
             .iter()
             .map(|target| u32::from(target.generation))
             .max()
@@ -1618,11 +1621,36 @@ impl<T: Config> P2PSession<T> {
         let coordinator_generation = self
             .local_coordinated_drop_generation(PlayerHandle::new(usize::from(coordinator)))
             .unwrap_or(0);
-        let operation = DropOperationId {
-            coordinator,
-            coordinator_generation,
-            sequence,
-            target_set_digest: Self::coordinated_drop_target_digest(&targets),
+        let target_set_digest = Self::coordinated_drop_target_digest(&targets);
+        // A retry of the same target after an abort/supersede re-derives the
+        // generation-local sequence, i.e. the identity of the CLOSED attempt.
+        // Peers ignore a closed identity's `Prepare`, and a stale artifact from
+        // the old attempt (a `Superseded` abort, an old inventory report) would
+        // otherwise be indistinguishable from the retry's. Advance the
+        // coordinator-local sequence past every recently closed identity so the
+        // retry opens a genuinely fresh attempt.
+        let operation = loop {
+            let candidate = DropOperationId {
+                coordinator,
+                coordinator_generation,
+                sequence,
+                target_set_digest,
+            };
+            if !self
+                .coordinated_drop
+                .closed
+                .iter()
+                .any(|closed| *closed == candidate)
+            {
+                break candidate;
+            }
+            sequence = sequence
+                .checked_add(1)
+                .ok_or(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::Custom(
+                        "coordinated drop operation sequence exhausted",
+                    ),
+                })?;
         };
         let quorum = Self::coordinated_drop_quorum(participants.len());
         let held_at = self.confirmed_frame();
@@ -3412,6 +3440,17 @@ impl<T: Config> P2PSession<T> {
             self.confirmed_frame_cache = None;
         }
 
+        // A prune can land AFTER `drive_floor_round` sampled the endpoints: an
+        // in-poll silence-timeout `Event::Disconnected`, or the propagated
+        // disconnect fold just above. Re-detect so a same-advance prune resets
+        // every relay's floor-round freshness before the confirmation fold
+        // below can consume a pre-prune `round_floor`. The call is
+        // unconditional: a prune that drops the session out of the relay
+        // topology still mutated the fold's terms, so a post-prune topology
+        // check could miss it. The scan is O(remotes) and only resets state
+        // when a transition is actually latched.
+        self.reset_floor_round_on_prune();
+
         // session is not running and synchronized
         if self.state != SessionState::Running {
             trace!("Session not synchronized; returning error");
@@ -3528,6 +3567,13 @@ impl<T: Config> P2PSession<T> {
             .take()
             .unwrap_or_else(|| self.confirmed_frame());
 
+        // send confirmed inputs to spectators BEFORE any rollback mutates the
+        // sync layer. The flush consumes only already-confirmed inputs, so it
+        // can run first, and ordering it first means a spectator-flush failure
+        // can never discard the rollback requests built below (the
+        // already-applied correction the application still has to execute).
+        self.send_confirmed_inputs_to_spectators(confirmed_frame)?;
+
         // check game consistency and roll back, if necessary
         if !lockstep {
             // the disconnect frame indicates if a rollback is necessary due to a previously
@@ -3567,8 +3613,8 @@ impl<T: Config> P2PSession<T> {
          *  SEND OFF AND THROW AWAY INPUTS BEFORE THE CONFIRMED FRAME
          */
 
-        // send confirmed inputs to spectators before throwing them away
-        self.send_confirmed_inputs_to_spectators(confirmed_frame)?;
+        // The spectator flush ran before the rollback section above (so a
+        // flush failure cannot discard the rollback requests).
 
         // record confirmed inputs to the replay recorder before they are discarded
         self.record_confirmed_inputs(confirmed_frame);
@@ -5255,6 +5301,13 @@ impl<T: Config> P2PSession<T> {
         // cannot create mispredictions (prediction episodes only cover
         // requested frames), so this repairs strictly pre-pause speculation.
         let confirmed_frame = self.confirmed_frame();
+
+        // Spectator/replay flush before the rollback section (no input discard:
+        // `set_last_confirmed_frame` is deliberately NOT called while paused, so
+        // the rollback window and the snapshot's source data stay intact). A
+        // flush failure must not discard an already-built rollback batch.
+        self.send_confirmed_inputs_to_spectators(confirmed_frame)?;
+
         let first_incorrect = self
             .sync_layer
             .check_simulation_consistency(self.disconnect_frame);
@@ -5275,10 +5328,7 @@ impl<T: Config> P2PSession<T> {
             self.disconnect_frame = Frame::NULL;
         }
 
-        // Spectator/replay flush (no input discard: `set_last_confirmed_frame`
-        // is deliberately NOT called while paused, so the rollback window and
-        // the snapshot's source data stay intact).
-        self.send_confirmed_inputs_to_spectators(confirmed_frame)?;
+        // record confirmed inputs to the replay recorder (no input discard while paused)
         self.record_confirmed_inputs(confirmed_frame);
 
         Ok(requests)
@@ -11156,9 +11206,43 @@ impl<T: Config> P2PSession<T> {
         }
 
         while self.next_spectator_frame <= confirmed_frame {
-            let inputs = self
+            let frame = self.next_spectator_frame;
+            let inputs = match self
                 .sync_layer
-                .confirmed_inputs(self.next_spectator_frame, &self.local_connect_status)?;
+                .confirmed_inputs(frame, &self.local_connect_status)
+            {
+                Ok(inputs) => inputs,
+                // A frame this layer can no longer serve — a reopened slot's
+                // live-era ring below its reactivation floor, or a ring entry
+                // evicted while the cursor lagged — is permanently unservable:
+                // the canonical values are gone from this host, so retrying can
+                // never succeed and would wedge every later advance (and drop
+                // the rollback batch that advance already built). Skip the owed
+                // gap with a diagnostic and resume at the oldest servable frame.
+                Err(FortressError::InvalidRequestStructured {
+                    kind: InvalidRequestKind::NoConfirmedInput { .. },
+                }) => {
+                    let servable = self
+                        .sync_layer
+                        .oldest_servable_input_frame(&self.local_connect_status);
+                    let next = if servable.is_null() {
+                        frame.try_add(1)?
+                    } else {
+                        std::cmp::max(frame.try_add(1)?, servable)
+                    };
+                    report_violation!(
+                        ViolationSeverity::Error,
+                        ViolationKind::FrameSync,
+                        "spectator stream cannot serve confirmed frame {} (evicted or pre-reactivation history); skipping owed frames {}..={}",
+                        frame,
+                        frame,
+                        next.saturating_sub(1)
+                    );
+                    self.next_spectator_frame = next;
+                    continue;
+                },
+                Err(error) => return Err(error),
+            };
 
             // Validate input count matches num_players - this should always hold due to construction
             // but we recover gracefully rather than panic if somehow violated
@@ -11507,6 +11591,56 @@ impl<T: Config> P2PSession<T> {
     /// window is a sound strict subset of the model-verified unconditional
     /// `AsyncSoundTarget`. Reserved hot-join endpoints (a slot awaiting its
     /// joiner) are neither a prune nor a relay, so they are excluded from both.
+    fn pessimistic_floor_relay_topology(&self) -> bool {
+        let mut observer_pruned_a_peer = false;
+        let mut running_remote_count = 0_usize;
+        for endpoint in self.player_reg.remotes.values() {
+            #[cfg(feature = "hot-join")]
+            if self.hot_join.endpoint_is_reserved(endpoint) {
+                continue;
+            }
+            if endpoint.is_running() {
+                running_remote_count += 1;
+            } else {
+                observer_pruned_a_peer = true;
+            }
+        }
+        observer_pruned_a_peer && running_remote_count >= 2
+    }
+
+    /// Detects running→pruned endpoint transitions and, when any occurred,
+    /// resets EVERY endpoint's floor freshness (the spec's whole-row `ackFresh`
+    /// reset) so the observer re-completes a post-prune round before trusting
+    /// any relay's floor again.
+    ///
+    /// Returns `true` when at least one endpoint pruned. Callers must run this
+    /// after every pass that can prune an endpoint (`drive_floor_round` before
+    /// the endpoint poll, `advance_frame` again after the
+    /// propagated-disconnect fold) so a prune applied later in the same
+    /// advance cannot leave a stale fresh generation behind.
+    fn reset_floor_round_on_prune(&mut self) -> bool {
+        let mut pruned_any = false;
+        for endpoint in self.player_reg.remotes.values_mut() {
+            if endpoint.detect_prune_transition() {
+                pruned_any = true;
+            }
+        }
+        if !pruned_any {
+            return false;
+        }
+        for endpoint in self.player_reg.remotes.values_mut() {
+            endpoint.reset_floor_freshness();
+        }
+        // A prune invalidates any cached fold. When the relay topology was
+        // active before the prune, the fold may have consumed a relay's
+        // pre-prune `round_floor`; and the prune itself can drop the topology
+        // below the gate, so testing only the post-prune topology is not
+        // enough. Clearing outside the relay topology costs one recompute on a
+        // prune, which is strictly cheaper than risking an over-confirmed fold.
+        self.confirmed_frame_cache = None;
+        true
+    }
+
     /// Drives the floor-round protocol every
     /// [`poll_remote_clients`](Self::poll_remote_clients) (the
     /// double-failure-relay connected-relay reorder fix; verified-sound mode
@@ -11532,32 +11666,8 @@ impl<T: Config> P2PSession<T> {
     ///    stopped once a reply lands) so the cached floor tracks the relay's
     ///    advancing pessimistic floor for live slots.
     fn drive_floor_round(&mut self) {
-        // 1. Prune detection: a running→pruned transition of ANY remote resets
-        //    EVERY endpoint's floor freshness (the spec's whole-row `ackFresh`
-        //    reset), so the observer re-completes a post-prune round before
-        //    trusting any relay's floor again.
-        let mut pruned_any = false;
-        for endpoint in self.player_reg.remotes.values_mut() {
-            if endpoint.detect_prune_transition() {
-                pruned_any = true;
-            }
-        }
-        if pruned_any {
-            for endpoint in self.player_reg.remotes.values_mut() {
-                endpoint.reset_floor_freshness();
-            }
-            // A prune re-arms the post-prune fresh-ack round. In the relay
-            // topology a connected relay's round floor (or the incomplete-round
-            // hold cap) contributes to `confirmed_frame`, so a fold cached
-            // earlier in this poll (the gossip nudge in `poll_remote_clients`)
-            // was taken before the reset and must not be reused by the advance:
-            // it can exceed the re-armed hold. Outside the relay topology the
-            // fold never consumes round-floor state, so the cached fold stays
-            // valid.
-            if self.pessimistic_floor_relay_topology() {
-                self.confirmed_frame_cache = None;
-            }
-        }
+        // 1. Prune detection (see `reset_floor_round_on_prune`).
+        self.reset_floor_round_on_prune();
 
         // 2. Answer pending FloorRequests with our current pessimistic floors.
         if self
@@ -11589,23 +11699,6 @@ impl<T: Config> P2PSession<T> {
             let request_needed = relay_topology && endpoint.is_running() && !reserved;
             endpoint.set_floor_request_needed(request_needed);
         }
-    }
-
-    fn pessimistic_floor_relay_topology(&self) -> bool {
-        let mut observer_pruned_a_peer = false;
-        let mut running_remote_count = 0_usize;
-        for endpoint in self.player_reg.remotes.values() {
-            #[cfg(feature = "hot-join")]
-            if self.hot_join.endpoint_is_reserved(endpoint) {
-                continue;
-            }
-            if endpoint.is_running() {
-                running_remote_count += 1;
-            } else {
-                observer_pruned_a_peer = true;
-            }
-        }
-        observer_pruned_a_peer && running_remote_count >= 2
     }
 
     /// Returns `true` when slot `handle` must take the **post-prune fresh-ack
@@ -15403,6 +15496,62 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn spectator_flush_skips_unservable_reactivation_gap_instead_of_wedging() {
+        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
+        let _scope = crate::telemetry::push_violation_observer(
+            Arc::clone(&observer) as Arc<dyn ViolationObserver>
+        );
+        let mut session: P2PSession<TestConfig> = SessionBuilder::new()
+            .with_num_players(2)
+            .expect("num_players")
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(9124)), PlayerHandle::new(1))
+            .expect("remote player")
+            .add_player(PlayerType::Spectator(test_addr(9125)), PlayerHandle::new(2))
+            .expect("spectator")
+            .start_p2p_session(DummySocket)
+            .expect("session");
+        for frame in 0..=6 {
+            let handle = PlayerHandle::new(0);
+            let input = PlayerInput::new(Frame::new(frame), 1_u8);
+            session.sync_layer.add_local_input(handle, input);
+            session.sync_layer.add_remote_input(
+                PlayerHandle::new(1),
+                PlayerInput::new(Frame::new(frame), 2_u8),
+            );
+            if frame < 6 {
+                session.sync_layer.advance_frame();
+            }
+        }
+        // Slot 1 was hot-join reopened at frame 6 after freezing at frame 2:
+        // frames <= 2 belonged to its live era and are gone, frames (2, 6) are
+        // served from the captured frozen value.
+        session
+            .sync_layer
+            .set_reactivation_floor(PlayerHandle::new(1), Frame::new(6), Frame::new(2))
+            .expect("arm the reactivation floor");
+        session.next_spectator_frame = Frame::new(0);
+
+        session
+            .send_confirmed_inputs_to_spectators(Frame::new(5))
+            .expect("an unservable stale cursor must skip instead of erroring the advance");
+
+        assert_eq!(
+            session.next_spectator_frame,
+            Frame::new(6),
+            "the cursor skips the discarded live-era frames and drains the frozen window"
+        );
+        assert!(
+            observer.violations().iter().any(|violation| violation
+                .message
+                .contains("spectator stream cannot serve confirmed frame 0")),
+            "the skipped spectator frames must be reported"
+        );
+    }
+
     fn test_addr(port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
     }
@@ -17203,7 +17352,112 @@ mod tests {
     }
 
     #[test]
-    fn drive_floor_round_drops_the_cached_fold_only_in_the_pruned_relay_topology() {
+    fn same_advance_propagated_prune_resets_the_floor_round_before_the_fold() {
+        let (mut session, addr_b, addr_c, addr_d) = build_abcd_live_session();
+        let b = PlayerHandle::new(1);
+        let d = PlayerHandle::new(3);
+        session.disconnect_behavior = DisconnectBehavior::ContinueWithout;
+        // Lockstep (zero prediction) skips the rollback section, keeping this
+        // regression focused on the confirmation fold (the disconnect still
+        // prunes B through `update_player_disconnects`).
+        session.max_prediction = 0;
+
+        // Every endpoint is running and has a completed (fresh) round when the
+        // advance starts.
+        session.drive_floor_round();
+        for frame in 0..4 {
+            session.sync_layer.add_local_input(
+                PlayerHandle::new(0),
+                PlayerInput::new(Frame::new(frame), 1_u8),
+            );
+            assert!(session.sync_layer.add_remote_input(
+                PlayerHandle::new(1),
+                PlayerInput::new(Frame::new(frame), 2_u8),
+            ));
+            session.sync_layer.advance_frame();
+        }
+        // Frame 4 is the current frame; seed it too so the freeze re-roll at
+        // the disconnect frame matches the already-received value.
+        session
+            .sync_layer
+            .add_local_input(PlayerHandle::new(0), PlayerInput::new(Frame::new(4), 1_u8));
+        assert!(session
+            .sync_layer
+            .add_remote_input(PlayerHandle::new(1), PlayerInput::new(Frame::new(4), 2_u8),));
+        session
+            .sync_layer
+            .set_last_confirmed_frame(Frame::new(2), SaveMode::EveryFrame);
+        let confirmed_before = session.sync_layer.last_confirmed_frame();
+
+        let status_frame = Frame::new(4);
+        let round_floor = Frame::new(10);
+        for handle in [PlayerHandle::new(0), b, PlayerHandle::new(2), d] {
+            session.local_connect_status[handle.as_usize()] = ConnectionStatus {
+                disconnected: false,
+                last_frame: status_frame,
+                epoch: 0,
+            };
+        }
+        for addr in [addr_c, addr_d] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&addr)
+                .expect("running relay endpoint");
+            for handle in [PlayerHandle::new(0), b, PlayerHandle::new(2), d] {
+                endpoint.set_peer_connect_status_for_tests(
+                    handle,
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: status_frame,
+                        epoch: 0,
+                    },
+                );
+                endpoint.set_round_floor_for_tests(handle, round_floor);
+            }
+        }
+
+        // C's gossip reports B dropped at the current frame (so the propagated
+        // fold prunes B without arming a rollback). `update_player_disconnects`
+        // applies it inside this advance, AFTER the poll's `drive_floor_round`
+        // sampled every endpoint as running and post-prune fresh.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&addr_c)
+            .expect("C endpoint")
+            .set_peer_connect_status_for_tests(
+                b,
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: status_frame,
+                    epoch: 0,
+                },
+            );
+
+        session
+            .add_local_input(PlayerHandle::new(0), 1_u8)
+            .expect("queue local input");
+        session.advance_frame().expect("advance succeeds");
+
+        assert!(
+            session
+                .player_reg
+                .remotes
+                .get(&addr_b)
+                .is_some_and(|endpoint| !endpoint.is_running()),
+            "B is pruned by the propagated-disconnect fold inside the advance"
+        );
+        assert!(
+            session.sync_layer.last_confirmed_frame() <= confirmed_before,
+            "a same-advance propagated prune must re-arm the post-prune hold: before={:?} after={:?}",
+            confirmed_before,
+            session.sync_layer.last_confirmed_frame()
+        );
+    }
+
+    #[test]
+    fn drive_floor_round_drops_the_cached_fold_on_every_prune() {
         // Relay topology: a prune re-arms the fresh-ack round, so a fold taken
         // before the prune must be discarded.
         let (mut session, addr_b, _addr_c, _addr_d) = build_abcd_live_session();
@@ -17225,8 +17479,10 @@ mod tests {
             "a prune in the relay topology must drop the cached fold"
         );
 
-        // Non-relay control: pruning down to one running remote cannot consume
-        // round-floor state, so the cached fold survives the prune.
+        // A prune that drops the session BELOW the relay topology can still
+        // leave a fold cached from when the topology was active. The
+        // conditional post-prune check would keep it; the prune's status and
+        // possible round-floor consumption invalidate it unconditionally.
         let (mut session, addr_b, addr_c, _addr_d) = build_abcd_live_session();
         session.drive_floor_round();
         session.confirmed_frame_cache = Some(Frame::new(50));
@@ -17243,10 +17499,88 @@ mod tests {
             !session.pessimistic_floor_relay_topology(),
             "one running remote is not the relay topology"
         );
+        assert!(
+            session.confirmed_frame_cache.is_none(),
+            "a topology-dropping prune must still drop the cached fold"
+        );
+    }
+
+    #[test]
+    fn retried_operation_uses_a_fresh_identity_that_stale_artifacts_cannot_alias() {
+        let (mut session, _addr_b, _addr_c, _addr_d) = build_abcd_live_session();
+        let target = PlayerHandle::new(1);
+        session
+            .begin_coordinated_drop(target)
+            .expect("begin a coordinated drop");
+        let active = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("attempt opened");
+        let first = active.operation;
+        let first_prepare = DropPrepare {
+            operation: first,
+            targets: active.targets.clone(),
+            participants: active.participants.clone(),
+        };
+        // A supersede closes the operation without touching the target.
+        session.coordinated_drop_close_operation(first);
+        session.coordinated_drop.active = None;
+
+        session
+            .begin_coordinated_drop(target)
+            .expect("retry the same target");
+        let retry = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("retry opened")
+            .operation;
+        assert_ne!(
+            retry, first,
+            "a retry must not reuse the closed attempt's identity"
+        );
+        assert!(
+            retry.sequence > first.sequence,
+            "the retry advances the coordinator-local sequence past the closed attempt"
+        );
+        assert!(
+            !session.coordinated_drop.closed.contains(&retry),
+            "the fresh identity must not be in the terminal-operation history"
+        );
+
+        // Delayed artifacts from the closed attempt can no longer alias the
+        // retry: the old Prepare is ignored and the old Superseded abort does
+        // not fail-close the fresh attempt.
+        session
+            .coordinated_drop_accept_prepare(first_prepare)
+            .expect("the stale prepare is ignored");
         assert_eq!(
-            session.confirmed_frame_cache,
-            Some(Frame::new(50)),
-            "outside the relay topology the fold is floor-independent"
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .map(|active| active.operation),
+            Some(retry),
+            "the stale prepare must not replace the retry"
+        );
+        session.coordinated_drop_accept_abort(DropAbort {
+            operation: first,
+            reason: DropAbortReason::Superseded,
+        });
+        assert_eq!(
+            session.current_state(),
+            SessionState::Running,
+            "a stale abort from the closed attempt must not fail-close the retry"
+        );
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .map(|active| active.operation),
+            Some(retry),
+            "the retry stays active"
         );
     }
 

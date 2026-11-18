@@ -26,6 +26,7 @@ site_id	kind	message_json
 1adf742462380097	NetworkProtocol	"\"Invalid byte range for player {}: {}..{} (total length: {})\""
 1c6c8ec1a201a2ea	InternalError	"\"Failed to capture N-peer hot-join snapshot at frame {}: {}\""
 1d33bbd9be28fada	FrameSync	"\"N-peer hot-join joiner cannot comply with the mesh's disconnect fold for slot {}: the converged freeze frame {} sits strictly below the joiner's snapshot baseline {} (no history below the baseline exists to re-roll or re-simulate); failing closed and tearing down \u2014 rejoin with a fresh session\""
+1e74f1984658ee91	FrameSync	"\"spectator stream cannot serve confirmed frame {} (evicted or pre-reactivation history); skipping owed frames {}..={}\""
 1f7e57396493c4a4	Configuration	"\"Received checksum report, but desync detection is off. Check that configuration is consistent between peers.\""
 1f876a8ac7ebe148	NetworkProtocol	"\"delta_decode: reference bytes is empty\""
 1fbf3937ad27507e	InternalError	"\"Failed to capture hot-join snapshot at frame {}: {}\""

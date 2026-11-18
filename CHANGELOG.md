@@ -130,6 +130,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delta buffer per packet. A warmed one-frame receive poll drops from 8 to 6 allocation operations
   (about 256 fewer bytes) at 2-16 players, and a warmed networked send drops from 4 to 3 operations
   at 2-4 players (5 to 4 at 16); encoded wire bytes and event ordering are unchanged.
+- **Pre-existing:** a coordinated graceful-drop retry no longer has its `Prepare` swallowed by the
+  terminal-operation history. The retry advances the coordinator-local sequence past the closed
+  attempt, so it opens a fresh identity instead of re-deriving the target's generation-local one;
+  peers accept the fresh certificate, and delayed artifacts from the closed attempt can no longer
+  alias it (a stale `Superseded` abort no longer fail-closes the retry).
+- **Pre-existing:** a prune applied later in the same `advance_frame` (a silence-timeout
+  `Event::Disconnected` or the propagated-disconnect fold) no longer leaves the confirmed-frame
+  fold on a relay's pre-prune pessimistic floor. Prune detection runs again after the disconnect
+  fold, so the post-prune fresh-ack round re-arms before confirmation and the observer cannot
+  confirm past the true freeze.
+- **Pre-existing:** a spectator that lags behind a hot-join reopened slot's discarded live-era
+  history no longer wedges every later `advance_frame` with `NoConfirmedInput`. The permanently
+  unservable frames are skipped with a violation diagnostic and the cursor resumes at the oldest
+  servable frame. The spectator flush also runs before any rollback mutation, so a flush failure
+  can never discard an already-built rollback request batch.
 - **Pre-existing:** `DeterministicHasher` now writes every scalar integer and every
   slice/collection length prefix as fixed-width little-endian bytes, so `fnv1a_hash` over a
   `#[derive(Hash)]` value with `usize`, `isize`, or collection-length fields is identical on
