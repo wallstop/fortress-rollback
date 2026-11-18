@@ -2462,11 +2462,9 @@ impl<T: Config> P2PSession<T> {
                     );
                     inputs.push(PlayerInput::new(frame, input));
                 }
+                let handle = PlayerHandle::new(usize::from(target.handle));
                 self.sync_layer
-                    .install_missing_backfill(
-                        PlayerHandle::new(usize::from(target.handle)),
-                        &inputs,
-                    )
+                    .install_missing_backfill(handle, &inputs)
                     .map_err(|error| match error {
                         crate::sync_layer::TransactionalHistoryError::Queue {
                             source:
@@ -2684,6 +2682,25 @@ impl<T: Config> P2PSession<T> {
             .map(|(handle, _cut)| *handle)
             .ok_or(DropAbortReason::GenerationChanged)?;
         self.disconnect_player_at_frames(representative, commit.cut, Some(&overrides));
+
+        // The certified cut is the MAXIMUM target receipt across survivors, so a
+        // survivor whose own receipt trailed the cut had to backfill it. Any
+        // simulation that ran before that install used a predicted value for
+        // frame `cut`, and the saved state at `cut + 1` embeds it. A rollback
+        // armed only at `cut + 1` would keep that contaminated boundary on the
+        // speculative side, splitting the survivors on the first post-cut state
+        // (issue #473). Re-simulate frame `cut` itself with the now-certified
+        // value; the extra frame is one cheap step and makes the boundary exact
+        // whether or not the local receipt already covered the cut.
+        if self.sync_layer.current_frame() > commit.cut {
+            self.disconnect_frame = if self.disconnect_frame.is_null() {
+                commit.cut
+            } else {
+                std::cmp::min(self.disconnect_frame, commit.cut)
+            };
+            self.local_checksum_history
+                .retain(|&frame, _| frame < commit.cut);
+        }
 
         for target in &targets {
             let handle = PlayerHandle::new(usize::from(target.handle));
@@ -8044,18 +8061,22 @@ impl<T: Config> P2PSession<T> {
     /// # Concurrent removals
     ///
     /// A session runs at most one coordinated certificate at a time, and only
-    /// the deterministic lowest participant may choose a cut. Two removals
-    /// with different target sets therefore **cannot progress concurrently**
-    /// when they share that coordinator.
+    /// the deterministic lowest participant may choose a cut. A different-target
+    /// prepare that arrives while the active attempt is still `Inventory`
+    /// queues the losing target for a retry once the winner clears; the retry
+    /// advances past the closed identity and therefore opens a genuinely fresh
+    /// certificate.
     ///
-    /// The exact race phase decides the outcome. A prepare that supersedes a
-    /// still-`Inventory` attempt queues the losing target for retry once the
-    /// winner clears, so the loser may still commit later. A conflicting
-    /// prepare or abort after an attempt has left `Inventory` instead fails the
-    /// affected session closed (`Synchronizing`) rather than continuing on a
-    /// conflicting history. Serialize application-driven removals that must
-    /// complete in order: issue one, wait for its
-    /// `PeerDropped`/`Disconnected` events, then issue the next.
+    /// The removed target keeps polling and authoring inputs until it observes
+    /// its own commit, so a queued certificate can still collect the inventory
+    /// reports it needs and disjoint-target removals commit in deterministic
+    /// order. A prepare or abort that conflicts after an attempt has left
+    /// `Inventory` (for example, a membership change removed a participant the
+    /// second certificate requires) still fails the affected session closed
+    /// (`Synchronizing`) rather than continuing on a conflicting history.
+    /// Applications that need a strict local ordering can serialize their own
+    /// calls: issue one removal, wait for its `PeerDropped`/`Disconnected`
+    /// events, then issue the next.
     ///
     /// For automatic graceful drop on disconnect timeout, configure
     /// [`crate::SessionBuilder::with_disconnect_behavior`] with
@@ -13217,6 +13238,24 @@ impl<T: Config> P2PSession<T> {
                             );
                             return;
                         }
+                        // A frame at or below the local receipt high-water is a
+                        // duplicate or a late retransmission. That is routine
+                        // under loss/reordering, and it is guaranteed for a live
+                        // target after a coordinated-drop backfill installs its
+                        // frames locally (the target keeps retransmitting until
+                        // its own commit). The queue already retains the
+                        // authoritative value, so ignoring the packet cannot
+                        // change history; reporting it as a protocol violation
+                        // would turn benign redundancy into a hard failure.
+                        if input.frame <= current_remote_frame {
+                            trace!(
+                                "Ignoring duplicate remote input for player {} at frame {} (receipt high-water {})",
+                                player,
+                                input.frame,
+                                current_remote_frame
+                            );
+                            return;
+                        }
                         report_violation!(
                             ViolationSeverity::Error,
                             ViolationKind::NetworkProtocol,
@@ -13232,6 +13271,26 @@ impl<T: Config> P2PSession<T> {
                     // rather than acknowledge/advertise an unretained frame
                     // and continue toward divergence.
                     if !self.sync_layer.add_remote_input(player, input) {
+                        // A live target keeps retransmitting a frame that a
+                        // coordinated-drop backfill already installed locally.
+                        // The session-level sequence check accepts it (it is
+                        // exactly `receipt + 1`), but the queue rejects the
+                        // non-sequential duplicate. Adopting the matching
+                        // retained value advances the receipt high-water
+                        // without touching the ring; a genuine gap still fails
+                        // closed below.
+                        let retained_matches = self
+                            .sync_layer
+                            .confirmed_input(player, input.frame)
+                            .is_ok_and(|retained| retained.input == input.input);
+                        if retained_matches {
+                            if let Some(status) =
+                                self.local_connect_status.get_mut(player.as_usize())
+                            {
+                                status.last_frame = input.frame;
+                            }
+                            return;
+                        }
                         let confirmed_before_failure = self.confirmed_frame();
                         self.enter_fail_closed_disconnect_state_at(confirmed_before_failure);
                         return;
@@ -32167,6 +32226,28 @@ mod tests {
                     && e.message.contains("Input sequence violation")),
                 "an out-of-sequence input above the activation floor must keep \
                  Error severity (claim {claim})"
+            );
+
+            // A duplicate of the already-received frame (the routine UDP
+            // retransmission case, and guaranteed for a live coordinated-drop
+            // target after backfill installs its frames) is a benign no-op and
+            // must not report Error severity.
+            let (recorded, ()) = record_tracing(|| {
+                c2.session.handle_event(
+                    Event::Input {
+                        input: PlayerInput::new(claim, 7),
+                        player: PlayerHandle::new(0),
+                        peer_connect_status: vec![ConnectionStatus::default(); 3].into(),
+                    },
+                    Arc::clone(&handles),
+                    addr_a(),
+                );
+            });
+            assert!(
+                !recorded.iter().any(|e| e.level == tracing::Level::ERROR
+                    && e.message.contains("Input sequence violation")),
+                "a duplicate at the receipt high-water must not report Error \
+                 severity (claim {claim})"
             );
 
             // A stale duplicate BELOW the floor (a sub-F frame the snapshot +
