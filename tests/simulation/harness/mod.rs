@@ -3885,6 +3885,10 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     // `RunOptions::live_graceful_target`. Each is retired on the first step
     // where the committed certificate has moved it out of `Running`.
     let mut live_removal_targets: Vec<usize> = Vec::new();
+    // Whether each live target has been observed `Running` at least once. A
+    // target that has not synchronized yet must not be mistaken for one that
+    // left `Running` before its removal was certified.
+    let mut live_removal_seen_running = vec![false; n];
     let mut differential_hot_join_control: Option<DifferentialHotJoinControl> = None;
     #[cfg(feature = "hot-join")]
     let mut pending_hot_join: Option<PendingHotJoin<I>> = None;
@@ -4971,6 +4975,15 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                         && slot.session.diagnostic_player_connected(handle) == Some(false)
                 });
                 if !certified_by_survivor {
+                    if peers[*target].session.current_state() == SessionState::Running {
+                        live_removal_seen_running[*target] = true;
+                        continue;
+                    }
+                    if !live_removal_seen_running[*target] {
+                        // Still synchronizing for the first time; the removal
+                        // may simply be waiting for it to join.
+                        continue;
+                    }
                     oracle.observe_runner_error(
                         "live_target_premature_exit",
                         *target,

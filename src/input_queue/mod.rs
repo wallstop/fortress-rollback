@@ -719,14 +719,22 @@ impl<T: Config> InputQueue<T> {
                 missing_from = index;
                 break;
             }
-            let retained = self.retained_confirmed_input(incoming.frame)?;
-            if retained.input != incoming.input {
-                return Err(RetainedHistoryError::ConflictingOverlap {
-                    frame: incoming.frame,
-                });
+            match self.retained_confirmed_input(incoming.frame) {
+                Ok(retained) => {
+                    if retained.input != incoming.input {
+                        return Err(RetainedHistoryError::ConflictingOverlap {
+                            frame: incoming.frame,
+                        });
+                    }
+                },
+                // The overlap prefix was already confirmed and has since been
+                // evicted from the ring. Its value is fixed in local history and
+                // the chunk's copy is never installed, so the comparison is
+                // skipped; a still-retained overlap is always compared above.
+                Err(RetainedHistoryError::MissingRetainedInput { .. }) => {},
+                Err(error) => return Err(error),
             }
         }
-
         if let Some(first_missing) = inputs.get(missing_from) {
             let expected = if self.last_added_frame.is_null() {
                 Frame::new(0)
@@ -4183,6 +4191,44 @@ mod input_queue_tests {
     }
 
     #[test]
+    fn evicted_overlap_prefix_is_skipped_for_backfill_suffix() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
+        fill_sequential(&mut queue, 2);
+        queue.discard_confirmed_frames(Frame::new(1));
+        assert!(
+            queue
+                .retained_confirmed_input(Frame::new(0))
+                .is_err_and(|error| matches!(
+                    error,
+                    RetainedHistoryError::MissingRetainedInput { .. }
+                )),
+            "frame 0 must be outside the retained range"
+        );
+
+        let backfill = [
+            PlayerInput::new(Frame::new(0), TestInput { inp: 0 }),
+            PlayerInput::new(Frame::new(1), TestInput { inp: 1 }),
+            PlayerInput::new(Frame::new(2), TestInput { inp: 2 }),
+            PlayerInput::new(Frame::new(3), TestInput { inp: 3 }),
+        ];
+        assert_eq!(
+            queue
+                .install_missing_backfill(&backfill, Frame::new(0))
+                .expect("an evicted overlap prefix must not block the suffix"),
+            1
+        );
+        assert_eq!(queue.last_added_frame(), Frame::new(3));
+        assert_eq!(
+            queue
+                .confirmed_input(Frame::new(3))
+                .expect("installed")
+                .input,
+            TestInput { inp: 3 }
+        );
+    }
+
+    #[test]
     fn gapped_backfill_rejects_without_mutating_queue() {
         let mut queue =
             InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
@@ -4254,7 +4300,7 @@ mod input_queue_tests {
     }
 
     #[test]
-    fn physically_stale_but_discarded_overlap_is_rejected_transactionally() {
+    fn physically_stale_but_discarded_overlap_is_ignored_transactionally() {
         let mut queue =
             InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
         fill_sequential(&mut queue, 7);
@@ -4262,13 +4308,13 @@ mod input_queue_tests {
         let before = queue.clone();
 
         assert_eq!(
-            queue.install_missing_backfill(
-                &[PlayerInput::new(Frame::new(2), TestInput { inp: 2 })],
-                Frame::new(4),
-            ),
-            Err(RetainedHistoryError::MissingRetainedInput {
-                frame: Frame::new(2),
-            })
+            queue
+                .install_missing_backfill(
+                    &[PlayerInput::new(Frame::new(2), TestInput { inp: 2 })],
+                    Frame::new(4),
+                )
+                .expect("a fully-overlapping stale chunk is a no-op"),
+            0
         );
         assert_queue_unchanged(&queue, &before);
     }

@@ -120,6 +120,7 @@ site_id	kind	message_json
 65b29893b0844b5f	FrameSync	"\"seek_to_frame requires a fresh SyncLayer (current_frame {}, last_confirmed_frame {}, last_saved_frame {}, dirty_queue {:?})\""
 679c1c2387c714a0	Invariant	"\"round_floor length {} differs from peer_connect_status length {}\""
 683eb7cb50c31215	FrameSync	"\"current frame mismatch after load: expected={}, actual={}\""
+6851f93bfc77d34e	InternalError	"\"coordinated drop could not retain a rejected operation for abort retransmission; the losing participant may only learn via its timeout\""
 686078614cda682f	InternalError	"\"Failed to serialize default input type: {}\""
 68b37ecff828a4f1	InputQueue	"\"Circular buffer index mismatch: expected frame {}, got frame {} at offset {}\""
 692080d34155f805	NetworkProtocol	"\"Hot-join snapshot wire length overflow: overhead {} + state {} + bridge {} bytes\""
