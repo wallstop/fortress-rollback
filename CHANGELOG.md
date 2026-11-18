@@ -142,13 +142,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as protocol violations.
 - **Pre-existing:** concurrent graceful removals with disjoint target sets now commit in
   deterministic order instead of fail-closing every certificate. A session still runs one
-  certificate at a time: while the first removal of peer 1 is active, its target peer 3 remains a
-  live participant and reports the inventory the first certificate needs; after that commit, the
-  queued retry for peer 3 runs against the remaining membership. A conflict after an attempt has
-  left inventory (for example, a required participant removed by an earlier commit) still fails
-  closed rather than forking. Aborts are best-effort: a participant of the losing certificate that
-  misses its `Superseded` abort under lossy delivery also fails closed at the bounded inventory
-  timeout instead of continuing on a conflicting history.
+  certificate at a time: only the deterministic coordinator admits an operation, and a
+  non-coordinator requester sends its prepare solely to that coordinator until it is admitted. A
+  bounded rejected-operation journal answers retransmitted prepares and reports for a superseded
+  certificate with another `Superseded` abort, so a participant that missed the first abort under
+  lossy delivery still closes the losing attempt before its inventory timeout. Backfill no longer
+  fails when a chunk's overlap prefix was already confirmed and evicted, and a participant whose
+  *current* retained history covers the whole range can serve as donor even when its
+  start-of-attempt inventory snapshot did not advertise it. While the first removal of peer 1 is
+  active, its target peer 3 remains a live participant and reports the inventory the first
+  certificate needs; after that commit, the queued retry for peer 3 runs against the remaining
+  membership. A conflict after an attempt has left inventory (for example, a required participant
+  removed by an earlier commit) still fails closed rather than forking.
 - **Pre-existing:** a coordinated graceful-drop retry no longer has its `Prepare` swallowed by the
   terminal-operation history. The retry advances the coordinator-local sequence past the closed
   attempt, so it opens a fresh identity instead of re-deriving the target's generation-local one;
