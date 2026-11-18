@@ -18200,6 +18200,53 @@ mod tests {
     }
 
     #[test]
+    fn rejected_operation_journal_deduplicates_and_stays_bounded() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = [DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let operation = |sequence: u32| DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence,
+            target_set_digest: u64::from(sequence),
+        };
+
+        session.coordinated_drop_note_rejected(operation(1), &targets);
+        session.coordinated_drop_note_rejected(operation(2), &targets);
+        assert_eq!(
+            session.coordinated_drop.rejected.len(),
+            2,
+            "distinct rejected operations must both be retained"
+        );
+        session.coordinated_drop_note_rejected(operation(1), &targets);
+        assert_eq!(
+            session.coordinated_drop.rejected.len(),
+            2,
+            "re-noting a rejected operation must not duplicate it"
+        );
+
+        for sequence in 3..=7 {
+            session.coordinated_drop_note_rejected(operation(sequence), &targets);
+        }
+        assert_eq!(
+            session.coordinated_drop.rejected.len(),
+            session.num_players,
+            "the rejected-operation journal is one entry per player"
+        );
+        assert_eq!(
+            session
+                .coordinated_drop
+                .rejected
+                .front()
+                .map(|rejected| rejected.operation.sequence),
+            Some(3),
+            "the oldest entries are evicted first"
+        );
+    }
+
+    #[test]
     fn retried_removal_after_supersede_collects_reports_and_commits() {
         let (mut session, _addr_b, _addr_c, _addr_d) = build_abcd_live_session();
         let first_target = PlayerHandle::new(1);
