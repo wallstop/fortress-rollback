@@ -1323,11 +1323,9 @@ impl<T: Config> P2PSession<T> {
         {
             return;
         }
-        // Trim before insertion so the deque never grows past its bound even
-        // transiently; a full deque must not allocate on `push_back`.
-        while self.coordinated_drop.rejected.len() >= self.num_players.max(1) {
-            self.coordinated_drop.rejected.pop_front();
-        }
+        // Build the replacement payload first, then trim immediately before
+        // insertion. A failed allocation must not evict a journal entry whose
+        // replacement cannot be recorded.
         let mut copied = Vec::new();
         if copied.try_reserve_exact(targets.len()).is_err() {
             report_violation!(
@@ -1338,6 +1336,9 @@ impl<T: Config> P2PSession<T> {
             return;
         }
         copied.extend_from_slice(targets);
+        while self.coordinated_drop.rejected.len() >= self.num_players.max(1) {
+            self.coordinated_drop.rejected.pop_front();
+        }
         self.coordinated_drop
             .rejected
             .push_back(RejectedDropOperation {
@@ -8342,10 +8343,12 @@ impl<T: Config> P2PSession<T> {
     ///
     /// Applications that need a strict local ordering can serialize their own
     /// calls: issue one removal, wait for its `PeerDropped`/`Disconnected`
-    /// events, then issue the next. If [`Self::current_state`] returns
-    /// [`SessionState::Synchronizing`] and no `PeerDropped` event arrives, the
-    /// removal failed closed; report or rebuild the session instead of waiting
-    /// indefinitely.
+    /// events, then issue the next. If [`Self::current_state`] changes from
+    /// [`SessionState::Running`] to [`SessionState::Synchronizing`] and no
+    /// `PeerDropped` event arrives, the removal failed closed; report or
+    /// rebuild the session instead of waiting indefinitely. A removal accepted
+    /// while the session is still in initial synchronization has no such
+    /// failure signal yet, so keep polling until its events arrive.
     ///
     /// For automatic graceful drop on disconnect timeout, configure
     /// [`crate::SessionBuilder::with_disconnect_behavior`] with
