@@ -2567,11 +2567,15 @@ fn majority_component_continues_after_single_automatic_drop() {
 /// rejected. A live target keeps authoring inputs while the certificate is in
 /// flight, and under Rough loss survivors apply different post-request target
 /// frames. Nightly seed `12345098` (N=10) reproduced in-band checksum desyncs
-/// as the certificate cut landed; retiring targets at the request boundary
-/// keeps one history. This fail-closed terminal row is therefore the CAP-safe
-/// outcome: a minority that cannot certify the drop must not continue on its
-/// own history. The retry-side of #461 (fresh identity, report collection, and
-/// commit) is pinned by
+/// as the certificate cut landed.
+///
+/// This row models the harness's request-boundary retirement choice. Production
+/// `remove_player` starts an asynchronous certificate and the target keeps
+/// running until it receives the commit; that live-target interval is not
+/// exercised here and is tracked in issue #473. The row pins the fail-closed
+/// certificate outcome for a minority that cannot certify the drop: it must
+/// not continue on its own history. The retry-side of #461 (fresh identity,
+/// report collection, and commit) is pinned by
 /// `retried_removal_after_supersede_collects_reports_and_commits`.
 #[test]
 fn concurrent_disjoint_graceful_removals_fail_closed_without_fork() {
