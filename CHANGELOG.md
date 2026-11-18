@@ -146,7 +146,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   live participant and reports the inventory the first certificate needs; after that commit, the
   queued retry for peer 3 runs against the remaining membership. A conflict after an attempt has
   left inventory (for example, a required participant removed by an earlier commit) still fails
-  closed rather than forking.
+  closed rather than forking. Aborts are best-effort: a participant of the losing certificate that
+  misses its `Superseded` abort under lossy delivery also fails closed at the bounded inventory
+  timeout instead of continuing on a conflicting history.
 - **Pre-existing:** a coordinated graceful-drop retry no longer has its `Prepare` swallowed by the
   terminal-operation history. The retry advances the coordinator-local sequence past the closed
   attempt, so it opens a fresh identity instead of re-deriving the target's generation-local one;
