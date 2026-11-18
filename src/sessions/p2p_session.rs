@@ -1609,7 +1609,7 @@ impl<T: Config> P2PSession<T> {
         // generation-local sequence. Therefore simultaneous user requests for
         // the same endpoint coalesce into one operation instead of racing two
         // certificates; a sole non-sequencer caller may still submit it.
-        let sequence = targets
+        let mut sequence = targets
             .iter()
             .map(|target| u32::from(target.generation))
             .max()
@@ -1618,11 +1618,36 @@ impl<T: Config> P2PSession<T> {
         let coordinator_generation = self
             .local_coordinated_drop_generation(PlayerHandle::new(usize::from(coordinator)))
             .unwrap_or(0);
-        let operation = DropOperationId {
-            coordinator,
-            coordinator_generation,
-            sequence,
-            target_set_digest: Self::coordinated_drop_target_digest(&targets),
+        let target_set_digest = Self::coordinated_drop_target_digest(&targets);
+        // A retry of the same target after an abort/supersede re-derives the
+        // generation-local sequence, i.e. the identity of the CLOSED attempt.
+        // Peers ignore a closed identity's `Prepare`, and a stale artifact from
+        // the old attempt (a `Superseded` abort, an old inventory report) would
+        // otherwise be indistinguishable from the retry's. Advance the
+        // coordinator-local sequence past every recently closed identity so the
+        // retry opens a genuinely fresh attempt.
+        let operation = loop {
+            let candidate = DropOperationId {
+                coordinator,
+                coordinator_generation,
+                sequence,
+                target_set_digest,
+            };
+            if !self
+                .coordinated_drop
+                .closed
+                .iter()
+                .any(|closed| *closed == candidate)
+            {
+                break candidate;
+            }
+            sequence = sequence
+                .checked_add(1)
+                .ok_or(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::Custom(
+                        "coordinated drop operation sequence exhausted",
+                    ),
+                })?;
         };
         let quorum = Self::coordinated_drop_quorum(participants.len());
         let held_at = self.confirmed_frame();
@@ -1823,21 +1848,7 @@ impl<T: Config> P2PSession<T> {
             .iter()
             .any(|closed| *closed == prepare.operation)
         {
-            // A closed operation whose target still validates is a LEGITIMATE
-            // RETRY after an abort/supersede: the identity is derived from the
-            // target's unchanged connected-era generation, so a retry of the
-            // same target necessarily reuses it. Replayed messages for a
-            // CONCLUDED operation no longer validate — a committed op left the
-            // target disconnected, and a rejoin moved its generation — so those
-            // stay ignored instead of re-opening the certificate. Without the
-            // retry arm, every peer silently swallowed the retry's `Prepare`
-            // and the removal timed out into a permanent fail-closed.
-            if !self.coordinated_drop_validate_prepare(&prepare) {
-                return Ok(());
-            }
-            self.coordinated_drop
-                .closed
-                .retain(|closed| *closed != prepare.operation);
+            return Ok(());
         }
         if self
             .coordinated_drop
@@ -3430,12 +3441,12 @@ impl<T: Config> P2PSession<T> {
         // in-poll silence-timeout `Event::Disconnected`, or the propagated
         // disconnect fold just above. Re-detect so a same-advance prune resets
         // every relay's floor-round freshness before the confirmation fold
-        // below can consume a pre-prune `round_floor`. Outside the relay
-        // topology the fold never reads round-floor state, so skip the scan —
-        // the next poll's `drive_floor_round` still latches the transition.
-        if self.pessimistic_floor_relay_topology() {
-            self.reset_floor_round_on_prune();
-        }
+        // below can consume a pre-prune `round_floor`. The call is
+        // unconditional: a prune that drops the session out of the relay
+        // topology still mutated the fold's terms, so a post-prune topology
+        // check could miss it. The scan is O(remotes) and only resets state
+        // when a transition is actually latched.
+        self.reset_floor_round_on_prune();
 
         // session is not running and synchronized
         if self.state != SessionState::Running {
@@ -17492,7 +17503,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_operation_is_reaccepted_only_while_its_target_still_validates() {
+    fn retried_operation_uses_a_fresh_identity_that_stale_artifacts_cannot_alias() {
         let (mut session, _addr_b, _addr_c, _addr_d) = build_abcd_live_session();
         let target = PlayerHandle::new(1);
         session
@@ -17503,43 +17514,70 @@ mod tests {
             .active
             .as_ref()
             .expect("attempt opened");
-        let prepare = DropPrepare {
-            operation: active.operation,
+        let first = active.operation;
+        let first_prepare = DropPrepare {
+            operation: first,
             targets: active.targets.clone(),
             participants: active.participants.clone(),
         };
         // A supersede closes the operation without touching the target.
-        session.coordinated_drop_close_operation(prepare.operation);
+        session.coordinated_drop_close_operation(first);
         session.coordinated_drop.active = None;
 
-        // The retry reuses the generation-derived identity. It must not be
-        // swallowed by `closed`: peers would never answer its Prepare and the
-        // removal would time out into a permanent fail-closed.
         session
-            .coordinated_drop_accept_prepare(prepare.clone())
-            .expect("the retry prepare is accepted");
+            .begin_coordinated_drop(target)
+            .expect("retry the same target");
+        let retry = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("retry opened")
+            .operation;
+        assert_ne!(
+            retry, first,
+            "a retry must not reuse the closed attempt's identity"
+        );
         assert!(
+            retry.sequence > first.sequence,
+            "the retry advances the coordinator-local sequence past the closed attempt"
+        );
+        assert!(
+            !session.coordinated_drop.closed.contains(&retry),
+            "the fresh identity must not be in the terminal-operation history"
+        );
+
+        // Delayed artifacts from the closed attempt can no longer alias the
+        // retry: the old Prepare is ignored and the old Superseded abort does
+        // not fail-close the fresh attempt.
+        session
+            .coordinated_drop_accept_prepare(first_prepare)
+            .expect("the stale prepare is ignored");
+        assert_eq!(
             session
                 .coordinated_drop
                 .active
                 .as_ref()
-                .is_some_and(|active| active.operation == prepare.operation),
-            "the retried operation must reopen on the accepting peer"
+                .map(|active| active.operation),
+            Some(retry),
+            "the stale prepare must not replace the retry"
         );
-
-        // A replayed Prepare for an operation whose target is already dropped
-        // cannot validate, so it stays ignored (no resurrection, no abort).
-        session.coordinated_drop_close_operation(prepare.operation);
-        session.coordinated_drop.active = None;
-        if let Some(status) = session.local_connect_status.get_mut(target.as_usize()) {
-            status.disconnected = true;
-        }
-        session
-            .coordinated_drop_accept_prepare(prepare)
-            .expect("the stale prepare is ignored");
-        assert!(
-            session.coordinated_drop.active.is_none(),
-            "a concluded operation must not reopen after its target is dropped"
+        session.coordinated_drop_accept_abort(DropAbort {
+            operation: first,
+            reason: DropAbortReason::Superseded,
+        });
+        assert_eq!(
+            session.current_state(),
+            SessionState::Running,
+            "a stale abort from the closed attempt must not fail-close the retry"
+        );
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .map(|active| active.operation),
+            Some(retry),
+            "the retry stays active"
         );
     }
 
