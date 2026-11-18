@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794963230630,
+  "lastUpdate": 1794966434088,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "b799615d3008e55a901ad288a183cdf9b616b705",
-          "message": "test(simulation): prove runtime delay equivalence (#373)\n\n## Description\n\nAdvances the active P0 rollback-equivalence work by extending the\nindependent differential reference to one successful, strict,\npost-synchronization runtime input-delay increase.\n\nThe oracle now records the actual `(peer, current frame, old delay, new\ndelay)` control boundary and independently models replicated gap inputs\nand resumed ordinals. The bounded matrix covers EveryFrame/Sparse,\ndelayed/held/reordered delivery, and forward/reverse/rotating peer drive\norder, with additional nonzero initial-delay coverage.\n\nThe change also hardens final-state validation so a bad game-state frame\ncannot lower its own validation ceiling, preserves legacy shrinker\nbehavior, and records the work in\n`progress/session-191-runtime-delay-equivalence.md`.\n\nNo production or public API code changes. Membership changes,\nspectators, hot-join, broader operation interleavings, and arbitrary\ngame-state semantics remain explicitly bounded in the active P0 plan\nitem.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the contributing guide and repository development\npolicy\n- [x] I have followed the zero-panic policy (no production code changed)\n- [x] I have added tests that prove the new reference and mutation\ncontrols work\n- [x] I have run strict workspace Clippy with no warnings\n- [x] I have run the full Nextest suite and all tests pass\n\n### If Applicable\n\n- [x] I have updated the progress documentation accordingly\n- [x] My changes generate no new compiler warnings\n\nCHANGELOG and examples are not applicable because this is test\ninfrastructure only.\n\n## Testing\n\n**Tests added/modified:**\n\n- Hard-coded 0→3 and 2→4 gap/resume known-answer vectors.\n- Full save/delivery/drive-order runtime-delay matrix with exact replay\nand matched no-change controls.\n- Changed-player input mutation, shared-state, checksum-lie, final-frame\nmismatch, artifact replay, validation, and shrinker controls.\n- Independent final-state ceilings and legacy non-differential delay\nshrinking regressions.\n\n**Red-green evidence:**\n\n- Before the nominal gap model,\n`runtime_delay_increase_matches_nominal_gap_and_resume` failed at frame\n80 because the actual stream repeated ordinal 79 while the static\nreference advanced.\n- Final focused differential/shrinker gate: 25 passed.\n- Full simulation target: 391 passed, 26 ignored.\n- Full Nextest: 3,021 passed, 73 skipped.\n- Strict all-workspace/all-target Clippy with `tokio,json`: passed\nwithout warnings.\n- Rustdoc with warnings denied, plan hygiene, diff checks, and agent\npreflight passed; link checking covered 1,442 links with zero errors or\nwarnings.\n- Independent adversarial review found two issues; both were fixed with\nregressions, and final re-review reported zero remaining issues.\n\n**External reconciliation:**\n\n- Latest `main` SHA `a6615805df71fb845de580e55a30a1b19ea10c08`: 89\nsuccessful checks, five intentional skips, zero pending or failed\nchecks.\n- No compatible Cargo or npm updates remained. Cargo audit/deny and all\nfour workspace lock checks passed.\n\n## Related Issues\n\nLeaves the P2 Lean pilot #365 in its existing priority order. No other\nopen issues or PRs existed at reconciliation.",
-          "timestamp": "2026-11-07T13:41:40-08:00",
-          "tree_id": "7b688bdfe96a57e7468f74e88be112b06a6a40e2",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/b799615d3008e55a901ad288a183cdf9b616b705"
-        },
-        "date": 1794088170618,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 39018,
-            "range": "± 514",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24848,
-            "range": "± 87",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1091,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1245,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2765,
-            "range": "± 180",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3196,
             "range": "± 284",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0980729199572ff5cd51bf6cf52c6214d8a35d46",
+          "message": "fix: keep lossy graceful removal live through reordered backfill (#469)\n\n## Description\n\nFollow-up to #468. Closes #460 by fixing the two lossy-retirement\nfailure classes and making lossy graceful removal a green-tier\nsimulation row.\n\n**N=3 certificate wedge (backfill reorder).** A donor's backfill chunk\ncan be delivered ahead of the inventory reports that choose the donor.\n`coordinated_drop_accept_backfill` treated an unattributable chunk as\n`ConflictingHistory` and fail-closed the attempt; the driver also\ndeclared `MissingHistory` as soon as `required_start` was set but no\ndonor was yet visible in the received reports. Both are transient\norderings, not protocol violations:\n- A chunk whose donor is not yet known is ignored; the selected donor\nretransmits every poll while the attempt is active.\n- \"No donor\" is terminal only once every participant's inventory is\nknown (or the missing reporters are locally unresponsive); otherwise the\ndriver waits and the 2s attempt timeout remains the bound.\n\nExact repro (seed 428, N=3, Swarm, `GracefulRemove { by: 2, target: 0\n}`) now keeps both survivors `Running` after the heal with one confirmed\nhistory: `failures=[]`, `final_confirmed=[430, 1398, 1399]`.\n\n**N=2 removed-target tail (design option 1).** A gracefully removed\ntarget can keep confirming its own real inputs for a few frames after\nthe survivors froze its slot. That post-cut tail is private to the\nprocess leaving the match and must not define the canonical exposed\nhistory. The oracle now caps a gracefully removed target's\nconfirmed-input authorship at the survivor-visible receipt cut and its\nstate comparison at `cut + 1`; frames at or below the cut keep full\ncoverage. This is documented in `Oracle::cap_retired_confirmed_inputs`\nand the `dead` field docs.\n\n**Nightly quarantine narrowed.** Non-clean nightly schedules now keep\ngenerated `GracefulRemove` events instead of rewriting them to stalls.\n`PeerKill`/`SpectatorHostKill` remain quarantined: after a kill a 2-peer\nmesh has no strict majority and correctly fails closed, so the\nrecover-after-heal expectation is unsatisfiable there (follow-up issue).\nA sweep of 92 lossy graceful-removal nightly rows (N=2/3/4 ×\nMild/Rough/ReliableFifo/Swarm × seeds 0..40, 5000 steps) passes.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy** (all new failures are\nreported or typed; no new panics in production code)\n- [x] I have added tests that prove my fix is effective\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json,hot-join -- -D warnings` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory (not\napplicable)\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `lossy_graceful_removal_rows_keep_one_history_and_recover` — the exact\n#460 repro seeds (N=2: 133 Rough, 203 Swarm, 273 Mild, 378 Mild; N=3:\n428 Swarm) in the PR-green fleet.\n- `non_clean_nightly_lifecycle_quarantines_only_crash_retirement` —\nreplaces the old all-retirement rewrite assertion; GracefulRemove now\nstays, crash/host-kill retirement remains quarantined.\n- Oracle unit docs/ceilings exercised through the full simulation suite.\n\n**Validation evidence:**\n\n- 92-row lossy graceful-removal nightly sweep (N=2/3/4, 4 noise\nprofiles, seeds 0..40, 5000 steps): 0 failures.\n- `cargo nextest run --workspace --features tokio,json`: 3254 passed, 75\nskipped.\n- `cargo nextest run --workspace --features hot-join,tokio,json`: 3549\npassed, 76 skipped.\n- `python3 scripts/ci/agent-preflight.py --full`: exit 0.\n- Exact repro before/after (seed 428): `ConflictingHistory` fail-closed\n+ survivors stuck at 433/430 → `failures=[]` + 1398/1399.\n\n## Related Issues\n\nFixes #460\nRelates to #461 (concurrent different-target graceful removal\nserialization remains a separate design decision)\nRelates to #468 (previous advance-path batch)",
+          "timestamp": "2026-11-18T01:35:21Z",
+          "tree_id": "c253505da86024c3a03fcb21eda5c2c950dbc5cf",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/0980729199572ff5cd51bf6cf52c6214d8a35d46"
+        },
+        "date": 1794966432938,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 35500,
+            "range": "± 1472",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 23165,
+            "range": "± 970",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 807,
+            "range": "± 64",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 841,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 6651,
+            "range": "± 107",
             "unit": "ns/iter"
           }
         ]
