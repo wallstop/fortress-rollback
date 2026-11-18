@@ -2196,9 +2196,18 @@ impl<T: Config> P2PSession<T> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn coordinated_drop_accept_report(
         &mut self,
         report: DropReport,
+    ) -> Result<(), DropAbortReason> {
+        self.coordinated_drop_accept_report_from(report, None)
+    }
+
+    fn coordinated_drop_accept_report_from(
+        &mut self,
+        report: DropReport,
+        source: Option<u16>,
     ) -> Result<(), DropAbortReason> {
         if self.coordinated_drop_reject_retransmission(report.operation) {
             return Ok(());
@@ -2227,47 +2236,57 @@ impl<T: Config> P2PSession<T> {
                     && report.receipts.is_empty()
                     && report.exposed_confirmed.is_null();
                 if coordinator_cut_announcement {
-                    if Some(report.participant)
-                        != Self::coordinated_drop_coordinator(&active.participants)
-                    {
+                    let coordinator = Self::coordinated_drop_coordinator(&active.participants);
+                    if Some(report.participant) != coordinator {
                         return Err(DropAbortReason::GenerationChanged);
                     }
                     if active.cut.is_some_and(|cut| cut != report.cut) {
                         return Err(DropAbortReason::ConflictingHistory);
                     }
-                    if active.cut.is_none() {
+                    let first_cut = active.cut.is_none();
+                    if first_cut {
                         active.cut = Some(report.cut);
                         active.phase = CoordinatedDropPhase::Backfill;
                     }
-                    return Ok(());
-                }
-                if !report.exposed_confirmed.is_valid()
-                    || !report.cut.is_null()
-                    || report.cut_digest != 0
-                    || report.receipts.len() != active.targets.len()
-                    || report
-                        .receipts
-                        .iter()
-                        .zip(&active.targets)
-                        .any(|(receipt, target)| {
-                            let exposed_beyond_receipt =
-                                report.exposed_confirmed > receipt.contiguous_through;
-                            receipt.target != target.handle
-                                || !receipt.contiguous_through.is_valid()
-                                || !receipt.available_from.is_valid()
-                                || receipt.available_from > receipt.contiguous_through
-                                || exposed_beyond_receipt
-                        })
-                {
-                    return Err(DropAbortReason::MissingHistory);
-                }
-                if let Some(existing) = active.reports.get(&report.participant) {
-                    if existing != &report {
-                        return Err(DropAbortReason::ConflictingHistory);
-                    }
+                    // Relay the cut announcement so a participant without a
+                    // direct link from the coordinator can still learn the cut
+                    // and supply backfill. The original coordinator identity is
+                    // preserved. Only the first transition re-broadcasts a
+                    // relayed announcement; a direct coordinator retransmission
+                    // is forwarded again so fresh retries can still reach nodes
+                    // that missed earlier relays. Nodes that already hold the
+                    // cut never re-relay a relay, which bounds propagation to
+                    // one extra hop per announcement.
+                    relay = first_cut || source == coordinator;
                 } else {
-                    active.reports.insert(report.participant, report);
-                    relay = true;
+                    if !report.exposed_confirmed.is_valid()
+                        || !report.cut.is_null()
+                        || report.cut_digest != 0
+                        || report.receipts.len() != active.targets.len()
+                        || report
+                            .receipts
+                            .iter()
+                            .zip(&active.targets)
+                            .any(|(receipt, target)| {
+                                let exposed_beyond_receipt =
+                                    report.exposed_confirmed > receipt.contiguous_through;
+                                receipt.target != target.handle
+                                    || !receipt.contiguous_through.is_valid()
+                                    || !receipt.available_from.is_valid()
+                                    || receipt.available_from > receipt.contiguous_through
+                                    || exposed_beyond_receipt
+                            })
+                    {
+                        return Err(DropAbortReason::MissingHistory);
+                    }
+                    if let Some(existing) = active.reports.get(&report.participant) {
+                        if existing != &report {
+                            return Err(DropAbortReason::ConflictingHistory);
+                        }
+                    } else {
+                        active.reports.insert(report.participant, report);
+                        relay = true;
+                    }
                 }
             },
             DropReportStage::Ready => {
@@ -3401,7 +3420,9 @@ impl<T: Config> P2PSession<T> {
                 DropControlMessage::Prepare(prepare) => {
                     self.coordinated_drop_accept_prepare(prepare, Some(source))
                 },
-                DropControlMessage::Report(report) => self.coordinated_drop_accept_report(report),
+                DropControlMessage::Report(report) => {
+                    self.coordinated_drop_accept_report_from(report, Some(source))
+                },
                 DropControlMessage::Backfill(backfill) => {
                     self.coordinated_drop_accept_backfill(source, backfill)
                 },
@@ -8347,8 +8368,10 @@ impl<T: Config> P2PSession<T> {
     /// [`SessionState::Running`] to [`SessionState::Synchronizing`] and no
     /// `PeerDropped` event arrives, the removal failed closed; report or
     /// rebuild the session instead of waiting indefinitely. A removal accepted
-    /// while the session is still in initial synchronization has no such
-    /// failure signal yet, so keep polling until its events arrive.
+    /// while the session is still in initial synchronization has no `Running`
+    /// baseline for that transition; bound its wait at the two-second operation
+    /// deadline plus one poll interval, then report or rebuild the session if
+    /// neither the drop events nor [`SessionState::Running`] arrive.
     ///
     /// For automatic graceful drop on disconnect timeout, configure
     /// [`crate::SessionBuilder::with_disconnect_behavior`] with
@@ -16958,6 +16981,34 @@ mod tests {
         assert_eq!(
             session.coordinated_drop.active.as_ref().and_then(|a| a.cut),
             Some(Frame::new(5))
+        );
+
+        // A direct coordinator retransmission is relayed to the other
+        // participants so a node without a direct coordinator link can still
+        // learn the cut. A duplicate announcement that arrived through a relay
+        // is not re-relayed, which bounds propagation.
+        let before_direct = sent_message_count(&session, crate::metrics::MessageKind::DropReport);
+        session
+            .coordinated_drop_accept_report_from(
+                announcement(0, Frame::new(5), 0, Vec::new(), Frame::NULL),
+                Some(0),
+            )
+            .expect("the coordinator retransmission is accepted");
+        assert!(
+            sent_message_count(&session, crate::metrics::MessageKind::DropReport) > before_direct,
+            "a direct coordinator retransmission must be forwarded to participants"
+        );
+        let before_relay = sent_message_count(&session, crate::metrics::MessageKind::DropReport);
+        session
+            .coordinated_drop_accept_report_from(
+                announcement(0, Frame::new(5), 0, Vec::new(), Frame::NULL),
+                Some(2),
+            )
+            .expect("a relayed duplicate announcement is accepted");
+        assert_eq!(
+            sent_message_count(&session, crate::metrics::MessageKind::DropReport),
+            before_relay,
+            "a relayed duplicate must not be re-relayed"
         );
 
         for report in [

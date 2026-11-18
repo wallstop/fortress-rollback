@@ -147,8 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as protocol violations.
 - **Pre-existing:** concurrent graceful removals with disjoint target sets now commit in
   deterministic order instead of fail-closing every certificate. A session still runs one
-  certificate at a time: only the deterministic coordinator admits an operation, and a
-  non-coordinator requester sends its prepare solely to that coordinator until it is admitted. A
+  certificate at a time and only the deterministic coordinator admits an operation: a
+  non-coordinator requester broadcasts its prepare to the participants, which forward it and the
+  operation's reports to the coordinator without admitting local attempts. A
   bounded rejected-operation journal answers retransmitted prepares and reports for a superseded
   certificate with another `Superseded` abort, so a participant that missed the first abort under
   lossy delivery still closes the losing attempt before its inventory timeout. Backfill no longer
