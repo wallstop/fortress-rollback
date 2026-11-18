@@ -233,6 +233,7 @@ ca6fcbd8b0975198	NetworkProtocol	"\"Discarding the buffered N-peer hot-join snap
 ce11fc0180c8b0eb	NetworkProtocol	"\"Ignoring stale JoinAborted for slot {} frame {} (buffered attempt: slot {} frame {})\""
 ceadfe18427071f2	NetworkProtocol	"\"Joiner endpoint at {:?} died while the reopened reactivation for slot {} frame {} was pending; closing the attempt locally as {}\""
 ceb0282850e4f1d8	ArithmeticOverflow	"\"Frame underflow in {}: {} - {} would underflow\""
+cee40b919d56986a	NetworkProtocol	"\"Conflicting duplicate remote input for player {} at frame {} (receipt high-water {})\""
 cf2b59f20e3d299f	NetworkProtocol	"\"replay event queue overflow at capacity: evicting the oldest queued routine \\\n                 first; otherwise discarding an incoming routine or replacing the oldest durable \\\n                 with an incoming durable (queue cap {}); drain events during validation or raise \\\n                 the event-queue size to avoid losing notifications. See \\\n                 SessionMetrics::events_discarded_total for the running count\""
 d05ab639ba12eb90	NetworkProtocol	"\"Deferring the N-peer hot-join capture at frame {}: a slot is frozen above the snapshot frame ({:?}); the joiner cannot reproduce its post-snapshot ring history (the serve aborts/retries at a later S)\""
 d8e3584e7369c0cd	NetworkProtocol	"\"Cannot backfill the activation window toward the joiner at {:?}: local input for frame {} is unavailable: {}\""
