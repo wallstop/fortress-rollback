@@ -2577,11 +2577,19 @@ fn majority_component_continues_after_single_automatic_drop() {
 /// backfill supplied it. Re-simulating only above the cut would keep the
 /// contaminated boundary on the speculative side and split the first post-cut
 /// state (nightly seed `12345118`, N=15 Rough); a survivor still behind the cut
-/// simply consumes the certified value when it first simulates that frame. The live-target harness mode drives this
-/// production interval; the nightly fleet enables it for every generated
-/// graceful-removal row, and
+/// simply consumes the certified value when it first simulates that frame. The
+/// live-target harness mode drives this production interval; the nightly fleet
+/// enables it for every generated graceful-removal row, and
 /// `live_target_graceful_removal_under_rough_loss_certifies_without_desync`
-/// pins the lossy seed rows.
+/// pins the lossy seed rows plus a Rough-loss concurrent-removal row.
+///
+/// Concurrent admission is coordinator-serialized: a non-coordinator requester
+/// sends its prepare only to the deterministic coordinator, and other
+/// participants ignore prepares from any other source. Rejected/superseded
+/// operations stay in a bounded journal and answer retransmitted prepares and
+/// reports with another `Superseded` abort, so a participant that missed the
+/// one-shot abort under loss closes the losing attempt instead of timing out
+/// into `Synchronizing` (issue #477).
 ///
 /// The retry-side of #461 (fresh identity, report collection, and commit) is
 /// pinned by `retried_removal_after_supersede_collects_reports_and_commits`.

@@ -387,7 +387,13 @@ fn live_target_graceful_removal_under_rough_loss_certifies_without_desync() {
         Ok("nightly"),
         "nightly simulation tests require FORTRESS_SIM_TIER=nightly"
     );
-    for seed in [12_345_038_u64, 12_345_098, 12_345_118] {
+    for seed in [
+        12_345_038_u64,
+        12_345_098,
+        12_345_118,
+        12_345_333,
+        12_345_758,
+    ] {
         let n_players = 2 + usize::try_from(seed % 15).expect("seed modulo 15 fits usize");
         let schedule = nightly_schedule(seed, n_players, nightly_noise(seed));
         let (by, target) = scheduled_graceful_removal(&schedule);
@@ -398,6 +404,70 @@ fn live_target_graceful_removal_under_rough_loss_certifies_without_desync() {
         let report = run(&schedule, &options);
         report.expect_pass(&schedule);
         assert_scheduled_removal_committed(&report, by, target);
+    }
+
+    // Concurrent disjoint removals under Rough loss. The nightly lifecycle mix
+    // plants only one event, so compose two on a generated lossy 4-peer mesh.
+    // A participant of the losing certificate must still receive its
+    // `Superseded` abort through the retransmission journal instead of timing
+    // out into `Synchronizing` (issue #477).
+    let steps = 1_500_u32;
+    let heal_at = 1_250_u32;
+    let config = SimConfig {
+        n_players: 4,
+        steps,
+        noise: BackgroundNoise::Rough,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        scenario_mix: ScenarioMix::NetworkOnly,
+        ..SimConfig::smoke(4)
+    };
+    let mut schedule = generate(0x434F_4E43, config);
+    schedule.events = vec![
+        (120, ScheduleEvent::GracefulRemove { by: 0, target: 1 }),
+        (120, ScheduleEvent::GracefulRemove { by: 2, target: 3 }),
+        (heal_at, ScheduleEvent::HealAll),
+    ];
+    schedule.heal_at = heal_at;
+    let run_duration =
+        Duration::from_millis(u64::from(steps).saturating_mul(schedule.config.step_dt_ms));
+    let options = RunOptions {
+        disconnect_timeout: Some(run_duration.saturating_add(Duration::from_secs(1))),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
+    let report = run(&schedule, &options);
+    report.expect_pass(&schedule);
+    let last = report
+        .trace_tail
+        .last()
+        .expect("the lossy concurrent-removal row records trace snapshots");
+    for survivor in [0, 2] {
+        assert_eq!(
+            report
+                .peer_event_counts_by_peer
+                .get(survivor)
+                .and_then(|counts| counts.get(&EventKind::PeerDropped))
+                .copied(),
+            Some(2),
+            "lossy survivor {survivor} must observe both certified removals: {:?}",
+            report.peer_event_counts_by_peer
+        );
+        assert_eq!(
+            last.session_states[survivor],
+            TraceSessionState::Running,
+            "lossy survivor {survivor} must stay Running after both removals"
+        );
+        assert!(
+            report.final_confirmed[survivor] > i32::try_from(heal_at / 4).unwrap_or(i32::MAX),
+            "lossy survivor {survivor} must keep confirming: {:?}",
+            report.final_confirmed
+        );
+    }
+    for target in [1, 3] {
+        assert!(
+            last.dead[target],
+            "lossy removed target {target} must be retired"
+        );
     }
 }
 
@@ -5444,7 +5514,7 @@ fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     let report = run(&schedule, &options);
     assert_eq!(
         report.final_confirmed,
-        vec![356, 350, 350, 350, 290],
+        vec![357, 351, 351, 352, 290],
         "the regression depends on the lagging-survivor interleaving"
     );
     assert!(
