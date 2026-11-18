@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795009850297,
+  "lastUpdate": 1795013035393,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "9c3b8584a414cf2ba22ac75ba75b019ba42220e7",
-          "message": "test(simulation): codify one-way partition as a bounded terminal split (#386) (#387)\n\n## Description\n\nCloses the last open row of the P0 CAP matrix (#382): a one-way\npartition lets the isolated peer keep confirming its prediction window\nafter the majority's certified cut because it still receives the\nmajority's inputs while none of its own arrive. #386 recorded the\nresulting divergence between the isolated peer's live slot values and\nthe majority's frozen prefix.\n\n**Ack-bounding `confirmed_frame` was prototyped and measured, then\nrejected for this change.** Folding each endpoint's `last_acked_input`\ninto the local slot's confirmed contribution makes #386 clean, but it\nlowers confirmation by a round trip on every lossy link and shrinks the\neffective rollback window. Measured blast radius:\n`test_determinism_under_stress` dropped to **38/100** simulated frames\nunder `ChaosConfig::terrible_network` (250 ms latency, 15 % loss),\n`test_eventual_consistency` to 56/60, every baseline drifted,\ndifferential survivor liveness failed across rows, and long\nGilbert–Elliott one-way loss made acknowledged frames jump farther than\nthe bounded input ring can hold (`confirmed_inputs_for_frame`\nunavailable). It remains the clean eventual fix only alongside a\nseparate pacing/queue redesign; this session records the contract and\nevidence.\n\nThis change makes the limitation explicit instead:\n\n- `ComponentOutcome::SplitTail` reports a failed-closed component's\nbounded post-cut tail. `classify_component_scope_with_tail` accepts it\nonly when the first divergence is strictly after the delivery-ambiguity\nwindow, one side is a Running survivor and the other is\nall-`Synchronizing`, every survivor pair agrees over its full shared\nrange, and every failed-closed component's floor is within the caller's\ntail allowance. All other shapes remain `Forked`.\n- `docs/reconnect-playbook.md` (and its wiki mirror) states the\ncontract: the majority's certified history is authoritative, the\nisolated peer's post-cut tail is discarded, the prediction window bounds\nit (plus one frame of cut-observation slack), and recovery requires\nrebuilding the isolated session.\n- `PLAN.md` drops the completed P0 CAP-matrix item; the next queued work\nis the P1 list.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [x] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [ ] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy** (no production code\nchanged)\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [ ] I have added an entry to `CHANGELOG.md` for user-facing changes\n(none: no behavior changed; the existing behavior is now documented as\nan explicit contract)\n- [ ] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n-\n`asymmetric_one_way_partition_isolated_peer_exposes_only_a_bounded_tail`:\n3 peers, `ContinueWithout`. Reproduces #386 (pre-contract `[774, 774,\n104]`, divergence 96–104), now classifies as `SplitTail { shared_prefix:\n95, continued: [0], tail: 9 }` with a `max_prediction + 1` allowance;\nevery oracle divergence is strictly after the shared prefix; exact\nreplay; mutation controls flip a shared-prefix rewrite and an overlong\ntail to `Forked`.\n- `asymmetric_one_way_partition_variants_expose_only_bounded_tails`:\n3-peer `Halt`, 4-peer `ContinueWithout`, 4-peer `Halt`, each a legal\nbounded `SplitTail` with the expected survivor set and exact replay.\n- Four classifier unit tests: bounded split tail, overlong tail,\ndiverging-but-Running terminal, and divergence inside the cut window.\n\n**Verification:**\n\n- `cargo nextest run --no-fail-fast`: **3067/3067 passed** (73 skipped).\n- `cargo nextest run --features hot-join --no-fail-fast`: **3330/3330\npassed** (74 skipped).\n- `cargo fmt --check` and `cargo clippy --workspace --all-targets\n--features tokio,json -- -D warnings`: clean.\n- `python3 scripts/ci/agent-preflight.py --auto-fix`: all checks passed.\n- `cargo update`: no compatible updates (six root dependencies remain\ndeliberately pinned majors/minors).\n\n## Related Issues\n\nCloses #386\nCloses #382\nCloses #384",
-          "timestamp": "2026-11-10T18:08:46-08:00",
-          "tree_id": "ccc526c74d5e776874d5423ff83b8650cacb08d5",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/9c3b8584a414cf2ba22ac75ba75b019ba42220e7"
-        },
-        "date": 1794363430138,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 43588,
-            "range": "± 330",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 26063,
-            "range": "± 483",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 675,
-            "range": "± 75",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 870,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 6828,
-            "range": "± 251",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 6851,
             "range": "± 298",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "f6d42bf589f883b26cdfe865704533f1da47c40d",
+          "message": "test: pin rejected-operation journal dedup and bound (#480)\n\n## Summary\n\nFollow-up to #479: main mutation CI reported three missed mutants in\n`coordinated_drop_note_rejected` (the duplicate-operation check and the\none-entry-per-player journal bound). This adds a direct test that:\n\n- re-noting an existing rejected operation does not add a duplicate;\n- distinct rejected operations are retained;\n- inserting more than `num_players` operations keeps exactly\n`num_players`, evicting the oldest first.\n\nManual mutation check: replacing the duplicate check with `!=`, the trim\n`>` with `>=`, and the trim `>` with `==` each makes this test fail.\n\n## Verification\n\n- `cargo test --features hot-join --lib\nrejected_operation_journal_deduplicates_and_stays_bounded`: pass on\nclean source; fails under all three mutants.\n- `cargo clippy --workspace --all-targets --features tokio,json`: clean.\n\nRefs: #477, #479",
+          "timestamp": "2026-11-18T14:30:43Z",
+          "tree_id": "a327b686e3cb7d0992e4875e9603a63a1f33f439",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/f6d42bf589f883b26cdfe865704533f1da47c40d"
+        },
+        "date": 1795013034063,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 37876,
+            "range": "± 1999",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 22451,
+            "range": "± 701",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 641,
+            "range": "± 97",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 845,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 6649,
+            "range": "± 230",
             "unit": "ns/iter"
           }
         ]
