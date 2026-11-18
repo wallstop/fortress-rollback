@@ -4293,6 +4293,34 @@ mod input_queue_tests {
     }
 
     #[test]
+    fn evicted_prefix_then_retained_conflict_rejects_transactionally() {
+        let mut queue =
+            InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");
+        fill_sequential(&mut queue, 2);
+        queue.discard_confirmed_frames(Frame::new(1));
+        let before = queue.clone();
+
+        // Frame 0 is evicted (skip), frame 1 is retained and conflicts, and the
+        // suffix is otherwise valid. The conflict must still abort the whole
+        // install and leave the queue byte-for-byte unchanged; skipping the
+        // evicted prefix must not skip subsequent overlap comparisons.
+        let backfill = [
+            PlayerInput::new(Frame::new(0), TestInput { inp: 0 }),
+            PlayerInput::new(Frame::new(1), TestInput { inp: 99 }),
+            PlayerInput::new(Frame::new(2), TestInput { inp: 2 }),
+            PlayerInput::new(Frame::new(3), TestInput { inp: 3 }),
+        ];
+        assert_eq!(
+            queue.install_missing_backfill(&backfill, Frame::new(0)),
+            Err(RetainedHistoryError::ConflictingOverlap {
+                frame: Frame::new(1),
+            }),
+            "a retained conflict after an evicted prefix must reject the install"
+        );
+        assert_queue_unchanged(&queue, &before);
+    }
+
+    #[test]
     fn gapped_backfill_rejects_without_mutating_queue() {
         let mut queue =
             InputQueue::<TestConfig>::with_queue_length(0, 8).expect("valid test queue");

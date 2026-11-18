@@ -2559,6 +2559,97 @@ fn majority_component_continues_after_single_automatic_drop() {
     );
 }
 
+/// CAP matrix row 5: a one-way fault on the requester -> coordinator link must
+/// not stall a removal. The requester (peer 2) loses its direct path to the
+/// deterministic coordinator (peer 0), but peer 1 can reach both. The prepare
+/// is broadcast to every participant; peer 1 forwards it to the coordinator
+/// without admitting it, so coordinator-only admission still orders the
+/// certificate while the relay restores reachability.
+///
+/// Without the relay, peer 2's prepare only reaches the blocked link, the
+/// two-second attempt deadline expires, and the session fails closed.
+#[test]
+fn coordinator_link_loss_relays_prepare_and_commits() {
+    let schedule = disruption_schedule(
+        4,
+        vec![
+            (
+                CUT_STEP,
+                ScheduleEvent::Block {
+                    from: 2,
+                    to: 0,
+                    blocked: true,
+                },
+            ),
+            (120, ScheduleEvent::GracefulRemove { by: 2, target: 3 }),
+            (
+                400,
+                ScheduleEvent::Block {
+                    from: 2,
+                    to: 0,
+                    blocked: false,
+                },
+            ),
+        ],
+    );
+
+    // Keep the link-loss timeout above the two-second coordination deadline:
+    // without the relay, peer 2's prepare never reaches the coordinator and the
+    // attempt fails closed before the link heals. With the relay, the removal
+    // commits early and the healed mesh recovers.
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(5)),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    assert!(
+        report.verdict.failures.is_empty(),
+        "a relayed prepare must certify without failing closed: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        report
+            .blocked_drops_by_link
+            .get(&(2, 0))
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "the requester -> coordinator link must actually drop traffic"
+    );
+    for survivor in [0, 1, 2] {
+        assert_eq!(
+            report
+                .trace_tail
+                .last()
+                .map(|last| last.session_states[survivor]),
+            Some(TraceSessionState::Running),
+            "survivor {survivor} must stay Running after the relayed removal"
+        );
+        let dropped = report
+            .peer_event_payload_counts_by_peer
+            .get(survivor)
+            .into_iter()
+            .flat_map(|counts| counts.iter())
+            .filter(|(key, count)| key.kind == EventKind::PeerDropped && **count > 0)
+            .filter_map(|(key, _)| match key.payload {
+                PeerEventPayload::PlayerAddr { handle, .. } => Some(handle.as_usize()),
+                PeerEventPayload::Addr(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(
+            dropped.contains(&3),
+            "survivor {survivor} must observe the relayed removal of peer 3: {dropped:?}"
+        );
+        assert!(
+            report.final_confirmed[survivor]
+                > i32::try_from(CUT_STEP.saturating_mul(2)).unwrap_or(i32::MAX),
+            "survivor {survivor} must keep confirming after the relayed removal and link heal: {:?}",
+            report.final_confirmed
+        );
+    }
+}
+
 /// CAP matrix row 4: two independent graceful removals started at the same step
 /// in disjoint pairs. Both removed targets keep polling and authoring inputs
 /// until they observe their own certificates (the production

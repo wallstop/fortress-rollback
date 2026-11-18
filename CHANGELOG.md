@@ -67,7 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fail-closes the whole majority. The coordinated graceful-drop certificate keeps its exact
   shared participant set, but the deterministic lowest participant now owns the cut (announced
   before Ready so a donor backfill cannot deadlock), and a strict majority of matching Ready
-  witnesses commits even when a named survivor is unreachable. A still-alive target or an omitted
+  witnesses commits even when a named survivor is unreachable. A non-coordinator requester
+  broadcasts its prepare to the other participants, which forward it and the operation's reports
+  to the coordinator without admitting local attempts, so a lost requester-to-coordinator link
+  does not stall the certificate while a relay path exists. Superseded operations stay in a
+  bounded rejection journal and answer retransmitted prepares and reports with a fresh
+  `Superseded` abort. A still-alive target or an omitted
   survivor that receives the commit fails closed instead of continuing on a second history, and
   stale or conflicting commits can never fork a committed cut. The N=5 `3/1/1` permanent-partition
   and asymmetric A/B/C-vs-E view-split regressions are checked in.

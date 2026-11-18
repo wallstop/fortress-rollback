@@ -1325,7 +1325,7 @@ impl<T: Config> P2PSession<T> {
         }
         // Trim before insertion so the deque never grows past its bound even
         // transiently; a full deque must not allocate on `push_back`.
-        while self.coordinated_drop.rejected.len() >= self.num_players {
+        while self.coordinated_drop.rejected.len() >= self.num_players.max(1) {
             self.coordinated_drop.rejected.pop_front();
         }
         let mut copied = Vec::new();
@@ -1366,24 +1366,29 @@ impl<T: Config> P2PSession<T> {
         }
     }
 
-    /// Sends a prepare only through its admission authority: the coordinator
-    /// broadcasts to every participant, while any other requester sends solely
-    /// to the coordinator until it admits the operation. Each operation's
-    /// coordinator is the single ordering point for that operation; without
-    /// it, a requester's retransmissions can open a conflicting attempt on a
-    /// participant before the coordinator has ordered it.
-    fn coordinated_drop_send_prepare(
-        &mut self,
-        prepare: DropPrepare,
-        targets: &[DropTarget],
-        local_participant: u16,
-        coordinator: u16,
-    ) {
-        if local_participant == coordinator {
-            self.coordinated_drop_broadcast(DropControlMessage::Prepare(prepare), targets);
-            return;
+    /// Broadcasts a prepare to the operation's participants. The coordinator
+    /// admits it; every other participant instead forwards it to the
+    /// coordinator without admitting it locally. Broadcasting preserves
+    /// reachability through a relay when the requester's direct link to the
+    /// coordinator is down, while admission stays restricted to the
+    /// deterministic coordinator so a participant's retransmissions cannot open
+    /// a conflicting attempt. Non-participants are never sent a prepare: their
+    /// exact-membership validation would otherwise fail closed on a legitimate
+    /// asymmetric-timeout view.
+    fn coordinated_drop_send_prepare(&mut self, prepare: DropPrepare, targets: &[DropTarget]) {
+        let participants = prepare.participants.clone();
+        for endpoint in self.player_reg.remotes.values_mut() {
+            let is_target = endpoint.handles().iter().any(|handle| {
+                u16::try_from(handle.as_usize())
+                    .is_ok_and(|raw| targets.iter().any(|target| target.handle == raw))
+            });
+            let is_participant = endpoint.handles().iter().any(|handle| {
+                u16::try_from(handle.as_usize()).is_ok_and(|raw| participants.contains(&raw))
+            });
+            if !is_target && is_participant && endpoint.is_running() {
+                endpoint.send_drop_control_message(DropControlMessage::Prepare(prepare.clone()));
+            }
         }
-        self.coordinated_drop_send_prepare_direct(prepare, coordinator);
     }
 
     /// Forwards one prepare to the deterministic coordinator without admitting
@@ -1391,17 +1396,24 @@ impl<T: Config> P2PSession<T> {
     /// a peer's request, so a lost direct link between the requester and the
     /// coordinator does not stall the removal while a relay path exists.
     fn coordinated_drop_send_prepare_direct(&mut self, prepare: DropPrepare, coordinator: u16) {
-        let Some(PlayerType::Remote(coordinator_addr)) = self
+        self.coordinated_drop_send_control_to(coordinator, DropControlMessage::Prepare(prepare));
+    }
+
+    /// Sends one drop-control message directly to a designated participant.
+    /// Used only for relay paths; admission and validation stay at the
+    /// coordinator.
+    fn coordinated_drop_send_control_to(&mut self, participant: u16, message: DropControlMessage) {
+        let Some(PlayerType::Remote(participant_addr)) = self
             .player_reg
             .handles
-            .get(&PlayerHandle::new(usize::from(coordinator)))
+            .get(&PlayerHandle::new(usize::from(participant)))
             .cloned()
         else {
             return;
         };
-        if let Some(endpoint) = self.player_reg.remotes.get_mut(&coordinator_addr) {
+        if let Some(endpoint) = self.player_reg.remotes.get_mut(&participant_addr) {
             if endpoint.is_running() {
-                endpoint.send_drop_control_message(DropControlMessage::Prepare(prepare));
+                endpoint.send_drop_control_message(message);
             }
         }
     }
@@ -1836,7 +1848,7 @@ impl<T: Config> P2PSession<T> {
             started_at: now,
             last_broadcast_at: now,
         });
-        self.coordinated_drop_send_prepare(prepare, &targets, local_participant, coordinator);
+        self.coordinated_drop_send_prepare(prepare, &targets);
         self.coordinated_drop_broadcast(DropControlMessage::Report(report), &targets);
         // A two-endpoint session has a one-member survivor certificate and no
         // network round-trip to wait for. Drive that fast path immediately;
@@ -3102,8 +3114,6 @@ impl<T: Config> P2PSession<T> {
                     participants,
                 },
                 &targets,
-                local_participant,
-                coordinator,
             );
             for report in inventory_reports {
                 self.coordinated_drop_broadcast(DropControlMessage::Report(report), &targets);
@@ -8292,14 +8302,16 @@ impl<T: Config> P2PSession<T> {
     ///
     /// Each operation has its own coordinator: the lowest participant handle
     /// among that operation's participants, which exclude its targets. A
-    /// non-coordinator requester sends its `Prepare` solely to the coordinator
-    /// until the coordinator broadcasts the admitted operation; every other
-    /// participant ignores a prepare that did not come from that coordinator.
-    /// A participant may relay a prepare to the coordinator without admitting
-    /// it, so a lost direct requester-to-coordinator link does not stall the
-    /// operation while a relay path exists. Operations that share a
-    /// coordinator are serialized there; operations with different
-    /// coordinators are ordered by operation identity at each participant.
+    /// non-coordinator requester broadcasts its `Prepare` to the other
+    /// participants; a non-coordinator participant forwards it to the
+    /// coordinator without admitting it, and relays that operation's
+    /// inventory/ready/committed reports to the coordinator as well. Only the
+    /// coordinator's admission opens an attempt. That keeps reachability
+    /// through a relay when the requester's direct link to the coordinator is
+    /// lost while preventing a second, conflicting attempt from opening.
+    /// Operations that share a coordinator are serialized there; operations
+    /// with different coordinators are ordered by operation identity at each
+    /// participant.
     ///
     /// An incoming prepare that sorts **after** the coordinator's active
     /// attempt loses: the coordinator broadcasts a `Superseded` abort and keeps
@@ -16659,6 +16671,16 @@ mod tests {
             .sum()
     }
 
+    fn sent_message_count_to(
+        session: &P2PSession<TestConfig>,
+        addr: SocketAddr,
+        kind: crate::metrics::MessageKind,
+    ) -> u64 {
+        session.player_reg.remotes.get(&addr).map_or(0, |endpoint| {
+            endpoint.peer_metrics().messages_sent_by_kind.get(kind)
+        })
+    }
+
     fn drop_abort_sends(session: &P2PSession<TestConfig>) -> u64 {
         sent_message_count(session, crate::metrics::MessageKind::DropAbort)
     }
@@ -18139,9 +18161,19 @@ mod tests {
             "only the coordinator may admit a prepare"
         );
         assert_eq!(
-            sent_message_count(&session, crate::metrics::MessageKind::DropPrepare),
-            before.saturating_add(1),
-            "an intermediate participant must relay the prepare to the coordinator without admitting it"
+            sent_message_count(&session, crate::metrics::MessageKind::DropPrepare)
+                .saturating_sub(before),
+            1,
+            "an intermediate participant must relay the prepare to the coordinator only"
+        );
+        assert_eq!(
+            sent_message_count_to(
+                &session,
+                test_addr(9400),
+                crate::metrics::MessageKind::DropPrepare
+            ),
+            1,
+            "the relay must reach the coordinator endpoint"
         );
 
         session
