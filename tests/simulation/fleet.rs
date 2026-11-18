@@ -113,14 +113,14 @@ fn nightly_schedule(seed: u64, n_players: usize, noise: BackgroundNoise) -> Sche
     };
     let mut schedule = generate(seed, config);
 
-    // D14 is specifically retirement under lossy background traffic. Preserve
-    // lossy lifecycle exploration for stalls and live reconfiguration while
-    // keeping the known-red retirement cross-product out of the green tier.
+    // D14 lossy retirement under background traffic. Graceful removals now
+    // run as themselves (the backfill reorder and removed-target tail fixes
+    // below); crash/host-kill retirement remains quarantined until its own
+    // red class (no majority in a 2-peer mesh after a kill) is resolved.
     if noise != BackgroundNoise::Clean {
         for (_, event) in &mut schedule.events {
             let retired_peer = match event {
                 ScheduleEvent::PeerKill { peer } => Some(*peer),
-                ScheduleEvent::GracefulRemove { target, .. } => Some(*target),
                 ScheduleEvent::SpectatorHostKill { host } => Some(*host),
                 _ => None,
             };
@@ -471,8 +471,35 @@ fn swarm_materialized_schedule_replays_bit_identically_under_full_oracle() {
     assert_eq!(first.net_stats, second.net_stats);
 }
 
+/// Lossy graceful removal is a first-class green-tier class: the certificate
+/// must survive reordered donor backfill, retried identities, and a removed
+/// target's private post-cut tail. These are the exact seeds/events that
+/// reproduced the N=3 certificate wedge and the N=2 target-tail divergence
+/// (#460); each row must keep one survivor history and recover after the heal.
 #[test]
-fn non_clean_nightly_lifecycle_rewrites_only_retirement_stories() {
+fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
+    for (seed, n_players, noise) in [
+        (133_u64, 2_usize, BackgroundNoise::Rough),
+        (203, 2, BackgroundNoise::Swarm),
+        (273, 2, BackgroundNoise::Mild),
+        (378, 2, BackgroundNoise::Mild),
+        (428, 3, BackgroundNoise::Swarm),
+    ] {
+        let config = SimConfig {
+            steps: 1_500,
+            noise,
+            disconnect_behavior: DropPolicy::ContinueWithout,
+            scenario_mix: ScenarioMix::Lifecycle,
+            ..SimConfig::smoke(n_players)
+        };
+        let schedule = generate(seed, config);
+        let report = run(&schedule, &RunOptions::default());
+        report.expect_pass(&schedule);
+    }
+}
+
+#[test]
+fn non_clean_nightly_lifecycle_quarantines_only_crash_retirement() {
     for noise in [
         BackgroundNoise::Mild,
         BackgroundNoise::Rough,
@@ -484,11 +511,9 @@ fn non_clean_nightly_lifecycle_rewrites_only_retirement_stories() {
             assert!(
                 !schedule.events.iter().any(|(_, event)| matches!(
                     event,
-                    ScheduleEvent::PeerKill { .. }
-                        | ScheduleEvent::GracefulRemove { .. }
-                        | ScheduleEvent::SpectatorHostKill { .. }
+                    ScheduleEvent::PeerKill { .. } | ScheduleEvent::SpectatorHostKill { .. }
                 )),
-                "non-clean retirement escaped quarantine: noise={noise:?} seed={seed}"
+                "non-clean crash retirement escaped quarantine: noise={noise:?} seed={seed}"
             );
             assert!(
                 schedule.effective_lifecycle_event_count().unwrap_or(0) > 0,

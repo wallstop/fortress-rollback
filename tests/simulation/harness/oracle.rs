@@ -517,12 +517,24 @@ pub struct Oracle {
     /// Its **pre-retirement** observations still count — recorded states it
     /// produced before leaving are compared in (b), and its confirmed-input
     /// samples stand in (a) — so a peer that diverged before it left cannot
-    /// escape detection by being retired.
+    /// escape detection by being retired. A gracefully removed target's
+    /// samples above the survivor-visible cut are excluded by
+    /// [`Self::cap_retired_confirmed_inputs`]: that tail is private to the
+    /// leaving process and no survivor can expose it.
     dead: Vec<bool>,
     /// Certified removal cuts cap a retired generation's state comparisons.
     /// Later observations belong to the abandoned pre-removal trajectory and
     /// must not be compared with the survivor's frozen continuation.
     retired_state_ceilings: Vec<Option<i32>>,
+    /// Certified removal cuts cap a retired peer's confirmed-input **authorship**
+    /// too. A gracefully removed target can keep confirming its own real
+    /// inputs for a few frames after the survivors froze its slot; that
+    /// post-cut tail is private to a process leaving the match and must not
+    /// become the canonical value for a frame no survivor can expose. Samples
+    /// above the ceiling are ignored and any already-canonical frames authored
+    /// by the retired peer above it are dropped so a survivor re-establishes
+    /// the exposed value.
+    confirmed_input_ceilings: Vec<Option<i32>>,
     /// Peers whose live generation was replaced by a hot-join snapshot. Their
     /// pre-activation bridge frames are replayed as `Confirmed`, so a slot
     /// that was frozen before the snapshot shows its `Disconnected` run only
@@ -550,6 +562,7 @@ impl Oracle {
             per_class_cap: 8,
             dead: vec![false; n_players],
             retired_state_ceilings: vec![None; n_players],
+            confirmed_input_ceilings: vec![None; n_players],
             replacement_generations: vec![false; n_players],
             heal: HealLiveness::default(),
             violation_allowlist: DEFAULT_VIOLATION_ALLOWLIST,
@@ -589,8 +602,10 @@ impl Oracle {
 
     /// Caps a retired peer's state comparisons at the first post-cut state.
     /// Post-state `F+1` still consumes the nominal input at cut `F`; only the
-    /// abandoned generation from `F+2` onward is excluded. Input authorship
-    /// above the cut is pruned separately by [`Self::begin_replacement_generation`].
+    /// abandoned generation from `F+2` onward is excluded. Confirmed-input
+    /// authorship above the cut is pruned by
+    /// [`Self::cap_retired_confirmed_inputs`] (graceful removal) or
+    /// [`Self::begin_replacement_generation`] (hot-join replacement).
     pub fn cap_retired_state_comparison(&mut self, peer: usize, freeze_frame: i32) {
         assert!(
             peer < self.retired_state_ceilings.len(),
@@ -598,6 +613,44 @@ impl Oracle {
             self.retired_state_ceilings.len()
         );
         self.retired_state_ceilings[peer] = Some(freeze_frame);
+    }
+
+    /// Caps a gracefully removed peer's confirmed-input authorship at the
+    /// survivor-visible removal cut. Samples the retired peer records above
+    /// `ceiling` are ignored, and any frames it already authored above the
+    /// ceiling are dropped so a survivor's exposed (frozen) value becomes
+    /// canonical. Frames at or below the cut keep their full coverage.
+    pub fn cap_retired_confirmed_inputs(&mut self, peer: usize, ceiling: i32) {
+        assert!(
+            peer < self.confirmed_input_ceilings.len(),
+            "cap_retired_confirmed_inputs: peer {peer} out of range (len {})",
+            self.confirmed_input_ceilings.len()
+        );
+        self.confirmed_input_ceilings[peer] = Some(ceiling);
+        self.canonical_inputs
+            .retain(|frame, (first_author, _)| *first_author != peer || *frame <= ceiling);
+        // Observations for the removal step can run before the event is applied
+        // (or the peer's final claims can be sampled in the same step), so a
+        // private-tail mismatch may already be recorded. Drop divergences that
+        // name this peer above the cut: neither an author nor an observer of a
+        // private post-cut tail is canonical evidence.
+        self.failures.retain(|failure| match failure {
+            OracleFailure::ConfirmedInputDivergence {
+                frame,
+                peer: observer,
+                first_author,
+                ..
+            } => *frame <= ceiling || (*observer != peer && *first_author != peer),
+            OracleFailure::StateDivergence {
+                frame,
+                peer: observer,
+                first_author,
+                ..
+            } => {
+                *frame <= ceiling.saturating_add(1) || (*observer != peer && *first_author != peer)
+            },
+            _ => true,
+        });
     }
 
     /// Starts a new live generation for `peer` without marking it dead. A
@@ -615,6 +668,15 @@ impl Oracle {
         );
         self.canonical_inputs
             .retain(|frame, (first_author, _)| *first_author != peer || *frame < input_from_frame);
+        // The replacement is a new live generation at the same slot: the old
+        // generation's removal cut no longer caps either its confirmed-input
+        // authorship or its state comparisons.
+        if let Some(ceiling) = self.confirmed_input_ceilings.get_mut(peer) {
+            *ceiling = None;
+        }
+        if let Some(ceiling) = self.retired_state_ceilings.get_mut(peer) {
+            *ceiling = None;
+        }
         if let Some(replaced) = self.replacement_generations.get_mut(peer) {
             *replaced = true;
         }
@@ -714,6 +776,15 @@ impl Oracle {
         frame: i32,
         values: Vec<InputFingerprint>,
     ) {
+        if self
+            .confirmed_input_ceilings
+            .get(peer)
+            .copied()
+            .flatten()
+            .is_some_and(|ceiling| frame > ceiling)
+        {
+            return;
+        }
         match self.canonical_inputs.get(&frame) {
             None => {
                 self.canonical_inputs.insert(frame, (peer, values));
@@ -1836,6 +1907,75 @@ mod tests {
             "a live peer with the same shortfall must fail: {:?}",
             control.failures
         );
+    }
+
+    /// A gracefully removed target's private post-cut tail cannot leave a
+    /// recorded divergence behind when the cut cap is applied after the
+    /// samples. Below-cut evidence stays.
+    #[test]
+    fn oracle_retired_input_cap_drops_already_recorded_private_tail_failures() {
+        let input = |value: u32| vec![InputFingerprint::from_bytes(value, b"slot")];
+        let mut oracle = Oracle::new(2);
+        // Below the cut the peers agree; above it the target authors a private
+        // value and the survivor's frozen value differs.
+        oracle.observe_confirmed_inputs(0, 4, input(7));
+        oracle.observe_confirmed_inputs(1, 4, input(7));
+        oracle.observe_confirmed_inputs(0, 5, input(8));
+        oracle.observe_confirmed_inputs(1, 5, input(9));
+        assert!(
+            oracle.failures.iter().any(|failure| matches!(
+                failure,
+                OracleFailure::ConfirmedInputDivergence { frame: 5, .. }
+            )),
+            "the pre-cap mismatch must be recorded"
+        );
+
+        oracle.cap_retired_confirmed_inputs(0, 4);
+
+        assert!(
+            !oracle
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, OracleFailure::ConfirmedInputDivergence { .. })),
+            "the private post-cut tail divergence must be dropped: {:?}",
+            oracle.failures
+        );
+        assert!(
+            !oracle.canonical_inputs.contains_key(&5),
+            "the target's post-cut canonical entry must be removed"
+        );
+        assert_eq!(
+            oracle.canonical_inputs.get(&4).map(|(author, _)| *author),
+            Some(0),
+            "below-cut coverage is retained"
+        );
+    }
+
+    /// A hot-join replacement is a new live generation: the previous
+    /// generation's removal cut must not keep suppressing the slot's inputs or
+    /// states above it.
+    #[test]
+    fn oracle_replacement_generation_clears_retirement_ceilings() {
+        let input = |value: u32| vec![InputFingerprint::from_bytes(value, b"slot")];
+        let mut oracle = Oracle::new(2);
+        oracle.observe_confirmed_inputs(0, 4, input(1));
+        oracle.cap_retired_confirmed_inputs(0, 4);
+        oracle.cap_retired_state_comparison(0, 5);
+        oracle.observe_confirmed_inputs(0, 6, input(2));
+        assert!(
+            !oracle.canonical_inputs.contains_key(&6),
+            "the pre-replacement sample is capped"
+        );
+
+        oracle.begin_replacement_generation(0, 5);
+        oracle.observe_confirmed_inputs(0, 6, input(3));
+
+        assert_eq!(
+            oracle.canonical_inputs.get(&6).map(|(author, _)| *author),
+            Some(0),
+            "the replacement generation's inputs above the old cut are canonical"
+        );
+        assert_eq!(oracle.retired_state_ceilings[0], None);
     }
 
     /// A retired peer remains evidence through its own confirmed prefix, but

@@ -2345,8 +2345,17 @@ impl<T: Config> P2PSession<T> {
         let Some(start) = Self::coordinated_drop_required_start(active, cut)? else {
             return Ok(());
         };
-        if Self::coordinated_drop_selected_donor(active, start, cut).is_none()
-            || backfill.chunk_count == 0
+        if Self::coordinated_drop_selected_donor(active, start, cut).is_none() {
+            // The donor set is computed from inventory reports, and a donor's
+            // chunks can be reordered ahead of those reports under loss. The
+            // chunk cannot be attributed (or bounds-checked against a chosen
+            // donor) yet, but discarding it here is safe: the selected donor
+            // retransmits every poll while the attempt is active. Failing the
+            // certificate on this reorder converted a transient ordering into
+            // a permanent fail-closed (N=3 lossy retirement).
+            return Ok(());
+        }
+        if backfill.chunk_count == 0
             || backfill.frame_count == 0
             || backfill.chunk_index >= backfill.chunk_count
             || backfill.start_frame < start
@@ -3024,7 +3033,23 @@ impl<T: Config> P2PSession<T> {
             )
         };
         if required_start.is_some() && donor.is_none() {
-            self.coordinated_drop_fail_closed(DropAbortReason::MissingHistory, true);
+            // "No donor" is only terminal once every participant's inventory is
+            // known (or the missing ones are unresponsive). Under lossy/reordered
+            // delivery a donor's report commonly lands after the cut
+            // announcement; failing on that transient order wedged the whole
+            // certificate (N=3 lossy retirement). Wait for the remaining
+            // reports; the 2s attempt timeout still bounds a genuine
+            // no-donor state.
+            let reports_complete = self.coordinated_drop.active.as_ref().is_some_and(|active| {
+                active.reports.len() == active.participants.len()
+                    || self.coordinated_drop_missing_reports_are_unresponsive(
+                        &active.participants,
+                        &active.reports,
+                    )
+            });
+            if reports_complete {
+                self.coordinated_drop_fail_closed(DropAbortReason::MissingHistory, true);
+            }
             return;
         }
         if let (Some(start), Some(donor)) = (required_start, donor) {
