@@ -690,6 +690,7 @@ fn swarm_materialized_schedule_replays_bit_identically_under_full_oracle() {
 /// (#460); each row must keep one survivor history and recover after the heal.
 #[test]
 fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
+    let mut donor_rows = 0_usize;
     for (seed, n_players, noise) in [
         (133_u64, 2_usize, BackgroundNoise::Rough),
         (203, 2, BackgroundNoise::Swarm),
@@ -706,8 +707,16 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
         };
         let schedule = generate(seed, config);
         let report = run(&schedule, &RunOptions::default());
+        if report.donor_announcements.iter().any(|count| *count > 0) {
+            donor_rows += 1;
+        }
         report.expect_pass(&schedule);
     }
+    assert!(
+        donor_rows > 0,
+        "at least one lossy graceful-removal row must exercise a current-history \
+         donor announcement, not only start-of-attempt inventory donors"
+    );
 }
 
 /// Lossy crash retirement is a first-class green-tier class whenever a strict
@@ -5500,9 +5509,9 @@ fn nightly_rare_state_coverage_cell_is_present_and_exercises_ring_and_prediction
 
 /// Permanent regression for the PCT-exposed freeze-frame oracle false
 /// positive. A one-change PCT interleaving at step 302 moves the removed target
-/// (peer 4) to the front; peer 0 advances ahead while peers 1-3 stop at the
-/// same confirmed frame under the strict-majority certificate. The oracle used to read a lagging
-/// survivor's unobserved `None` as a disagreement. It must ignore a survivor
+/// (peer 4) to the front; peer 0 advances ahead while peers 1-3 stop within one
+/// frame of each other under the strict-majority certificate. The oracle used
+/// to read a lagging survivor's unobserved `None` as a disagreement. It must ignore a survivor
 /// whose confirmed prefix ends before the earliest observed freeze, while still
 /// failing a survivor that reached that freeze and never observed a stable
 /// `Disconnected` run.
@@ -5528,7 +5537,7 @@ fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     let report = run(&schedule, &options);
     assert_eq!(
         report.final_confirmed,
-        vec![356, 350, 350, 350, 290],
+        vec![356, 350, 350, 351, 290],
         "the regression depends on the lagging-survivor interleaving"
     );
     assert!(

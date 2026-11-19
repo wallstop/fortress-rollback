@@ -1279,6 +1279,9 @@ pub struct RunReport {
     pub max_confirmation_stall_steps_by_peer: Vec<u64>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
     pub metrics: Vec<fortress_rollback::SessionMetrics>,
+    /// Accepted current-history donor announcements per peer. This counts
+    /// announcement acceptance, not completed backfills.
+    pub donor_announcements: Vec<u64>,
     /// Bounded samples for skew/control-loop analysis: ordinary runs retain at
     /// most 12, schema-v17 wait-policy runs at most 100 fixed cuts, and dense
     /// H-SKEW runs use the player-scaled phase capacity. Empty for legacy
@@ -3889,6 +3892,10 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     // target that has not synchronized yet must not be mistaken for one that
     // left `Running` before its removal was certified.
     let mut live_removal_seen_running = vec![false; n];
+    // Request-time survivor receipt ceilings for live targets. Only a fallback:
+    // the certified cut is observed from a survivor after the commit and can be
+    // higher (the cut is the maximum target receipt across survivors).
+    let mut live_removal_request_ceilings: Vec<Option<i32>> = vec![None; n];
     let mut differential_hot_join_control: Option<DifferentialHotJoinControl> = None;
     #[cfg(feature = "hot-join")]
     let mut pending_hot_join: Option<PendingHotJoin<I>> = None;
@@ -4346,7 +4353,24 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                 })
                                 .map(Frame::as_i32)
                                 .min();
-                            if let Some(ceiling) = removal_ceiling {
+                            // Production `remove_player` starts an
+                            // asynchronous certificate while the target keeps
+                            // running until it observes its own commit. The
+                            // historical harness model retired the target at
+                            // the request step; `live_graceful_target` keeps it
+                            // alive and defers retirement until the certificate
+                            // moves it out of `Running`.
+                            if options.live_graceful_target {
+                                // The request-time minimum is below the
+                                // certified cut (the cut is the maximum target
+                                // receipt across survivors, and the target may
+                                // have received more since). Capping here would
+                                // ignore exactly the shared history the live
+                                // mode exists to check, so defer the cap to
+                                // retirement and record the request-time value
+                                // only as a fallback.
+                                live_removal_request_ceilings[*target] = removal_ceiling;
+                            } else if let Some(ceiling) = removal_ceiling {
                                 oracle.cap_retired_confirmed_inputs(*target, ceiling);
                                 // Recorded state N+1 is the result of simulating
                                 // input N; the first state the survivors did not
@@ -4356,13 +4380,6 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                     ceiling.saturating_add(1),
                                 );
                             }
-                            // Production `remove_player` starts an
-                            // asynchronous certificate while the target keeps
-                            // running until it observes its own commit. The
-                            // historical harness model retired the target at
-                            // the request step; `live_graceful_target` keeps it
-                            // alive and defers retirement until the certificate
-                            // moves it out of `Running`.
                             if options.live_graceful_target {
                                 if !live_removal_targets.contains(target) {
                                     live_removal_targets.push(*target);
@@ -4988,11 +5005,29 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     continue;
                 }
                 let handle = PlayerHandle::new(*target);
-                let certified_by_survivor = peers.iter().enumerate().any(|(observer, slot)| {
-                    observer != *target
-                        && !dead[observer]
-                        && slot.session.diagnostic_player_connected(handle) == Some(false)
-                });
+                // The certified cut is the post-commit receipt of any survivor
+                // (all of them converge on the same frozen frame). It bounds
+                // the target's comparable shared history exactly; the
+                // request-time ceiling is only a fallback for a target that
+                // left `Running` without a survivor certificate.
+                let certified_cut = peers
+                    .iter()
+                    .enumerate()
+                    .filter(|(observer, _slot)| *observer != *target && !dead[*observer])
+                    .filter(|(_observer, slot)| {
+                        slot.session.diagnostic_player_connected(handle) == Some(false)
+                    })
+                    .filter_map(|(_observer, slot)| {
+                        slot.session.diagnostic_player_receipt_frame(handle)
+                    })
+                    .map(Frame::as_i32)
+                    .max();
+                let ceiling = certified_cut.or(live_removal_request_ceilings[*target]);
+                if let Some(ceiling) = ceiling {
+                    oracle.cap_retired_confirmed_inputs(*target, ceiling);
+                    oracle.cap_retired_state_comparison(*target, ceiling.saturating_add(1));
+                }
+                let certified_by_survivor = certified_cut.is_some();
                 if !certified_by_survivor {
                     if !live_removal_seen_running[*target] {
                         // Still synchronizing for the first time; the removal
@@ -5412,6 +5447,10 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
 
     let metrics: Vec<fortress_rollback::SessionMetrics> =
         peers.iter().map(|slot| slot.session.metrics()).collect();
+    let donor_announcements: Vec<u64> = peers
+        .iter()
+        .map(|slot| slot.session.diagnostic_donor_announcements_accepted())
+        .collect();
 
     // Final observations.
     let mut violation_census: BTreeMap<ViolationSignature, u64> = BTreeMap::new();
@@ -5863,6 +5902,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         load_game_state_observations,
         max_confirmation_stall_steps_by_peer,
         metrics,
+        donor_announcements,
         progress_samples,
         frame_opportunities,
         wait_frames_obeyed,

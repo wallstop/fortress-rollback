@@ -256,6 +256,8 @@ pub(super) fn fixtures() -> Vec<(&'static str, Message)> {
         }),
         MessageBody::DropBackfill(DropBackfill {
             operation: operation(),
+            donor: 0,
+            range_start: Frame::NULL,
             chunk_index: 1,
             chunk_count: 3,
             start_frame: Frame::new(24),
@@ -343,13 +345,39 @@ pub(super) fn expected(body: &MessageBody) -> &'static [u8] {
 }
 
 #[test]
-fn every_protocol_v2_variant_has_immutable_exact_bytes() {
-    super::assert_wire_golden_suite(WIRE_GOLDEN_VERSION, fixtures(), expected);
+fn every_protocol_v2_variant_is_rejected_after_the_v3_bump() {
+    const {
+        assert!(
+            crate::PROTOCOL_VERSION > WIRE_GOLDEN_VERSION,
+            "released v2 fixtures become a rejection suite after a version bump"
+        );
+    }
+    for (variant, message) in fixtures() {
+        let expected_bytes = expected(&message.body);
+        // The drop-backfill wire struct gained donor/range fields after v2.
+        // The frozen v2 body can no longer decode under the current generic
+        // struct, but the version gate must still reject it.
+        if !matches!(&message.body, MessageBody::DropBackfill(_)) {
+            let generic: Message =
+                super::decode_value(expected_bytes).expect("fixture must generically decode");
+            assert_eq!(
+                generic.body, message.body,
+                "generic body decode for {variant}"
+            );
+            assert_eq!(generic.header.protocol_version, WIRE_GOLDEN_VERSION);
+        }
+        let error =
+            super::decode_message(expected_bytes).expect_err("released v2 packet must reject");
+        assert!(
+            error.to_string().contains("unsupported protocol version 2"),
+            "v2 rejection for {variant}: {error}"
+        );
+    }
 }
 
 #[cfg(not(feature = "hot-join"))]
 #[test]
-fn hot_join_v2_goldens_are_recognized_when_feature_is_disabled() {
+fn hot_join_v2_goldens_reject_at_the_version_before_feature_dispatch() {
     for (_, message) in fixtures().into_iter().filter(|(_, message)| {
         matches!(
             &message.body,
@@ -363,9 +391,7 @@ fn hot_join_v2_goldens_are_recognized_when_feature_is_disabled() {
         )
     }) {
         let error = super::decode_message(expected(&message.body))
-            .expect_err("disabled hot-join fixture must reject");
-        assert!(error
-            .to_string()
-            .contains("requires the disabled hot-join feature"));
+            .expect_err("released v2 hot-join fixture must reject");
+        assert!(error.to_string().contains("unsupported protocol version 2"));
     }
 }

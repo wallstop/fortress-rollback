@@ -446,6 +446,14 @@ pub(crate) enum DropReportStage {
     Ready,
     /// The participant has applied the commit idempotently.
     Committed,
+    /// A participant's assertion that its CURRENT retained history can serve a
+    /// backfill range. `cut` carries the earliest servable frame and
+    /// `cut_digest` the digest the donor computes for the certified cut.
+    Donor,
+    /// A removed target's acknowledgement of its own certificate. Distinct from
+    /// [`Self::Committed`] so a target (or an omitted session that failed
+    /// closed) can never be counted as survivor commit evidence.
+    TargetAck,
 }
 
 /// Contiguous retained input range for one target slot.
@@ -486,6 +494,14 @@ pub(crate) struct DropReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DropBackfill {
     pub operation: DropOperationId,
+    /// Participant handle that produced this chunk. Relays preserve it, so a
+    /// receiver attributes every chunk of a grid to the selected donor instead
+    /// of inferring the donor from the layout alone.
+    pub donor: u16,
+    /// First frame of the donor's whole backfill range. Every chunk of the
+    /// range carries it, so the canonical grid is independent of delivery
+    /// order and a stale higher-start chunk is recognizable.
+    pub range_start: Frame,
     pub chunk_index: u16,
     pub chunk_count: u16,
     pub start_frame: Frame,
@@ -527,6 +543,18 @@ pub(crate) struct DropAbort {
     pub operation: DropOperationId,
     pub reason: DropAbortReason,
 }
+
+/// A participant's claim that its **current** retained history can serve the
+/// whole backfill range for a coordinated drop.
+///
+/// Inventory reports are start-of-attempt snapshots. A survivor can become able
+/// to donate afterwards (for example by receiving the last missing target
+/// frames through ordinary input replication), and every receiver needs to
+/// attribute and bound the chunks it then sends. The announcement is carried by
+/// a [`DropReport`] with [`DropReportStage::Donor`]: `cut` is the donor's
+/// earliest servable frame and `cut_digest` is the digest it computes for the
+/// operation's certified cut. Receivers re-derive the canonical chunk count
+/// from `[start, cut]` and the target set instead of trusting a range width.
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MessageBody {
@@ -654,6 +682,8 @@ impl MessageBody {
             },
             Self::DropBackfill(backfill) => {
                 16 // DropOperationId
+                    + 2 // donor
+                    + FRAME // range_start
                     + 2 // chunk_index
                     + 2 // chunk_count
                     + FRAME // start_frame
@@ -1092,6 +1122,8 @@ mod tests {
             (
                 MessageBody::DropBackfill(DropBackfill {
                     operation: DropOperationId::default(),
+                    donor: 0,
+                    range_start: Frame::NULL,
                     chunk_index: 0,
                     chunk_count: 1,
                     start_frame: Frame::NULL,

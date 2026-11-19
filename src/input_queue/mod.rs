@@ -4290,6 +4290,15 @@ mod input_queue_tests {
             "a conflicting backfill for the reclaimed floor must not be skipped"
         );
         assert_queue_unchanged(&queue, &before);
+        assert_eq!(
+            queue.install_missing_backfill(
+                &[PlayerInput::new(Frame::new(0), TestInput { inp: 0 })],
+                Frame::new(0),
+            ),
+            Ok(0),
+            "a matching reclaimed-floor value is a harmless already-satisfied overlap"
+        );
+        assert_queue_unchanged(&queue, &before);
     }
 
     #[test]

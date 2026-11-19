@@ -1062,6 +1062,7 @@ mod tests {
             load_game_state_observations: Vec::new(),
             max_confirmation_stall_steps_by_peer: Vec::new(),
             metrics: vec![fortress_rollback::SessionMetrics::default(); n],
+            donor_announcements: vec![0; n],
             progress_samples: Vec::new(),
             frame_opportunities: Vec::new(),
             wait_frames_obeyed: Vec::new(),
