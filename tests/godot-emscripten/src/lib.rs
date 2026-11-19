@@ -273,11 +273,11 @@ fn handle_probe_requests(requests: RequestVec<ProbeConfig>) {
 /// including the live-target commit retransmission path. The survivor certifies
 /// the drop and the removed session applies its own committed certificate.
 fn run_removal_probe() -> Result<(), String> {
+    let base = Instant::now();
     let offset_ms = Arc::new(AtomicU64::new(0));
     let clock_offset = Arc::clone(&offset_ms);
-    let clock: ClockFn = Arc::new(move || {
-        Instant::now() + Duration::from_millis(clock_offset.load(Ordering::Relaxed))
-    });
+    let clock: ClockFn =
+        Arc::new(move || base + Duration::from_millis(clock_offset.load(Ordering::Relaxed)));
     let mut pair = create_sessions(
         Some(clock),
         ProtocolConfig::default().quality_report_interval,
