@@ -1279,6 +1279,17 @@ pub struct RunReport {
     pub max_confirmation_stall_steps_by_peer: Vec<u64>,
     /// Each peer's final [`SessionMetrics`] snapshot (indexed by peer).
     pub metrics: Vec<fortress_rollback::SessionMetrics>,
+    /// Accepted current-history donor announcements per peer. This counts
+    /// announcement acceptance, not completed backfills.
+    pub donor_announcements: Vec<u64>,
+    /// Backfill chunks installed from an announced current-history donor's
+    /// grid, per peer. A nonzero value proves the announced path supplied
+    /// history that was actually installed.
+    pub announced_backfill_chunks: Vec<u64>,
+    /// Every installed backfill chunk per peer, regardless of donor source.
+    /// A nonzero value proves the certificate had to backfill a retained
+    /// suffix rather than committing from start-of-attempt history alone.
+    pub backfill_chunks: Vec<u64>,
     /// Bounded samples for skew/control-loop analysis: ordinary runs retain at
     /// most 12, schema-v17 wait-policy runs at most 100 fixed cuts, and dense
     /// H-SKEW runs use the player-scaled phase capacity. Empty for legacy
@@ -1336,6 +1347,9 @@ pub struct RunReport {
     /// Same event counts split by observing peer and relevant event payload.
     /// Indexed by observing peer.
     pub peer_event_payload_counts_by_peer: Vec<BTreeMap<PeerEventKey, u64>>,
+    /// Ordered `PeerDropped` handles each peer observed, in emission order.
+    /// Indexed by observing peer; bounded to one entry per other player.
+    pub peer_dropped_order_by_peer: Vec<Vec<u16>>,
     /// Component-scoped confirmed-history evidence captured when
     /// [`RunOptions::component_scope`] declared a partition layout.
     pub component_scope: Option<ComponentScopeEvidence>,
@@ -3889,6 +3903,10 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     // target that has not synchronized yet must not be mistaken for one that
     // left `Running` before its removal was certified.
     let mut live_removal_seen_running = vec![false; n];
+    // Request-time survivor receipt ceilings for live targets. Only a fallback:
+    // the certified cut is observed from a survivor after the commit and can be
+    // higher (the cut is the maximum target receipt across survivors).
+    let mut live_removal_request_ceilings: Vec<Option<i32>> = vec![None; n];
     let mut differential_hot_join_control: Option<DifferentialHotJoinControl> = None;
     #[cfg(feature = "hot-join")]
     let mut pending_hot_join: Option<PendingHotJoin<I>> = None;
@@ -3903,6 +3921,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     let mut peer_event_counts: BTreeMap<EventKind, u64> = BTreeMap::new();
     let mut peer_event_counts_by_peer = vec![BTreeMap::new(); n];
     let mut peer_event_payload_counts_by_peer = vec![BTreeMap::new(); n];
+    let mut peer_dropped_order_by_peer: Vec<Vec<u16>> = vec![Vec::new(); n];
     let mut load_game_state_observations: Vec<LoadGameStateObservation> = Vec::new();
     let mut next_event = 0usize;
     // Per-peer stall deadline (exclusive step): peer `i` is frozen while
@@ -4346,7 +4365,24 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                 })
                                 .map(Frame::as_i32)
                                 .min();
-                            if let Some(ceiling) = removal_ceiling {
+                            // Production `remove_player` starts an
+                            // asynchronous certificate while the target keeps
+                            // running until it observes its own commit. The
+                            // historical harness model retired the target at
+                            // the request step; `live_graceful_target` keeps it
+                            // alive and defers retirement until the certificate
+                            // moves it out of `Running`.
+                            if options.live_graceful_target {
+                                // The request-time minimum is below the
+                                // certified cut (the cut is the maximum target
+                                // receipt across survivors, and the target may
+                                // have received more since). Capping here would
+                                // ignore exactly the shared history the live
+                                // mode exists to check, so defer the cap to
+                                // retirement and record the request-time value
+                                // only as a fallback.
+                                live_removal_request_ceilings[*target] = removal_ceiling;
+                            } else if let Some(ceiling) = removal_ceiling {
                                 oracle.cap_retired_confirmed_inputs(*target, ceiling);
                                 // Recorded state N+1 is the result of simulating
                                 // input N; the first state the survivors did not
@@ -4356,13 +4392,6 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                                     ceiling.saturating_add(1),
                                 );
                             }
-                            // Production `remove_player` starts an
-                            // asynchronous certificate while the target keeps
-                            // running until it observes its own commit. The
-                            // historical harness model retired the target at
-                            // the request step; `live_graceful_target` keeps it
-                            // alive and defers retirement until the certificate
-                            // moves it out of `Running`.
                             if options.live_graceful_target {
                                 if !live_removal_targets.contains(target) {
                                     live_removal_targets.push(*target);
@@ -4683,6 +4712,15 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                         if let Some(key) = peer_event_key::<I>(event) {
                             *peer_event_payload_counts_by_peer[i].entry(key).or_default() += 1;
                         }
+                        // alloc-bound: one handle per other player in a
+                        // mesh bounded to 16 players.
+                        if let FortressEvent::PeerDropped { handle, .. } = event {
+                            if let Ok(handle) = u16::try_from(handle.as_usize()) {
+                                if peer_dropped_order_by_peer[i].len() < n {
+                                    peer_dropped_order_by_peer[i].push(handle);
+                                }
+                            }
+                        }
                         if let FortressEvent::DesyncDetected { frame, .. } = event {
                             oracle.observe_desync_event(i, *frame);
                         }
@@ -4988,26 +5026,41 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     continue;
                 }
                 let handle = PlayerHandle::new(*target);
-                let certified_by_survivor = peers.iter().enumerate().any(|(observer, slot)| {
-                    observer != *target
-                        && !dead[observer]
-                        && slot.session.diagnostic_player_connected(handle) == Some(false)
-                });
-                if !certified_by_survivor {
+                // The certified cut is the post-commit receipt of any survivor
+                // (all of them converge on the same frozen frame). It bounds
+                // the target's comparable shared history exactly; the
+                // request-time ceiling is only a fallback for a target that
+                // left `Running` without a survivor certificate.
+                let certified_cut = peers
+                    .iter()
+                    .enumerate()
+                    .filter(|(observer, _slot)| *observer != *target && !dead[*observer])
+                    .filter(|(_observer, slot)| {
+                        slot.session.diagnostic_player_connected(handle) == Some(false)
+                    })
+                    .filter_map(|(_observer, slot)| {
+                        slot.session.diagnostic_player_receipt_frame(handle)
+                    })
+                    .map(Frame::as_i32)
+                    .max();
+                if let Some(cut) = certified_cut {
+                    // The certified cut is the exact bound; deferring the cap
+                    // until it is observable avoids permanently filtering
+                    // shared history at the lower request-time ceiling.
+                    oracle.cap_retired_confirmed_inputs(*target, cut);
+                    oracle.cap_retired_state_comparison(*target, cut.saturating_add(1));
+                } else {
                     if !live_removal_seen_running[*target] {
                         // Still synchronizing for the first time; the removal
                         // may simply be waiting for it to join.
                         continue;
                     }
-                    oracle.observe_runner_error(
-                        "live_target_premature_exit",
-                        *target,
-                        step,
-                        format!(
-                            "live graceful-removal target left Running before any survivor certified its removal (state={:?})",
-                            peers[*target].session.current_state()
-                        ),
-                    );
+                    // The target can observe its certificate before a
+                    // survivor's endpoint bookkeeping is sampled, especially
+                    // under asymmetric delivery. Defer the retirement, the
+                    // fallback cap, and the premature-exit verdict to the end
+                    // of the run so a later-observable certified cut wins.
+                    continue;
                 }
                 retire_peer_for_lifecycle(
                     *target,
@@ -5412,6 +5465,21 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
 
     let metrics: Vec<fortress_rollback::SessionMetrics> =
         peers.iter().map(|slot| slot.session.metrics()).collect();
+    let donor_announcements: Vec<u64> = peers
+        .iter()
+        .map(|slot| slot.session.diagnostic_donor_announcements_accepted())
+        .collect();
+    let announced_backfill_chunks: Vec<u64> = peers
+        .iter()
+        .map(|slot| {
+            slot.session
+                .diagnostic_announced_backfill_chunks_installed()
+        })
+        .collect();
+    let backfill_chunks: Vec<u64> = peers
+        .iter()
+        .map(|slot| slot.session.diagnostic_backfill_chunks_installed())
+        .collect();
 
     // Final observations.
     let mut violation_census: BTreeMap<ViolationSignature, u64> = BTreeMap::new();
@@ -5639,6 +5707,54 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         })
         .collect();
 
+    // Finalize live graceful-removal targets that left `Running` before a
+    // survivor's certified cut was sampled. If a survivor eventually exposed
+    // the certified cut, it is the exact bound; otherwise the request-time
+    // ceiling is the fallback and the early exit is a genuine regression.
+    for target in &live_removal_targets {
+        if dead[*target] {
+            continue;
+        }
+        let handle = PlayerHandle::new(*target);
+        let certified_cut = peers
+            .iter()
+            .enumerate()
+            .filter(|(observer, _slot)| *observer != *target && !dead[*observer])
+            .filter(|(_observer, slot)| {
+                slot.session.diagnostic_player_connected(handle) == Some(false)
+            })
+            .filter_map(|(_observer, slot)| slot.session.diagnostic_player_receipt_frame(handle))
+            .map(Frame::as_i32)
+            .max();
+        if let Some(cut) = certified_cut {
+            oracle.cap_retired_confirmed_inputs(*target, cut);
+            oracle.cap_retired_state_comparison(*target, cut.saturating_add(1));
+        } else if live_removal_seen_running[*target] {
+            if let Some(ceiling) = live_removal_request_ceilings[*target] {
+                oracle.cap_retired_confirmed_inputs(*target, ceiling);
+                oracle.cap_retired_state_comparison(*target, ceiling.saturating_add(1));
+            }
+            oracle.observe_runner_error(
+                "live_target_premature_exit",
+                *target,
+                schedule.config.steps.saturating_sub(1),
+                format!(
+                    "live graceful-removal target left Running before any survivor certified its removal (state={:?})",
+                    peers[*target].session.current_state()
+                ),
+            );
+        } else {
+            continue;
+        }
+        retire_peer_for_lifecycle(
+            *target,
+            &peers,
+            &mut dead,
+            &mut oracle,
+            spectator_enabled.then_some(&mut spectator_required_min_frame),
+        );
+    }
+
     // Hand the oracle the (c) bounded post-heal liveness inputs. `window_steps`
     // is the ACTUAL anchor span (B, or B-1 at an exact-boundary drain where the
     // recovery anchor clamped to the last step), so the failure reports the real
@@ -5863,6 +5979,9 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         load_game_state_observations,
         max_confirmation_stall_steps_by_peer,
         metrics,
+        donor_announcements,
+        announced_backfill_chunks,
+        backfill_chunks,
         progress_samples,
         frame_opportunities,
         wait_frames_obeyed,
@@ -5895,6 +6014,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         peer_event_counts,
         peer_event_counts_by_peer,
         peer_event_payload_counts_by_peer,
+        peer_dropped_order_by_peer,
         spectator_applied_frames,
         spectator_max_frame,
         spectator_final_hosts,

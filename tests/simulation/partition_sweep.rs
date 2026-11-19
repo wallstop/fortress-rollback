@@ -11,7 +11,8 @@ use super::harness::oracle::{
     InputFingerprint, OracleFailure, ViolationSource, MIN_END_CONFIRMED, POST_HEAL_MIN_ADVANCE,
 };
 use super::harness::schedule::{
-    BackgroundNoise, DropPolicy, Schedule, ScheduleEvent, SimConfig, SCHEDULE_SCHEMA_VERSION,
+    validate_schedule, BackgroundNoise, DropPolicy, Schedule, ScheduleEvent, SimConfig,
+    SCHEDULE_SCHEMA_VERSION,
 };
 use super::harness::{
     classify_component_scope, classify_component_scope_with_tail, run_with_input, ComponentOutcome,
@@ -2655,6 +2656,115 @@ fn coordinator_link_loss_relays_prepare_and_commits() {
     }
 }
 
+/// CAP matrix row 6: a graceful removal whose inventory reports, cut
+/// announcement, and backfill chunks are reordered by a lossy-but-retransmitting
+/// transport. The certificate must still commit, the target must be dropped,
+/// and the survivors must keep running on one history.
+///
+/// The row asserts that at least one survivor installed a backfilled suffix,
+/// so the certificate cannot pass by committing from start-of-attempt history
+/// alone. CURRENT-history donor announcements and split-report attribution are
+/// pinned by the session unit tests
+/// `donor_announcement_attributes_current_history_backfill`,
+/// `backfill_chunk_reordered_ahead_of_its_donor_announcement_is_retried`,
+/// `backfill_chunks_from_different_start_grids_fail_closed`, and
+/// `announced_donor_grid_resets_when_the_selected_donor_changes`.
+#[test]
+fn reordered_inventory_removal_certifies_without_missing_history() {
+    const N: usize = 4;
+    let config = SimConfig {
+        n_players: N,
+        steps: STEPS,
+        noise: BackgroundNoise::Clean,
+        disconnect_behavior: DropPolicy::ContinueWithout,
+        ..SimConfig::smoke(N)
+    };
+    let reordered = LinkPolicy {
+        drop_rate: 0.06,
+        dup_rate: 0.02,
+        base_delay: Duration::from_millis(35),
+        jitter: Duration::from_millis(25),
+        burst_rate: 0.0,
+        burst_len: 0,
+        // Loss becomes a delayed reliable resend instead of a permanent gap,
+        // which is the shape that can strand a stale inventory snapshot: every
+        // frame eventually arrives, but not before the reports are compared.
+        retransmit_delay: Duration::from_millis(90),
+        gilbert_elliott: None,
+        fragmentation: None,
+        bandwidth: None,
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to {
+                initial_links.push((from, to, reordered.clone()));
+            }
+        }
+    }
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x0060_0070_0080_0090,
+        config,
+        initial_links,
+        events: vec![(120, ScheduleEvent::GracefulRemove { by: 0, target: 3 })],
+        heal_at: STEPS,
+    };
+    validate_schedule(&schedule).expect("reordered-removal schedule must be valid");
+
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(5)),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    assert!(
+        report.verdict.failures.is_empty(),
+        "a reordered inventory must still certify cleanly: {:?}",
+        report.verdict.failures
+    );
+    assert!(
+        report
+            .peer_event_counts
+            .get(&EventKind::PeerDropped)
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "the removal must be certified: {:?}",
+        report.peer_event_counts
+    );
+    for survivor in [0, 1, 2] {
+        assert_eq!(
+            report
+                .trace_tail
+                .last()
+                .map(|last| last.session_states[survivor]),
+            Some(TraceSessionState::Running),
+            "survivor {survivor} must stay Running after the removal"
+        );
+    }
+    assert!(
+        report.backfill_chunks.iter().any(|count| *count > 0),
+        "the reordered removal must install a backfilled suffix, not commit from \
+         start-of-attempt history alone: {:?}",
+        report.backfill_chunks
+    );
+    assert!(
+        !report
+            .announced_backfill_chunks
+            .iter()
+            .any(|count| *count > 0)
+            || report.donor_announcements.iter().any(|count| *count > 0),
+        "installed announced chunks require an accepted announcement"
+    );
+    let replay = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the reordered-removal row must reproduce its exact trace"
+    );
+}
+
 /// CAP matrix row 4: two independent graceful removals started at the same step
 /// in disjoint pairs. Both removed targets keep polling and authoring inputs
 /// until they observe their own certificates (the production
@@ -2748,6 +2858,12 @@ fn concurrent_disjoint_graceful_removals_certify_both_without_fork() {
             dropped_handles,
             BTreeSet::from([1, 3]),
             "survivor {survivor} must observe a committed drop for each scheduled target"
+        );
+        assert_eq!(
+            report.peer_dropped_order_by_peer[survivor],
+            vec![1, 3],
+            "survivor {survivor} must observe each certificate's PeerDropped in sorted \
+             target order, not just the right set"
         );
     }
     assert!(

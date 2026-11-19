@@ -721,6 +721,8 @@ fn decode_drop_report_stage(bytes: &[u8], cursor: &mut usize) -> CodecResult<Dro
         0 => Ok(DropReportStage::Inventory),
         1 => Ok(DropReportStage::Ready),
         2 => Ok(DropReportStage::Committed),
+        3 => Ok(DropReportStage::Donor),
+        4 => Ok(DropReportStage::TargetAck),
         other => Err(decode_message_error(format!(
             "invalid drop report stage {other}"
         ))),
@@ -766,6 +768,8 @@ fn decode_drop_report(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropRepor
 
 fn decode_drop_backfill(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropBackfill> {
     let operation = decode_drop_operation_id(bytes, cursor, "drop_backfill")?;
+    let donor = read_u16(bytes, cursor, "drop_backfill.donor")?;
+    let range_start = read_frame(bytes, cursor, "drop_backfill.range_start", true)?;
     let chunk_index = read_u16(bytes, cursor, "drop_backfill.chunk_index")?;
     let chunk_count = read_u16(bytes, cursor, "drop_backfill.chunk_count")?;
     let start_frame = read_frame(bytes, cursor, "drop_backfill.start_frame", true)?;
@@ -780,6 +784,8 @@ fn decode_drop_backfill(bytes: &[u8], cursor: &mut usize) -> CodecResult<DropBac
     payload.extend_from_slice(source);
     Ok(DropBackfill {
         operation,
+        donor,
+        range_start,
         chunk_index,
         chunk_count,
         start_frame,
@@ -1759,15 +1765,19 @@ fn assert_wire_golden_suite(
 }
 
 #[cfg(test)]
-#[path = "wire_golden_v2.rs"]
-mod wire_golden_v2;
+#[path = "wire_golden_v3.rs"]
+mod wire_golden_v3;
 
-// Compile the released v1 literals as a rejection suite without presenting it
-// as the active golden registration. The immutable legacy-0.9 fixture module
-// imports this historical name for its opposite-direction framing checks.
+// Compile the released v2/v1 literals as rejection suites without presenting
+// them as the active golden registration. The immutable legacy-0.9 fixture
+// module imports the historical v1 name for its opposite-direction framing
+// checks.
 #[cfg(test)]
 #[path = "wire_golden_v1.rs"]
 mod released_wire_golden_v1;
+#[cfg(test)]
+#[path = "wire_golden_v2.rs"]
+mod released_wire_golden_v2;
 #[cfg(test)]
 use self::released_wire_golden_v1 as wire_golden_v1;
 
@@ -1804,11 +1814,11 @@ mod tests {
     }
 
     #[test]
-    fn shared_wire_golden_harness_accepts_current_v2_suite() {
+    fn shared_wire_golden_harness_accepts_current_v3_suite() {
         assert_wire_golden_suite(
-            super::wire_golden_v2::WIRE_GOLDEN_VERSION,
-            super::wire_golden_v2::fixtures(),
-            super::wire_golden_v2::expected,
+            super::wire_golden_v3::WIRE_GOLDEN_VERSION,
+            super::wire_golden_v3::fixtures(),
+            super::wire_golden_v3::expected,
         );
     }
 
@@ -2041,7 +2051,7 @@ mod tests {
     fn codec_wire_format_uses_fixed_little_endian_bytes() {
         assert_eq!(
             crate::PROTOCOL_VERSION,
-            2,
+            3,
             "wire bytes changed without a version bump"
         );
         let cases = [
@@ -2064,7 +2074,7 @@ mod tests {
                     }),
                 },
                 vec![
-                    0xF5, 0x52, 0x02, 0x00, // sentinel, version, flags
+                    0xF5, 0x52, 0x03, 0x00, // sentinel, version, flags
                     0xCD, 0xAB, 0x00, 0x00, // conn_id
                     0x00, 0x00, 0x00, 0x00, // MessageBody::SyncRequest tag
                     0xE7, 0x03, 0x00, 0x00, // random_request
@@ -2088,7 +2098,7 @@ mod tests {
                     }),
                 },
                 vec![
-                    0xF5, 0x52, 0x02, 0x00, // sentinel, version, flags
+                    0xF5, 0x52, 0x03, 0x00, // sentinel, version, flags
                     0x34, 0x12, 0x00, 0x00, // MessageHeader::conn_id
                     0x04, 0x00, 0x00, 0x00, // MessageBody::QualityReport tag
                     0xFE, 0xFF, // frame_advantage: i16 -2
@@ -2103,7 +2113,7 @@ mod tests {
                     body: MessageBody::Goodbye(Goodbye { reason: 7 }),
                 },
                 vec![
-                    0xF5, 0x52, 0x02, 0x00, // sentinel, version, flags
+                    0xF5, 0x52, 0x03, 0x00, // sentinel, version, flags
                     0x34, 0x12, 0x00, 0x00, // MessageHeader::conn_id
                     0x11, 0x00, 0x00, 0x00, // MessageBody::Goodbye tag 17
                     0x07, // reason
@@ -2410,6 +2420,8 @@ mod tests {
                 20,
                 MessageBody::DropBackfill(DropBackfill {
                     operation: drop_operation(),
+                    donor: 0,
+                    range_start: Frame::NULL,
                     chunk_index: 1,
                     chunk_count: 3,
                     start_frame: Frame::new(24),
@@ -2436,7 +2448,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinated_drop_v2_goldens_roundtrip_with_manual_generic_parity() {
+    fn coordinated_drop_v3_goldens_roundtrip_with_manual_generic_parity() {
         for (tag, body) in drop_bodies() {
             let original = Message {
                 header: MessageHeader::new(0x1234),
@@ -2445,14 +2457,14 @@ mod tests {
             let bytes = encode(&original).unwrap();
             let expected: &[u8] = match tag {
                 18 => &[
-                    0xF5, 0x52, 0x02, 0x00, 0x34, 0x12, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x02,
+                    0xF5, 0x52, 0x03, 0x00, 0x34, 0x12, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x02,
                     0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
                     0x02, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x09,
                     0x00, 0x05, 0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                     0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00,
                 ],
                 19 => &[
-                    0xF5, 0x52, 0x02, 0x00, 0x34, 0x12, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x02,
+                    0xF5, 0x52, 0x03, 0x00, 0x34, 0x12, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x02,
                     0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
                     0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0xFF,
                     0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
@@ -2460,19 +2472,20 @@ mod tests {
                     0x00, 0x00, 0x00, 0x05, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00,
                 ],
                 20 => &[
-                    0xF5, 0x52, 0x02, 0x00, 0x34, 0x12, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x02,
+                    0xF5, 0x52, 0x03, 0x00, 0x34, 0x12, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x02,
                     0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
-                    0x02, 0x01, 0x01, 0x00, 0x03, 0x00, 0x18, 0x00, 0x00, 0x00, 0x02, 0x00, 0x04,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xAA, 0xBB, 0xCC, 0xDD,
+                    0x02, 0x01, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x03, 0x00, 0x18,
+                    0x00, 0x00, 0x00, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0xAA, 0xBB, 0xCC, 0xDD,
                 ],
                 21 => &[
-                    0xF5, 0x52, 0x02, 0x00, 0x34, 0x12, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x02,
+                    0xF5, 0x52, 0x03, 0x00, 0x34, 0x12, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x02,
                     0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
                     0x02, 0x01, 0x1F, 0x00, 0x00, 0x00, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12,
                     0x11,
                 ],
                 22 => &[
-                    0xF5, 0x52, 0x02, 0x00, 0x34, 0x12, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x02,
+                    0xF5, 0x52, 0x03, 0x00, 0x34, 0x12, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x02,
                     0x00, 0x07, 0x00, 0x40, 0x30, 0x20, 0x10, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
                     0x02, 0x01, 0x02, 0x00, 0x00, 0x00,
                 ],
@@ -2500,11 +2513,11 @@ mod tests {
             body: drop_bodies().remove(1).1,
         };
         let mut report_bytes = encode(&report).unwrap();
-        report_bytes[30..34].copy_from_slice(&3_u32.to_le_bytes());
+        report_bytes[30..34].copy_from_slice(&5_u32.to_le_bytes());
         let report_error = decode_message(&report_bytes).unwrap_err();
         assert!(report_error
             .to_string()
-            .contains("invalid drop report stage 3"));
+            .contains("invalid drop report stage 5"));
 
         let abort = Message {
             header: MessageHeader::new(1),
@@ -2527,6 +2540,8 @@ mod tests {
             DropReportStage::Inventory,
             DropReportStage::Ready,
             DropReportStage::Committed,
+            DropReportStage::Donor,
+            DropReportStage::TargetAck,
         ] {
             let message = Message {
                 header: MessageHeader::new(1),
@@ -2801,6 +2816,8 @@ mod tests {
                 .prop_map(|(chunk_index, chunk_count, start, frame_count, bytes)| {
                     MessageBody::DropBackfill(DropBackfill {
                         operation: drop_operation(),
+                        donor: 0,
+                        range_start: Frame::NULL,
                         chunk_index,
                         chunk_count,
                         start_frame: Frame::new(start),

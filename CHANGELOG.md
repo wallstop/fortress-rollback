@@ -63,6 +63,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** a live gracefully removed target now learns its certificate even when the
+  first commit datagrams are lost, and a participant that becomes able to donate after its
+  start-of-attempt inventory can still complete a backfill. Survivors retransmit the commit into
+  the removed endpoint's bounded shutdown window for one second or until the target acknowledges
+  it, but only while that endpoint remains in the departed generation's `Disconnected` state; a
+  hot-join rearm stops retransmission so a replacement generation can never accept the old
+  certificate. An unacknowledged target remains bounded by its own peer timeout. A donor
+  announces its current retained range (bound to the operation and the certified cut digest),
+  and every backfill chunk carries the producing donor and its whole-range start, so relays
+  preserve attribution and receivers install one donor's history instead of splicing chunks from
+  two donors that share a layout. An inventory-selected donor that stops responding no longer
+  blocks a current-history donor, and a no-donor attempt waits until the two-second operation
+  deadline for a late announcement instead of failing closed as soon as the inventory snapshots
+  agree. Divergent per-survivor responsiveness views cannot wedge that backfill: before any donor
+  locks a grid, a survivor accepts the first valid announced grid instead of discarding the only
+  chunks that are arriving, and a changed selection afterwards rebinds the uninstalled grid to the
+  new donor. A multi-handle removed endpoint's acknowledgement is attributed by endpoint address,
+  so clearing its retry fence no longer depends on which of its handles the certificate removed. A
+  committed certificate naming a coordinator generation the receiver has already moved past is
+  ignored rather than failing the live session closed, and an unseen certificate is applied only
+  after a second endpoint corroborates it (a single peer cannot halt a live session alone, even
+  when it names itself the operation's coordinator; a two-player session has no second endpoint).
+  A bounded
+  per-coordinator-identity replay watermark also rejects a delayed duplicate whose operation has
+  already left the closed journal, and a commit for a competing known operation needs the same
+  evidence before it can make an active attempt yield. The deterministic simulation
+  harness now caps a live target's confirmed inputs at the certified cut instead of the earlier
+  request-time survivor receipt, and records installed backfill chunks by donor source.
 - **Pre-existing:** a permanent strict-majority partition with two isolated peers no longer
   fail-closes the whole majority. The coordinated graceful-drop certificate keeps its exact
   shared participant set, but the deterministic lowest participant now owns the cut (announced
@@ -196,6 +224,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** the wire protocol version is now `3`. Coordinated graceful removal adds two
+  `DropReportStage` values (`Donor` and `TargetAck`) that released v2 peers cannot decode, so v3
+  sessions reject v2 headers at the handshake instead of mixing report vocabularies. Upgrade every
+  peer in a session to interoperate.
 - **Breaking:** `FortressError::SpectatorStreamEnded { frame }` is returned when a spectator has
   no hosts left: either every host disconnected before the next frame's input arrived, or the last
   host left before the session ever synchronized. A running spectator still drains every frame

@@ -63,7 +63,7 @@ The [threat model](threat-model.md) records the complete single-dishonest-peer c
 ## Network and lifecycle policy
 
 - Configure the same player count, input width, FPS, desync interval, save mode, prediction
-  window, and input delay on every peer. Protocol v2 rejects incompatible peers during sync.
+  window, and input delay on every peer. The current protocol version rejects incompatible peers during sync.
 - Pick a disconnect policy deliberately. `Halt` ends progress after a drop;
   `ContinueWithout` coordinates a graceful removal when another live endpoint can witness the
   certificate and a strict majority of the agreed membership remains reachable; automatic

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8a0aa7418e48358526e16d0918cb9f45ad9a747bddd77c98ee54823ebd9e158e # shrinks to msg = Message { header: MessageHeader { sentinel: [245, 82], protocol_version: 3, flags: 0, conn_id: 1 }, body: DropBackfill(DropBackfill { operation: DropOperationId { coordinator: 2, coordinator_generation: 7, sequence: 270544960, target_set_digest: 72623859790382856 }, donor: 0, range_start: Frame(-1), chunk_index: 0, chunk_count: 0, start_frame: Frame(0), frame_count: 0, bytes: [] }) }

@@ -506,7 +506,10 @@ pub mod __internal {
 /// Protocol v2 deliberately rejects both released v1 packets and legacy
 /// unversioned packets. Membership-generation semantics changed at the v2
 /// boundary, so mixed v1/v2 sessions must fail closed instead of handshaking.
-pub const PROTOCOL_VERSION: u8 = 2;
+/// Protocol v3 adds the current-history donor and target-acknowledgement drop
+/// report stages; released v2 peers cannot decode those values and must fail
+/// closed at the header check instead of handshaking.
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// Internally, -1 represents no frame / invalid frame.
 ///

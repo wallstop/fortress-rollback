@@ -30,8 +30,8 @@ use crate::network::compression::try_encode;
 use crate::network::compression::{decode_with_max_len, try_encode_with_scratch};
 use crate::network::messages::{
     ChecksumReport, ConnectionStatus, DropAbort, DropBackfill, DropCommit, DropPrepare, DropReport,
-    FloorReply, FloorRequest, Goodbye, Input, InputAck, Message, MessageBody, MessageHeader,
-    QualityReply, QualityReport, SessionConfigBlock, SyncReply, SyncRequest,
+    DropReportStage, FloorReply, FloorRequest, Goodbye, Input, InputAck, Message, MessageBody,
+    MessageHeader, QualityReply, QualityReport, SessionConfigBlock, SyncReply, SyncRequest,
 };
 #[cfg(feature = "hot-join")]
 use crate::network::messages::{
@@ -1215,6 +1215,14 @@ impl<T: Config> UdpProtocol<T> {
         Arc::clone(&self.handles)
     }
 
+    /// The connection id this endpoint stamps on outgoing messages. The peer
+    /// accepts headers carrying it as its learned `remote_conn_id`, so a direct
+    /// socket send can reach the peer even after this endpoint is marked
+    /// disconnected.
+    pub(crate) fn local_conn_id(&self) -> u32 {
+        self.conn_id
+    }
+
     pub(crate) fn is_synchronized(&self) -> bool {
         self.state == ProtocolState::Running
             || self.state == ProtocolState::Disconnected
@@ -1223,6 +1231,12 @@ impl<T: Config> UdpProtocol<T> {
 
     pub(crate) fn is_running(&self) -> bool {
         self.state == ProtocolState::Running
+    }
+
+    /// Whether the endpoint is in the departed generation's `Disconnected`
+    /// shutdown window, before a hot-join rearm replaces it.
+    pub(crate) fn is_disconnected(&self) -> bool {
+        self.state == ProtocolState::Disconnected
     }
 
     /// Whether this endpoint has already emitted its silence-timeout
@@ -2531,16 +2545,30 @@ impl<T: Config> UdpProtocol<T> {
 
     fn message_allowed_in_current_state(&self, body: &MessageBody) -> bool {
         match self.state {
-            ProtocolState::Initializing | ProtocolState::Synchronizing => {
-                matches!(
-                    body,
-                    MessageBody::SyncRequest(_)
-                        | MessageBody::SyncReply(_)
-                        | MessageBody::Goodbye(_)
-                )
+            ProtocolState::Initializing | ProtocolState::Synchronizing => match body {
+                MessageBody::SyncRequest(_)
+                | MessageBody::SyncReply(_)
+                | MessageBody::Goodbye(_) => true,
+                // A hot-join rearm resets the endpoint to Synchronizing. The
+                // removed target's advisory acknowledgement must still reach
+                // the survivor so it can stop retransmitting.
+                MessageBody::DropReport(report) => report.stage == DropReportStage::TargetAck,
+                _ => false,
             },
             ProtocolState::Running => true,
-            ProtocolState::Disconnected => matches!(body, MessageBody::SyncRequest(_)),
+            // The shutdown window after a committed graceful removal still
+            // carries the target's acknowledgement back to its survivors, so
+            // they can stop retransmitting. Only a `TargetAck` report is
+            // admitted: inventory/ready/committed reports from a disconnected
+            // address must not influence another operation's cut, readiness, or
+            // survivor commit accounting, and a commit arriving on an
+            // already-disconnected link belongs to some other operation. All of
+            // those stay filtered.
+            ProtocolState::Disconnected => match body {
+                MessageBody::SyncRequest(_) => true,
+                MessageBody::DropReport(report) => report.stage == DropReportStage::TargetAck,
+                _ => false,
+            },
             ProtocolState::Shutdown => false,
         }
     }
@@ -4759,6 +4787,125 @@ mod tests {
     // ==========================================
     // Message Handling Tests
     // ==========================================
+
+    #[test]
+    fn synchronizing_and_disconnected_admit_only_target_acks_and_sync_requests() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let operation = crate::network::messages::DropOperationId::default();
+        let ack = DropReport {
+            operation,
+            participant: 1,
+            stage: DropReportStage::TargetAck,
+            exposed_confirmed: Frame::NULL,
+            cut: Frame::new(10),
+            cut_digest: 7,
+            receipts: Vec::new(),
+        };
+        let inventory = DropReport {
+            stage: DropReportStage::Inventory,
+            ..ack.clone()
+        };
+        let request = matching_sync_request(&protocol, 7);
+
+        protocol.state = ProtocolState::Synchronizing;
+        assert!(protocol.message_allowed_in_current_state(&MessageBody::SyncRequest(request)));
+        assert!(
+            protocol.message_allowed_in_current_state(&MessageBody::DropReport(ack.clone())),
+            "a rearmed endpoint must admit the removed target's acknowledgement"
+        );
+        assert!(
+            !protocol.message_allowed_in_current_state(&MessageBody::DropReport(inventory.clone())),
+            "non-acknowledgement reports stay filtered during synchronization"
+        );
+
+        protocol.state = ProtocolState::Disconnected;
+        assert!(
+            protocol.message_allowed_in_current_state(&MessageBody::SyncRequest(request)),
+            "the shutdown window still answers a peer's sync request"
+        );
+        assert!(
+            protocol.message_allowed_in_current_state(&MessageBody::DropReport(ack)),
+            "the shutdown window admits the target acknowledgement"
+        );
+        assert!(
+            !protocol.message_allowed_in_current_state(&MessageBody::DropReport(inventory)),
+            "inventory reports cannot influence another operation from a disconnected address"
+        );
+    }
+
+    #[test]
+    fn synchronizing_endpoint_answers_sync_requests() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.state = ProtocolState::Synchronizing;
+        let request = matching_sync_request(&protocol, 7);
+        protocol.handle_message(&Message {
+            header: MessageHeader::new(123),
+            body: MessageBody::SyncRequest(request),
+        });
+        assert!(
+            !protocol.send_queue.is_empty(),
+            "a SyncRequest must be answered during synchronization"
+        );
+    }
+
+    #[test]
+    fn disconnected_endpoint_admits_only_committed_drop_reports() {
+        use crate::network::messages::{DropOperationId, DropReport, DropReportStage};
+
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.state = ProtocolState::Disconnected;
+        let report = |stage| Message {
+            header: MessageHeader::new(123),
+            body: MessageBody::DropReport(DropReport {
+                operation: DropOperationId {
+                    coordinator: 0,
+                    coordinator_generation: 0,
+                    sequence: 1,
+                    target_set_digest: 0,
+                },
+                participant: 1,
+                stage,
+                exposed_confirmed: Frame::NULL,
+                cut: Frame::new(1),
+                cut_digest: 0,
+                receipts: Vec::new(),
+            }),
+        };
+
+        protocol.handle_message(&report(DropReportStage::Inventory));
+        protocol.handle_message(&report(DropReportStage::Ready));
+        protocol.handle_message(&report(DropReportStage::Committed));
+        protocol.handle_message(&report(DropReportStage::Donor));
+        assert_eq!(
+            protocol.take_received_drop_messages().count(),
+            0,
+            "non-ack reports from a disconnected address stay filtered"
+        );
+
+        protocol.handle_message(&report(DropReportStage::TargetAck));
+        let admitted: Vec<_> = protocol.take_received_drop_messages().collect();
+        assert_eq!(admitted.len(), 1, "the target acknowledgement is admitted");
+        assert_eq!(
+            admitted[0],
+            DropControlMessage::Report(DropReport {
+                operation: DropOperationId {
+                    coordinator: 0,
+                    coordinator_generation: 0,
+                    sequence: 1,
+                    target_set_digest: 0,
+                },
+                participant: 1,
+                stage: DropReportStage::TargetAck,
+                exposed_confirmed: Frame::NULL,
+                cut: Frame::new(1),
+                cut_digest: 0,
+                receipts: Vec::new(),
+            })
+        );
+    }
 
     #[test]
     fn handle_message_ignores_shutdown_state() {
@@ -9953,6 +10100,8 @@ mod tests {
             }),
             DropControlMessage::Backfill(DropBackfill {
                 operation,
+                donor: 1,
+                range_start: Frame::new(11),
                 chunk_index: 0,
                 chunk_count: 1,
                 start_frame: Frame::new(11),
