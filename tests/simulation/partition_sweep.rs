@@ -3903,3 +3903,154 @@ fn skew_gated_partition_healed_before_timeout_keeps_one_history() {
         "the skew-gated partition row must reproduce its exact trace"
     );
 }
+
+/// CAP matrix row 7: a strict-majority component whose deterministic
+/// coordinator is isolated by a permanent partition. A removal requested by a
+/// reachable survivor cannot be admitted by the coordinator, but the
+/// coordinator's endpoint times out during the bounded attempt. The reachable
+/// majority must reconcile its membership, certify the requested removal (and
+/// the departed coordinator slot), and keep confirming on one history; the
+/// isolated coordinator fails closed.
+#[test]
+fn isolated_coordinator_removal_still_commits_on_reachable_majority() {
+    const N: usize = 5;
+    let mut initial_links = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let mut events = Vec::new();
+    for other in 1..N {
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: 0,
+                to: other,
+                blocked: true,
+            },
+        ));
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: other,
+                to: 0,
+                blocked: true,
+            },
+        ));
+    }
+    for other in 0..(N - 1) {
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: N - 1,
+                to: other,
+                blocked: true,
+            },
+        ));
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: other,
+                to: N - 1,
+                blocked: true,
+            },
+        ));
+    }
+    events.push((
+        120,
+        ScheduleEvent::GracefulRemove {
+            by: 1,
+            target: N - 1,
+        },
+    ));
+    events.sort_by_key(|(step, _)| *step);
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x1234_5678_9abc_def0,
+        config: SimConfig {
+            n_players: N,
+            steps: STEPS,
+            noise: BackgroundNoise::Clean,
+            disconnect_behavior: DropPolicy::ContinueWithout,
+            ..SimConfig::smoke(N)
+        },
+        initial_links,
+        events,
+        heal_at: STEPS,
+    };
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(2)),
+        ..RunOptions::default()
+    };
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let final_snapshot = report.trace_tail.last().expect("non-empty trace");
+    for survivor in [1_usize, 2, 3] {
+        assert_eq!(
+            final_snapshot.session_states.get(survivor),
+            Some(&TraceSessionState::Running),
+            "majority survivor {survivor} must stay Running after the isolated-coordinator attempt"
+        );
+        assert!(
+            report.final_confirmed[survivor] > 400,
+            "majority survivor {survivor} must keep confirming after the membership reconciles: {:?}",
+            report.final_confirmed
+        );
+        let dropped = report
+            .peer_event_payload_counts_by_peer
+            .get(survivor)
+            .into_iter()
+            .flat_map(|counts| counts.iter())
+            .filter(|(key, count)| key.kind == EventKind::PeerDropped && **count > 0)
+            .filter_map(|(key, _)| match key.payload {
+                PeerEventPayload::PlayerAddr { handle, .. } => Some(handle.as_usize()),
+                PeerEventPayload::Addr(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(
+            dropped.contains(&0) && dropped.contains(&(N - 1)),
+            "majority survivor {survivor} must certify both the isolated coordinator and the requested target: {dropped:?}"
+        );
+    }
+    assert_eq!(
+        final_snapshot.session_states.first(),
+        Some(&TraceSessionState::Synchronizing),
+        "the isolated coordinator must fail closed"
+    );
+    assert!(
+        report
+            .blocked_drops_by_link
+            .get(&(0, 1))
+            .copied()
+            .unwrap_or(0)
+            > 0
+            && report
+                .blocked_drops_by_link
+                .get(&(1, 0))
+                .copied()
+                .unwrap_or(0)
+                > 0,
+        "the coordinator partition must actually drop traffic"
+    );
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+                | OracleFailure::FreezeFrameDivergence { .. }
+        )),
+        "the reachable majority must not fork or diverge: {:?}",
+        report.verdict.failures
+    );
+    let replay = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the isolated-coordinator row must reproduce its exact trace"
+    );
+}
