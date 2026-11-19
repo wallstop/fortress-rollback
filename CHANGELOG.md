@@ -82,7 +82,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new donor. A multi-handle removed endpoint's acknowledgement is attributed by endpoint address,
   so clearing its retry fence no longer depends on which of its handles the certificate removed. A
   committed certificate naming a coordinator generation the receiver has already moved past is
-  ignored rather than failing the live session closed. The deterministic simulation
+  ignored rather than failing the live session closed, and an unseen certificate is applied only
+  after a second endpoint corroborates it (a single peer cannot halt a live session alone; a
+  two-player session has no second endpoint). The deterministic simulation
   harness now caps a live target's confirmed inputs at the certified cut instead of the earlier
   request-time survivor receipt, and records installed backfill chunks by donor source.
 - **Pre-existing:** a permanent strict-majority partition with two isolated peers no longer

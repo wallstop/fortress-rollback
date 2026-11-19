@@ -367,6 +367,16 @@ struct DeferredDropPrepare {
     source: Option<u16>,
 }
 
+/// One unseen committed certificate awaiting corroboration from another
+/// endpoint. A certificate carries no participant set or signature, so the
+/// only evidence an uninvolved receiver can check is agreement from more than
+/// one endpoint; a single peer must not be able to halt a live session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnseenCommitEvidence {
+    commit: DropCommit,
+    sources: std::collections::BTreeSet<u16>,
+}
+
 #[derive(Debug)]
 struct CoordinatedDropState<A> {
     active: Option<CoordinatedDropAttempt<A>>,
@@ -388,6 +398,9 @@ struct CoordinatedDropState<A> {
     /// endpoint. Bounded by `num_players`: only applied commits insert here and
     /// a committed target set contains at most one entry per player.
     retiring: BTreeMap<PlayerHandle, PendingTargetCommit<A>>,
+    /// Unseen certificates seen from one endpoint and awaiting corroboration
+    /// from another. Bounded by `num_players`.
+    unseen_commits: VecDeque<UnseenCommitEvidence>,
 }
 
 impl<A> Default for CoordinatedDropState<A> {
@@ -402,6 +415,7 @@ impl<A> Default for CoordinatedDropState<A> {
             rejected: VecDeque::new(),
             halted_targets: std::collections::BTreeSet::new(),
             retiring: BTreeMap::new(),
+            unseen_commits: VecDeque::new(),
         }
     }
 }
@@ -1681,21 +1695,6 @@ impl<T: Config> P2PSession<T> {
                 && entry.commit.cut_digest == report.cut_digest
         };
         if !self.coordinated_drop.retiring.values().any(matches) {
-            #[cfg(test)]
-            eprintln!(
-                "DBG ack no fence: source={source} addr={source_addr:?} pending={:?}",
-                self.coordinated_drop
-                    .retiring
-                    .iter()
-                    .map(|(h, e)| (
-                        *h,
-                        e.addr.clone(),
-                        e.commit.operation,
-                        e.commit.cut,
-                        e.commit.cut_digest
-                    ))
-                    .collect::<Vec<_>>()
-            );
             // No fence for this endpoint and commit exists: a stale or
             // misattributed ack is consumed without changing retry state.
             return false;
@@ -3321,6 +3320,63 @@ impl<T: Config> P2PSession<T> {
         Ok(())
     }
 
+    /// Whether an unseen certificate has been corroborated by enough distinct
+    /// endpoints that it must be applied.
+    ///
+    /// A commit body names no participant set and carries no signature, so an
+    /// uninvolved receiver cannot fully verify it. Agreement from a second
+    /// endpoint is the available certificate evidence: the real certificate is
+    /// broadcast by every survivor, while one peer (or one faulty relay) must
+    /// not be able to halt the session alone. A two-player session has no
+    /// second endpoint, so its sole peer is enough.
+    fn coordinated_drop_unseen_commit_corroborated(
+        &mut self,
+        commit: DropCommit,
+        source: Option<u16>,
+    ) -> bool {
+        let Some(source) = source else {
+            // Internal/test copies come from this session's own validated path.
+            return true;
+        };
+        let needed = if self.num_players <= 2 { 1 } else { 2 };
+        if !self
+            .coordinated_drop
+            .unseen_commits
+            .iter()
+            .any(|evidence| evidence.commit == commit)
+        {
+            while self.coordinated_drop.unseen_commits.len() >= self.num_players {
+                self.coordinated_drop.unseen_commits.pop_front();
+            }
+            // alloc-bound: the journal is trimmed to `num_players` entries
+            // immediately above.
+            self.coordinated_drop
+                .unseen_commits
+                .push_back(UnseenCommitEvidence {
+                    commit,
+                    sources: std::collections::BTreeSet::new(),
+                });
+        }
+        let Some(evidence) = self
+            .coordinated_drop
+            .unseen_commits
+            .iter_mut()
+            .find(|evidence| evidence.commit == commit)
+        else {
+            return false;
+        };
+        if evidence.sources.len() < self.num_players {
+            evidence.sources.insert(source);
+        }
+        let corroborated = evidence.sources.len() >= needed;
+        if corroborated {
+            self.coordinated_drop
+                .unseen_commits
+                .retain(|evidence| evidence.commit != commit);
+        }
+        corroborated
+    }
+
     fn coordinated_drop_accept_commit(
         &mut self,
         commit: DropCommit,
@@ -3359,6 +3415,14 @@ impl<T: Config> P2PSession<T> {
             ) {
                 return Ok(());
             }
+        }
+        // An operation this endpoint never observed can only be treated as a
+        // removal certificate when more than one endpoint agrees on it. Known
+        // operations keep their validated ordering rules below.
+        if !self.coordinated_drop_knows_operation(commit.operation)
+            && !self.coordinated_drop_unseen_commit_corroborated(commit, source)
+        {
+            return Ok(());
         }
         // A committed certificate for an operation this endpoint has never
         // observed can only be one that removed this session (as a target) or
@@ -18570,26 +18634,36 @@ mod tests {
             "a certificate naming a coordinator generation this session has moved \
              past must not halt it"
         );
-        // The same certificate from the current generation still applies.
+        // A current-generation certificate from ONE endpoint is not enough
+        // evidence to halt a live session.
         let current = DropOperationId {
             coordinator_generation: 0,
             ..stale
         };
+        let commit = DropCommit {
+            operation: current,
+            cut: Frame::new(10),
+            cut_digest: 7,
+        };
         assert_eq!(
-            session.coordinated_drop_accept_commit(
-                DropCommit {
-                    operation: current,
-                    cut: Frame::new(10),
-                    cut_digest: 7,
-                },
-                Some(1),
-            ),
+            session.coordinated_drop_accept_commit(commit, Some(1)),
+            Ok(())
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Running,
+            "one endpoint's unseen certificate must not halt the session"
+        );
+        // A second endpoint reporting the same certificate is the available
+        // quorum evidence and applies it.
+        assert_eq!(
+            session.coordinated_drop_accept_commit(commit, Some(2)),
             Ok(())
         );
         assert_eq!(
             session.current_state(),
             SessionState::Synchronizing,
-            "a current-generation certificate for an unseen operation still applies"
+            "a corroborated current-generation certificate for an unseen operation applies"
         );
     }
 
@@ -19700,12 +19774,14 @@ mod tests {
             targets: prepare_targets,
             participants: vec![0, 1, 2, 4],
         };
-        {
+        // The certificate is corroborated by two endpoints, which is the
+        // evidence an uninvolved receiver can actually check.
+        for participant in [1_u16, 2] {
             let endpoint = session
                 .player_reg
                 .remotes
-                .get_mut(&test_addr(9401))
-                .expect("peer 1 endpoint");
+                .get_mut(&test_addr(9400 + participant))
+                .expect("survivor endpoint");
             endpoint.handle_message(&Message {
                 header: MessageHeader::new(1),
                 body: MessageBody::DropCommit(DropCommit {
@@ -19714,9 +19790,16 @@ mod tests {
                     cut_digest: 9,
                 }),
             });
+        }
+        for participant in [1_u16, 2] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&test_addr(9400 + participant))
+                .expect("survivor endpoint");
             endpoint.handle_message(&Message {
                 header: MessageHeader::new(1),
-                body: MessageBody::DropPrepare(prepare),
+                body: MessageBody::DropPrepare(prepare.clone()),
             });
         }
         session.poll_coordinated_drop();
