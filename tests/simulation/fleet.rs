@@ -690,15 +690,17 @@ fn swarm_materialized_schedule_replays_bit_identically_under_full_oracle() {
 /// (#460); each row must keep one survivor history and recover after the heal.
 ///
 /// `donor_announcements` counts accepted current-history announcements, not
-/// completed backfills. Installation through the announced path is pinned by
-/// the unit-level reordered-grid tests in `p2p_session.rs`, and
-/// `announced_backfill_chunks` reports any row that installs such a chunk
-/// end-to-end.
+/// completed backfills. Seed 43 installs both an announced chunk and an
+/// inventory-donor chunk end to end, so the assertion below pins that the
+/// announced grid actually attributes and commits rather than merely being
+/// accepted.
 #[test]
 fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
     let mut announcement_rows = 0_usize;
+    let mut announced_install_rows = 0_usize;
     let mut backfill_rows = 0_usize;
     for (seed, n_players, noise) in [
+        (43_u64, 3_usize, BackgroundNoise::Mild),
         (133_u64, 2_usize, BackgroundNoise::Rough),
         (203, 2, BackgroundNoise::Swarm),
         (273, 2, BackgroundNoise::Mild),
@@ -717,6 +719,13 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
         if report.donor_announcements.iter().any(|count| *count > 0) {
             announcement_rows += 1;
         }
+        if report
+            .announced_backfill_chunks
+            .iter()
+            .any(|count| *count > 0)
+        {
+            announced_install_rows += 1;
+        }
         if report.backfill_chunks.iter().any(|count| *count > 0) {
             backfill_rows += 1;
         }
@@ -729,11 +738,39 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
             "seed {seed}: installed announced chunks require an accepted announcement"
         );
         report.expect_pass(&schedule);
+        if seed == 43 {
+            assert!(
+                report
+                    .announced_backfill_chunks
+                    .iter()
+                    .any(|count| *count > 0),
+                "the pinned announced-donor row must install an announced chunk"
+            );
+            assert!(
+                report.backfill_chunks.iter().any(|count| *count > 0),
+                "the pinned announced-donor row must also install an inventory chunk"
+            );
+            let encoded = serde_json::to_vec(&schedule).expect("lossy schedule serializes");
+            let replay: Schedule =
+                serde_json::from_slice(&encoded).expect("lossy schedule deserializes");
+            let replayed = run(&replay, &RunOptions::default());
+            replayed.expect_pass(&replay);
+            assert_eq!(report.trace_hash, replayed.trace_hash);
+            assert_eq!(
+                report.announced_backfill_chunks,
+                replayed.announced_backfill_chunks
+            );
+        }
     }
     assert!(
         announcement_rows > 0,
         "at least one lossy graceful-removal row must exercise a current-history \
          donor announcement, not only start-of-attempt inventory donors"
+    );
+    assert!(
+        announced_install_rows > 0,
+        "at least one lossy graceful-removal row must install a chunk attributed to \
+         the announced donor grid, not only accept the announcement"
     );
     assert!(
         backfill_rows > 0,
