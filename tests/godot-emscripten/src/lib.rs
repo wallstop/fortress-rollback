@@ -355,6 +355,20 @@ fn run_removal_probe() -> Result<(), String> {
     if pair.first.current_state() != SessionState::Running {
         return Err("the Emscripten survivor left Running after the removal".to_owned());
     }
+
+    // The survivor must also keep advancing on the frozen slot, not merely stay
+    // in `Running`.
+    pair.first
+        .add_local_input(PlayerHandle::new(0), 99)
+        .map_err(|error| format!("post-removal survivor input: {error}"))?;
+    handle_probe_requests(
+        pair.first
+            .advance_frame()
+            .map_err(|error| format!("post-removal survivor advance: {error}"))?,
+    );
+    if pair.first.current_state() != SessionState::Running {
+        return Err("the Emscripten survivor left Running on the frozen-slot advance".to_owned());
+    }
     Ok(())
 }
 
