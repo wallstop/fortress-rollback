@@ -3794,7 +3794,6 @@ impl<T: Config> P2PSession<T> {
         }
 
         self.coordinated_drop_record_closed_cut(&commit);
-        self.coordinated_drop_record_closed_commit(commit);
         let mut cuts = Vec::new();
         cuts.try_reserve_exact(targets.len())
             .map_err(|_error| DropAbortReason::ResourceLimit)?;
@@ -3912,6 +3911,11 @@ impl<T: Config> P2PSession<T> {
             active.pending_commit = Some(commit);
             active.committed_acks.insert(local_participant);
         }
+
+        // Only retain the certificate after every fallible application step has
+        // succeeded. A failed application must never answer a later Ready retry
+        // with a certificate this session did not actually install.
+        self.coordinated_drop_record_closed_commit(commit);
 
         Ok(())
     }
