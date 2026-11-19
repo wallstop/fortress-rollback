@@ -697,6 +697,7 @@ fn swarm_materialized_schedule_replays_bit_identically_under_full_oracle() {
 #[test]
 fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
     let mut announcement_rows = 0_usize;
+    let mut backfill_rows = 0_usize;
     for (seed, n_players, noise) in [
         (133_u64, 2_usize, BackgroundNoise::Rough),
         (203, 2, BackgroundNoise::Swarm),
@@ -716,6 +717,9 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
         if report.donor_announcements.iter().any(|count| *count > 0) {
             announcement_rows += 1;
         }
+        if report.backfill_chunks.iter().any(|count| *count > 0) {
+            backfill_rows += 1;
+        }
         assert!(
             !report
                 .announced_backfill_chunks
@@ -730,6 +734,11 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
         announcement_rows > 0,
         "at least one lossy graceful-removal row must exercise a current-history \
          donor announcement, not only start-of-attempt inventory donors"
+    );
+    assert!(
+        backfill_rows > 0,
+        "at least one lossy graceful-removal row must install a backfilled suffix \
+         instead of committing from start-of-attempt history alone"
     );
 }
 

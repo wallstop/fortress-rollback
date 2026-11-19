@@ -2661,12 +2661,14 @@ fn coordinator_link_loss_relays_prepare_and_commits() {
 /// transport. The certificate must still commit, the target must be dropped,
 /// and the survivors must keep running on one history.
 ///
-/// The rows also record whether a participant announced a CURRENT-history
-/// donor (a participant that became able to donate after its start-of-attempt
-/// inventory); the split-report attribution itself is pinned by the session
-/// unit tests `donor_announcement_attributes_current_history_backfill`,
-/// `backfill_chunk_reordered_ahead_of_its_donor_announcement_is_retried`, and
-/// `backfill_chunks_from_different_start_grids_fail_closed`.
+/// The row asserts that at least one survivor installed a backfilled suffix,
+/// so the certificate cannot pass by committing from start-of-attempt history
+/// alone. CURRENT-history donor announcements and split-report attribution are
+/// pinned by the session unit tests
+/// `donor_announcement_attributes_current_history_backfill`,
+/// `backfill_chunk_reordered_ahead_of_its_donor_announcement_is_retried`,
+/// `backfill_chunks_from_different_start_grids_fail_closed`, and
+/// `announced_donor_grid_resets_when_the_selected_donor_changes`.
 #[test]
 fn reordered_inventory_removal_certifies_without_missing_history() {
     const N: usize = 4;
@@ -2742,6 +2744,20 @@ fn reordered_inventory_removal_certifies_without_missing_history() {
             "survivor {survivor} must stay Running after the removal"
         );
     }
+    assert!(
+        report.backfill_chunks.iter().any(|count| *count > 0),
+        "the reordered removal must install a backfilled suffix, not commit from \
+         start-of-attempt history alone: {:?}",
+        report.backfill_chunks
+    );
+    assert!(
+        !report
+            .announced_backfill_chunks
+            .iter()
+            .any(|count| *count > 0)
+            || report.donor_announcements.iter().any(|count| *count > 0),
+        "installed announced chunks require an accepted announcement"
+    );
     let replay = run_with_input::<StubInput>(&schedule, &options);
     assert_eq!(
         report.trace_hash, replay.trace_hash,

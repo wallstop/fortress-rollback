@@ -541,6 +541,9 @@ where
     /// Cumulative count of backfill chunks installed from a current-history
     /// donor's announced grid. Doc-hidden diagnostic only; saturating.
     coordinated_drop_announced_backfill_chunks: u64,
+    /// Cumulative count of every installed backfill chunk, regardless of the
+    /// donor source. Doc-hidden diagnostic only; saturating.
+    coordinated_drop_backfill_chunks: u64,
 
     /// Cumulative, always-on session metrics (see [`P2PSession::metrics`]).
     metrics: SessionMetrics,
@@ -3064,19 +3067,39 @@ impl<T: Config> P2PSession<T> {
             })
             .map(|(&participant, announcement)| (participant, *announcement))
             .min_by_key(|(participant, _)| *participant);
-        let announced = announced_donor.is_some_and(|(handle, announcement)| {
-            backfill.donor == handle
-                && announcement.start_frame == range_start
-                && announcement.chunk_count == backfill.chunk_count
-        });
+        let announced_shape_matches =
+            active
+                .donor_announcements
+                .get(&backfill.donor)
+                .is_some_and(|announcement| {
+                    announcement.start_frame == range_start
+                        && announcement.chunk_count == backfill.chunk_count
+                });
+        let selected_announced =
+            announced_donor.is_some_and(|(handle, _)| backfill.donor == handle);
+        // Survivors keep independent views of which endpoints are responsive.
+        // A survivor that still considers the selected donor reachable must not
+        // discard the only chunks that are actually arriving: before any donor
+        // has locked a grid, a valid announcement may supply the initial one.
+        // Once a grid is locked, that donor alone owns it, so two donors can
+        // never be interleaved. Installed values are canonical confirmed
+        // inputs and each attempt still verifies the certified cut digest
+        // before Ready, so the fallback changes availability, not history.
+        let no_grid_locked = active.backfill_donor.is_none()
+            && active.expected_backfill_chunks.is_none()
+            && active.backfill_chunks.is_empty()
+            && active.backfill_grid_source.is_none();
         let grid_source = if let Some(selected) = inventory_donor {
-            if backfill.donor != selected {
+            if backfill.donor == selected {
+                Some(BackfillGridSource::Inventory)
+            } else if announced_shape_matches && no_grid_locked {
+                Some(BackfillGridSource::Announced)
+            } else {
                 // A chunk from a non-selected inventory donor; its grid may be
                 // self-consistent but is not the deterministic choice.
                 return Ok(());
             }
-            Some(BackfillGridSource::Inventory)
-        } else if announced {
+        } else if announced_shape_matches && (selected_announced || no_grid_locked) {
             Some(BackfillGridSource::Announced)
         } else {
             None
@@ -3265,6 +3288,8 @@ impl<T: Config> P2PSession<T> {
                         _ => DropAbortReason::MissingHistory,
                     })?;
             }
+            self.coordinated_drop_backfill_chunks =
+                self.coordinated_drop_backfill_chunks.saturating_add(1);
             if announced_grid {
                 self.coordinated_drop_announced_backfill_chunks = self
                     .coordinated_drop_announced_backfill_chunks
@@ -3284,6 +3309,7 @@ impl<T: Config> P2PSession<T> {
     fn coordinated_drop_accept_commit(
         &mut self,
         commit: DropCommit,
+        source: Option<u16>,
     ) -> Result<(), DropAbortReason> {
         if self
             .coordinated_drop
@@ -3301,6 +3327,23 @@ impl<T: Config> P2PSession<T> {
         {
             // Two different cuts for one operation can never both be applied.
             return Err(DropAbortReason::ConflictingHistory);
+        }
+        // An unknown certificate carries no participant or target set to
+        // verify, so the operation's embedded coordinator and that handle's
+        // membership generation are the only authority a receiver can check.
+        // A certificate naming a coordinator generation this endpoint has
+        // already moved past is stale (for example a departed hot-join
+        // generation or an operation from before the current membership era)
+        // and must not halt the live session. Internal copies bypass the
+        // fence: they are this session's own validated attempt.
+        if source.is_some() {
+            let coordinator = PlayerHandle::new(usize::from(commit.operation.coordinator));
+            if !self.coordinated_drop_target_generation_acceptable(
+                coordinator,
+                commit.operation.coordinator_generation,
+            ) {
+                return Ok(());
+            }
         }
         // A committed certificate for an operation this endpoint has never
         // observed can only be one that removed this session (as a target) or
@@ -4133,7 +4176,9 @@ impl<T: Config> P2PSession<T> {
         if self.halt_confirmed_ceiling.is_some() {
             for (_addr, _source, message) in received {
                 if let DropControlMessage::Commit(commit) = message {
-                    let _ = self.coordinated_drop_accept_commit(commit);
+                    // A failed-closed session only re-acknowledges; it has no
+                    // membership authority left to fence the certificate with.
+                    let _ = self.coordinated_drop_accept_commit(commit, None);
                 }
             }
             // Keep committed-certificate retries and local attempt cleanup
@@ -4153,7 +4198,9 @@ impl<T: Config> P2PSession<T> {
                 DropControlMessage::Backfill(backfill) => {
                     self.coordinated_drop_accept_backfill(source, backfill)
                 },
-                DropControlMessage::Commit(commit) => self.coordinated_drop_accept_commit(commit),
+                DropControlMessage::Commit(commit) => {
+                    self.coordinated_drop_accept_commit(commit, Some(source))
+                },
                 DropControlMessage::Abort(abort) => {
                     self.coordinated_drop_accept_abort(abort);
                     Ok(())
@@ -4359,6 +4406,7 @@ impl<T: Config> P2PSession<T> {
             coordinated_drop: CoordinatedDropState::default(),
             coordinated_drop_donor_announcements: 0,
             coordinated_drop_announced_backfill_chunks: 0,
+            coordinated_drop_backfill_chunks: 0,
             metrics: SessionMetrics::new(),
             event_discard_warned: false,
             unknown_source_warned: false,
@@ -9965,6 +10013,16 @@ impl<T: Config> P2PSession<T> {
     #[must_use]
     pub fn diagnostic_announced_backfill_chunks_installed(&self) -> u64 {
         self.coordinated_drop_announced_backfill_chunks
+    }
+
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): cumulative count of every installed backfill chunk, whether it
+    /// came from an inventory-selected donor or a current-history
+    /// announcement.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_backfill_chunks_installed(&self) -> u64 {
+        self.coordinated_drop_backfill_chunks
     }
 
     /// Doc-hidden diagnostic compatibility surface: returns the monotonic v1
@@ -18322,11 +18380,14 @@ mod tests {
         };
         session.coordinated_drop_close_operation(known);
         assert_eq!(
-            session.coordinated_drop_accept_commit(DropCommit {
-                operation: known,
-                cut: Frame::new(5),
-                cut_digest: staged_donor_cut_digest(),
-            }),
+            session.coordinated_drop_accept_commit(
+                DropCommit {
+                    operation: known,
+                    cut: Frame::new(5),
+                    cut_digest: staged_donor_cut_digest(),
+                },
+                None,
+            ),
             Ok(())
         );
         assert_eq!(
@@ -18338,41 +18399,57 @@ mod tests {
     }
 
     #[test]
-    fn same_grid_chunks_from_a_second_donor_are_not_interleaved() {
+    fn first_announced_donor_owns_the_grid_and_conflicting_values_fail_closed() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
-        // Two current-history donors announce the SAME layout. Only the
-        // deterministic (lowest-handle) donor owns the grid, even though the
-        // layout alone cannot distinguish them.
+        // Two current-history donors announce the SAME layout. Survivors can
+        // disagree about which donor is reachable, so the first grid that
+        // actually arrives supplies the range; a later donor must never splice
+        // its values into that locked grid.
         session
             .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
             .expect("donor 1 announcement");
         session
             .coordinated_drop_accept_report_from(donor_report(operation, 2, Frame::new(3)), Some(2))
             .expect("donor 2 announcement");
-        assert_eq!(
-            session.coordinated_drop_accept_backfill(
-                2,
-                backfill_chunk_from(operation, 2, Frame::new(3), Frame::new(3), &[9, 9, 9]),
-            ),
-            Ok(()),
-            "a non-selected donor's chunk is discarded, never spliced in"
-        );
-        assert_eq!(
-            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
-            Some((Frame::new(0), Frame::new(2))),
-            "the discarded donor's chunk must not install"
-        );
         session
             .coordinated_drop_accept_backfill(
-                1,
-                backfill_chunk(operation, Frame::new(3), &[3, 4, 5]),
+                2,
+                backfill_chunk_from(operation, 2, Frame::new(3), Frame::new(3), &[9, 9, 9]),
             )
-            .expect("the selected donor's chunk installs");
+            .expect("the arriving donor's initial grid installs");
         assert_eq!(
             session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
             Some((Frame::new(0), Frame::new(5))),
-            "only the selected donor's history is installed"
+            "the arriving donor's complete grid installs"
+        );
+        assert_eq!(
+            session
+                .sync_layer
+                .confirmed_input(PlayerHandle::new(3), Frame::new(3))
+                .expect("frame 3 is installed")
+                .input,
+            9,
+            "the locked grid keeps the first donor's values"
+        );
+        // The later selected donor's disjoint values are a genuine history
+        // disagreement, so the attempt fails closed instead of splicing them
+        // into the installed grid.
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(
+                1,
+                backfill_chunk(operation, Frame::new(3), &[3, 4, 5]),
+            ),
+            Err(DropAbortReason::ConflictingHistory)
+        );
+        assert_eq!(
+            session
+                .sync_layer
+                .confirmed_input(PlayerHandle::new(3), Frame::new(3))
+                .expect("frame 3 is installed")
+                .input,
+            9,
+            "the second donor's values never replace the locked grid"
         );
     }
 
@@ -18425,11 +18502,14 @@ mod tests {
         };
         let before = sent_message_count(&session, crate::metrics::MessageKind::DropReport);
         assert_eq!(
-            session.coordinated_drop_accept_commit(DropCommit {
-                operation: other_operation,
-                cut: Frame::new(4),
-                cut_digest: 9,
-            }),
+            session.coordinated_drop_accept_commit(
+                DropCommit {
+                    operation: other_operation,
+                    cut: Frame::new(4),
+                    cut_digest: 9,
+                },
+                None,
+            ),
             Ok(())
         );
         assert_eq!(
@@ -18440,6 +18520,61 @@ mod tests {
         assert!(
             sent_message_count(&session, crate::metrics::MessageKind::DropReport) > before,
             "the target acknowledges its own removal"
+        );
+    }
+
+    #[test]
+    fn unknown_commit_from_a_stale_coordinator_generation_is_ignored() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 1,
+            generation: 0,
+        }];
+        let stale = DropOperationId {
+            coordinator: 0,
+            // The fixture's coordinator generation is 0 (epoch 0); 2 is
+            // outside the one-generation convergence window.
+            coordinator_generation: 2,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_commit(
+                DropCommit {
+                    operation: stale,
+                    cut: Frame::new(10),
+                    cut_digest: 7,
+                },
+                Some(1),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Running,
+            "a certificate naming a coordinator generation this session has moved \
+             past must not halt it"
+        );
+        // The same certificate from the current generation still applies.
+        let current = DropOperationId {
+            coordinator_generation: 0,
+            ..stale
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_commit(
+                DropCommit {
+                    operation: current,
+                    cut: Frame::new(10),
+                    cut_digest: 7,
+                },
+                Some(1),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Synchronizing,
+            "a current-generation certificate for an unseen operation still applies"
         );
     }
 
@@ -19061,6 +19196,56 @@ mod tests {
             session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
             Some((Frame::new(0), Frame::new(5))),
             "the live donor's chunks must install after the selected donor disconnects"
+        );
+    }
+
+    #[test]
+    fn announced_donor_supplies_the_initial_grid_while_an_inventory_donor_is_selected() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        // Participant 2's snapshot covers the cut, so it is the deterministic
+        // inventory donor on this survivor.
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            if let Some(report) = active.reports.get_mut(&2) {
+                if let Some(receipt) = report.receipts.first_mut() {
+                    receipt.available_from = Frame::new(0);
+                    receipt.contiguous_through = Frame::new(5);
+                }
+                report.exposed_confirmed = Frame::new(5);
+            }
+        }
+        assert_eq!(
+            session.coordinated_drop.active.as_ref().and_then(|active| {
+                P2PSession::<TestConfig>::coordinated_drop_selected_donor(
+                    active,
+                    Frame::new(3),
+                    Frame::new(5),
+                )
+            }),
+            Some(2),
+            "the fixture must select an inventory donor"
+        );
+        // Another survivor considers 2 unresponsive and relies on participant
+        // 1's announcement. Participant 1's chunks are the only ones arriving,
+        // so they must supply the initial grid instead of being discarded.
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
+            .expect("donor announcement accepted");
+        session
+            .coordinated_drop_accept_backfill(
+                1,
+                backfill_chunk_from(operation, 1, Frame::new(3), Frame::new(3), &[3_u8, 4, 5]),
+            )
+            .expect("the arriving announcement supplies the initial grid");
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(5))),
+            "the announced grid must install even while an inventory donor is selected"
+        );
+        assert_eq!(
+            session.diagnostic_announced_backfill_chunks_installed(),
+            1,
+            "the fallback grid is attributed to the announced donor"
         );
     }
 
@@ -20126,7 +20311,7 @@ mod tests {
         let mut omitted = build(PlayerHandle::new(4));
         assert_eq!(omitted.current_state(), SessionState::Running);
         omitted
-            .coordinated_drop_accept_commit(commit)
+            .coordinated_drop_accept_commit(commit, None)
             .expect("an unknown commit is handled by failing closed, not an error");
         assert_eq!(
             omitted.current_state(),

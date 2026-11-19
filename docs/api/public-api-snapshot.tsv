@@ -2,8 +2,8 @@
 # rustdoc-toolchain=nightly-2026-08-26
 # all-features-excludes=z3-verification,z3-verification-bundled (test/build-only)
 # generated-by=scripts/api/public_api_census.py
-# symbols=2762
-# textual-paths=2756
+# symbols=2765
+# textual-paths=2759
 path	kind	availability	documented	owner	usage-evidence	risk	disposition	alias-of	source
 fortress_rollback	module	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::BlankPrediction	struct	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/input_queue/prediction.rs
@@ -522,6 +522,7 @@ fortress_rollback::P2PSession::current_state	function	no-default+all-features	ye
 fortress_rollback::P2PSession::desync_detection	function	no-default+all-features	yes	sessions	rustdoc-contract	supported-public-contract	keep-supported	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::diagnostic_ack_exposure	function	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::diagnostic_announced_backfill_chunks_installed	function	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/p2p_session.rs
+fortress_rollback::P2PSession::diagnostic_backfill_chunks_installed	function	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::diagnostic_connect_status	function	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::diagnostic_donor_announcements_accepted	function	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/p2p_session.rs
 fortress_rollback::P2PSession::diagnostic_hostile_gossip	function	no-default+all-features	no	sessions	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/sessions/p2p_session.rs
@@ -1972,6 +1973,7 @@ fortress_rollback::prelude::P2PSession::current_state	function	no-default+all-fe
 fortress_rollback::prelude::P2PSession::desync_detection	function	no-default+all-features	yes	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::desync_detection	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::diagnostic_ack_exposure	function	no-default+all-features	no	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_ack_exposure	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::diagnostic_announced_backfill_chunks_installed	function	no-default+all-features	no	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_announced_backfill_chunks_installed	src/sessions/p2p_session.rs
+fortress_rollback::prelude::P2PSession::diagnostic_backfill_chunks_installed	function	no-default+all-features	no	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_backfill_chunks_installed	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::diagnostic_connect_status	function	no-default+all-features	no	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_connect_status	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::diagnostic_donor_announcements_accepted	function	no-default+all-features	no	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_donor_announcements_accepted	src/sessions/p2p_session.rs
 fortress_rollback::prelude::P2PSession::diagnostic_hostile_gossip	function	no-default+all-features	no	sessions	prelude-export	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_hostile_gossip	src/sessions/p2p_session.rs
@@ -2471,6 +2473,7 @@ fortress_rollback::sessions::p2p_session::P2PSession::current_state	function	no-
 fortress_rollback::sessions::p2p_session::P2PSession::desync_detection	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::desync_detection	src/sessions/p2p_session.rs
 fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_ack_exposure	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_ack_exposure	src/sessions/p2p_session.rs
 fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_announced_backfill_chunks_installed	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_announced_backfill_chunks_installed	src/sessions/p2p_session.rs
+fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_backfill_chunks_installed	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_backfill_chunks_installed	src/sessions/p2p_session.rs
 fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_connect_status	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_connect_status	src/sessions/p2p_session.rs
 fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_donor_announcements_accepted	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_donor_announcements_accepted	src/sessions/p2p_session.rs
 fortress_rollback::sessions::p2p_session::P2PSession::diagnostic_hostile_gossip	function	no-default+all-features	no	sessions	compatibility-reexport	duplicate-callable-path	keep-compatibility	fortress_rollback::P2PSession::diagnostic_hostile_gossip	src/sessions/p2p_session.rs

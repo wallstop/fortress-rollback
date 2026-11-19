@@ -1286,6 +1286,10 @@ pub struct RunReport {
     /// grid, per peer. A nonzero value proves the announced path supplied
     /// history that was actually installed.
     pub announced_backfill_chunks: Vec<u64>,
+    /// Every installed backfill chunk per peer, regardless of donor source.
+    /// A nonzero value proves the certificate had to backfill a retained
+    /// suffix rather than committing from start-of-attempt history alone.
+    pub backfill_chunks: Vec<u64>,
     /// Bounded samples for skew/control-loop analysis: ordinary runs retain at
     /// most 12, schema-v17 wait-policy runs at most 100 fixed cuts, and dense
     /// H-SKEW runs use the player-scaled phase capacity. Empty for legacy
@@ -5475,6 +5479,10 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                 .diagnostic_announced_backfill_chunks_installed()
         })
         .collect();
+    let backfill_chunks: Vec<u64> = peers
+        .iter()
+        .map(|slot| slot.session.diagnostic_backfill_chunks_installed())
+        .collect();
 
     // Final observations.
     let mut violation_census: BTreeMap<ViolationSignature, u64> = BTreeMap::new();
@@ -5928,6 +5936,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         metrics,
         donor_announcements,
         announced_backfill_chunks,
+        backfill_chunks,
         progress_samples,
         frame_opportunities,
         wait_frames_obeyed,

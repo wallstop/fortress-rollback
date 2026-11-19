@@ -1064,6 +1064,7 @@ mod tests {
             metrics: vec![fortress_rollback::SessionMetrics::default(); n],
             donor_announcements: vec![0; n],
             announced_backfill_chunks: vec![0; n],
+            backfill_chunks: vec![0; n],
             progress_samples: Vec::new(),
             frame_opportunities: Vec::new(),
             wait_frames_obeyed: Vec::new(),

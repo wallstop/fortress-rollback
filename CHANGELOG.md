@@ -76,8 +76,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two donors that share a layout. An inventory-selected donor that stops responding no longer
   blocks a current-history donor, and a no-donor attempt waits until the two-second operation
   deadline for a late announcement instead of failing closed as soon as the inventory snapshots
-  agree. The deterministic simulation harness now caps a live target's confirmed inputs at the
-  certified cut instead of the earlier request-time survivor receipt.
+  agree. Divergent per-survivor responsiveness views cannot wedge that backfill: before any donor
+  locks a grid, a survivor accepts the first valid announced grid instead of discarding the only
+  chunks that are arriving, and a changed selection afterwards rebinds the uninstalled grid to the
+  new donor. A committed certificate naming a coordinator generation the receiver has already
+  moved past is ignored rather than failing the live session closed. The deterministic simulation
+  harness now caps a live target's confirmed inputs at the certified cut instead of the earlier
+  request-time survivor receipt, and records installed backfill chunks by donor source.
 - **Pre-existing:** a permanent strict-majority partition with two isolated peers no longer
   fail-closes the whole majority. The coordinated graceful-drop certificate keeps its exact
   shared participant set, but the deterministic lowest participant now owns the cut (announced
