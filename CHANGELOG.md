@@ -86,7 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the operation's coordinator or after a second endpoint corroborates it (a single peer
   cannot halt a live session alone; a two-player session has no second endpoint). A bounded
   per-coordinator-identity replay watermark also rejects a delayed duplicate whose operation has
-  already left the closed journal. The deterministic simulation
+  already left the closed journal, and a commit for a competing known operation needs the same
+  evidence before it can make an active attempt yield. The deterministic simulation
   harness now caps a live target's confirmed inputs at the certified cut instead of the earlier
   request-time survivor receipt, and records installed backfill chunks by donor source.
 - **Pre-existing:** a permanent strict-majority partition with two isolated peers no longer

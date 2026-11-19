@@ -3507,7 +3507,12 @@ impl<T: Config> P2PSession<T> {
             self.coordinated_drop_ack_unknown_commit(commit);
             return Ok(());
         }
-        let Some(active) = self.coordinated_drop.active.as_mut() else {
+        let Some(active_operation) = self
+            .coordinated_drop
+            .active
+            .as_ref()
+            .map(|active| active.operation)
+        else {
             // The commit is for an operation this session never observed. It is
             // either a stale retransmission (already closed) or this session was
             // omitted from the certificate (including being the drop target).
@@ -3526,15 +3531,25 @@ impl<T: Config> P2PSession<T> {
             self.coordinated_drop_ack_unknown_commit(commit);
             return Ok(());
         };
-        if active.operation != commit.operation {
-            return if Self::coordinated_drop_operation_cmp(commit.operation, active.operation)
+        if active_operation != commit.operation {
+            if Self::coordinated_drop_operation_cmp(commit.operation, active_operation)
                 == std::cmp::Ordering::Less
             {
-                Ok(())
-            } else {
-                Err(DropAbortReason::ParticipantLost)
-            };
+                return Ok(());
+            }
+            // A commit for a different known operation can only make this
+            // attempt yield when it carries the same evidence a certificate
+            // needs; one peer must not fail-close an active attempt.
+            if source == Some(commit.operation.coordinator)
+                || self.coordinated_drop_unseen_commit_corroborated(commit, source)
+            {
+                return Err(DropAbortReason::ParticipantLost);
+            }
+            return Ok(());
         }
+        let Some(active) = self.coordinated_drop.active.as_mut() else {
+            return Ok(());
+        };
         if active.cut.is_some_and(|cut| cut != commit.cut)
             || active
                 .cut_digest
@@ -18760,6 +18775,41 @@ mod tests {
         assert!(
             session.coordinated_drop.closed_commit_cuts.len() <= session.num_players,
             "the replay watermark journal must stay bounded"
+        );
+    }
+
+    #[test]
+    fn single_peer_commit_for_a_competing_known_operation_cannot_fail_closed() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        let competing = DropOperationId {
+            sequence: operation.sequence.saturating_add(1),
+            ..operation
+        };
+        session.coordinated_drop_note_rejected(
+            competing,
+            &[DropTarget {
+                handle: 3,
+                generation: 0,
+            }],
+        );
+        let commit = DropCommit {
+            operation: competing,
+            cut: Frame::new(5),
+            cut_digest: 0,
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_commit(commit, Some(2)),
+            Ok(())
+        );
+        assert!(
+            session.coordinated_drop.active.is_some(),
+            "one peer's commit for a competing known operation must not yield the attempt"
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_commit(commit, Some(1)),
+            Err(DropAbortReason::ParticipantLost),
+            "a corroborated competing certificate makes the attempt yield"
         );
     }
 
