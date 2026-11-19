@@ -18720,6 +18720,193 @@ mod tests {
     }
 
     #[test]
+    fn announced_donor_wrong_chunk_count_is_discarded() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
+            .expect("announcement accepted");
+        let mut chunk = backfill_chunk(operation, Frame::new(3), &[3, 4, 5]);
+        chunk.chunk_count = 2;
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(1, chunk),
+            Ok(()),
+            "a wrong chunk count does not match the announced grid and is discarded"
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(2))),
+            "the mismatched announced chunk must not install"
+        );
+    }
+
+    #[test]
+    fn locked_grid_rejects_an_announced_fallback_for_a_non_selected_inventory_donor() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        // Participant 1 becomes the inventory-selected donor for 3..=5.
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            let report = active.reports.get_mut(&1).expect("participant 1 report");
+            report.receipts[0].contiguous_through = Frame::new(5);
+        }
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 2, Frame::new(3)), Some(2))
+            .expect("second announcement accepted");
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            active.expected_backfill_chunks = Some(1);
+            active.expected_backfill_start = Some(Frame::new(3));
+        }
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(
+                2,
+                backfill_chunk_from(operation, 2, Frame::new(3), Frame::new(3), &[3, 4, 5]),
+            ),
+            Ok(()),
+            "a locked grid rejects an announced fallback for a non-selected inventory donor"
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(2))),
+            "the rejected fallback chunk must not install"
+        );
+    }
+
+    #[test]
+    fn committed_fence_mismatches_are_rejected_or_ignored_correctly() {
+        let targets = vec![DropTarget {
+            handle: 2,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 1,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let commit = DropCommit {
+            operation,
+            cut: Frame::new(10),
+            cut_digest: 7,
+        };
+        // A committed fence for the same operation at a different cut is a
+        // conflict, not an exact duplicate.
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        session.coordinated_drop.committed.insert(
+            PlayerHandle::new(2),
+            CoordinatedDropFence {
+                operation,
+                target_generation: 0,
+                cut: Frame::new(9),
+            },
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_commit(commit, Some(1)),
+            Err(DropAbortReason::ConflictingHistory)
+        );
+        // A fence for a DIFFERENT operation at the same cut is not an exact
+        // duplicate; the unseen certificate still needs corroboration.
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let other = DropOperationId {
+            sequence: 2,
+            ..operation
+        };
+        session.coordinated_drop.committed.insert(
+            PlayerHandle::new(2),
+            CoordinatedDropFence {
+                operation: other,
+                target_generation: 0,
+                cut: commit.cut,
+            },
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_commit(commit, Some(1)),
+            Ok(())
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_commit(commit, Some(2)),
+            Ok(())
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Synchronizing,
+            "a same-cut fence for another operation must not count as an exact duplicate"
+        );
+    }
+
+    #[test]
+    fn closed_operation_commit_is_ignored_without_halting() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 2,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 1,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        session.coordinated_drop_close_operation(operation);
+        let commit = DropCommit {
+            operation,
+            cut: Frame::new(10),
+            cut_digest: 7,
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_commit(commit, Some(1)),
+            Ok(())
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_commit(commit, Some(2)),
+            Ok(())
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Running,
+            "a commit for an operation already in the closed journal is ignored"
+        );
+    }
+
+    #[test]
+    fn partial_commit_mismatch_fails_closed_and_stages_a_matching_commit() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, cut) = staged_post_inventory_backfill_attempt(&mut session);
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            active.cut_digest = Some(7);
+        }
+        assert_eq!(
+            session.coordinated_drop_accept_commit(
+                DropCommit {
+                    operation,
+                    cut: Frame::new(6),
+                    cut_digest: 7,
+                },
+                None,
+            ),
+            Err(DropAbortReason::ConflictingHistory),
+            "a differing cut alone is a conflict even when the digest matches"
+        );
+        let matching = DropCommit {
+            operation,
+            cut,
+            cut_digest: 7,
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_commit(matching, None),
+            Ok(())
+        );
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.pending_commit),
+            Some(matching),
+            "a matching commit is staged while the attempt is not yet committed"
+        );
+    }
+
+    #[test]
     fn unseen_commit_from_the_coordinator_requires_corroboration() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let targets = vec![DropTarget {
