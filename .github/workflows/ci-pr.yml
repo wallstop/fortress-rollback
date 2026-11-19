@@ -151,7 +151,7 @@ jobs:
         run: cargo check --target wasm32-unknown-unknown --no-default-features
 
       - name: Check browser runtime test crate
-        run: cargo check -p wasm-browser-smoke --target wasm32-unknown-unknown --lib --tests
+        run: cargo check -p wasm-browser-smoke --features hot-join --target wasm32-unknown-unknown --lib --tests
 
       - name: Check wasm32-unknown-emscripten
         run: cargo check --target wasm32-unknown-emscripten --no-default-features

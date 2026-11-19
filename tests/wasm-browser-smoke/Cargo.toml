@@ -8,6 +8,13 @@ rust-version = "1.86"
 [lib]
 doctest = false
 
+[features]
+default = []
+# Browser runtime probe for the feature-gated hot-join membership path. Kept
+# non-default so workspace-wide builds do not silently unify the library into
+# its hot-join configuration; the browser CI lane opts in explicitly.
+hot-join = ["fortress-rollback/hot-join"]
+
 [dependencies]
 fortress-rollback = { path = "../.." }
 fortress-replay-fixture = { path = "../replay-fixture" }

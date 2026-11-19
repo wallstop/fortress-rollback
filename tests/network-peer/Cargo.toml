@@ -19,12 +19,13 @@ print_stderr = "allow"
 disallowed_macros = "allow"
 
 [features]
-# Forward the hot-join feature to fortress-rollback so this peer's exhaustive
-# FortressEvent match stays in sync with the variants the linked crate exposes.
+# Kept for callers that explicitly request the hot-join lane. The peer always
+# links the feature below so its exhaustive FortressEvent match cannot drift
+# from the variants another workspace member enables through feature unification.
 hot-join = ["fortress-rollback/hot-join"]
 
 [dependencies]
-fortress-rollback = { path = "../.." }
+fortress-rollback = { path = "../..", features = ["hot-join"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 

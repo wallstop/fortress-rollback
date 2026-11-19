@@ -23,6 +23,8 @@ mod tests {
     const SYNC_POLL_BUDGET: usize = 256;
     const INPUT_POLL_BUDGET: usize = 64;
     const REMOVAL_POLL_BUDGET: usize = 512;
+    const HOT_JOIN_POLL_BUDGET: usize = 512;
+    const HOT_JOIN_CONFIRMED_FRAMES: u32 = 2;
     const FRAME_COUNT: u32 = 2;
     const MALFORMED_PACKET_COUNT: usize = MAX_RAW_PACKETS_PER_POLL + 1;
 
@@ -455,6 +457,220 @@ mod tests {
         );
     }
 
+    /// Hot join is the most stateful membership transition in the library:
+    /// buffer capture, snapshot transfer, snapshot apply, activation-frame
+    /// gating, and joined-slot input contribution. This must work under the
+    /// browser's 32-bit `usize` world, not only in the native fleet. The host
+    /// runs solo with a reserved slot, a joiner loads the served snapshot, and
+    /// the joined slot must confirm at least two real inputs after activation.
+    #[cfg(feature = "hot-join")]
+    #[wasm_bindgen_test]
+    fn hot_join_activates_and_confirms_joined_slot_in_browser() {
+        let (clock, offset_ms) = virtual_clock();
+        let (host_socket, joiner_socket, _bus) = RawBus::pair();
+        let protocol_config = |seed| ProtocolConfig {
+            protocol_rng_seed: Some(seed),
+            clock: Some(clock.clone()),
+            ..ProtocolConfig::default()
+        };
+
+        let mut host = SessionBuilder::<BrowserConfig>::new()
+            .with_protocol_config(protocol_config(0xB103))
+            .with_num_players(2)
+            .expect("two-player hot-join host must accept its player count")
+            .with_hot_join(true)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("hot-join host local player must be accepted")
+            .add_reserved_player(BrowserPeer(1), PlayerHandle::new(1))
+            .expect("hot-join host reserved slot must be accepted")
+            .start_p2p_session(host_socket)
+            .expect("browser hot-join host must build");
+
+        host.poll_remote_clients();
+        assert_eq!(
+            host.current_state(),
+            SessionState::Running,
+            "a host with a reserved slot must run solo before the join"
+        );
+        let _ = host.events().count();
+
+        let mut host_state = BrowserState::default();
+        for frame_index in 0..3u32 {
+            host.add_local_input(PlayerHandle::new(0), BrowserInput { value: frame_index })
+                .expect("pre-join host input must be accepted");
+            apply_requests(
+                &mut host_state,
+                host.advance_frame()
+                    .expect("pre-join host must advance solo"),
+            );
+            host.poll_remote_clients();
+            offset_ms.fetch_add(16, Ordering::Relaxed);
+        }
+
+        let mut joiner = SessionBuilder::<BrowserConfig>::new()
+            .with_protocol_config(protocol_config(0xB104))
+            .with_num_players(2)
+            .expect("two-player hot-join joiner must accept its player count")
+            .add_player(PlayerType::Remote(BrowserPeer(0)), PlayerHandle::new(0))
+            .expect("hot-join joiner host slot must be accepted")
+            .add_player(PlayerType::Local, PlayerHandle::new(1))
+            .expect("hot-join joiner local slot must be accepted")
+            .start_hot_join_session(joiner_socket, BrowserPeer(0))
+            .expect("browser hot-join joiner must build");
+        assert_eq!(
+            joiner.current_state(),
+            SessionState::HotJoining,
+            "a joiner must start in HotJoining"
+        );
+
+        // The serving host pauses while the snapshot handshake is in flight, so
+        // polling alone completes the join and leaves both peers on the
+        // snapshot frame.
+        for _ in 0..HOT_JOIN_POLL_BUDGET {
+            host.poll_remote_clients();
+            joiner.poll_remote_clients();
+            offset_ms.fetch_add(16, Ordering::Relaxed);
+            if joiner.current_state() == SessionState::Running {
+                break;
+            }
+        }
+        assert_eq!(
+            joiner.current_state(),
+            SessionState::Running,
+            "the browser joiner must complete the snapshot handshake within \
+             {HOT_JOIN_POLL_BUDGET} polls"
+        );
+
+        // The joiner's first advance after the join applies the snapshot.
+        let requests = joiner
+            .advance_frame()
+            .expect("the joiner must advance after applying its snapshot");
+        let mut load_count = 0usize;
+        let mut other_count = 0usize;
+        let mut snapshot_frame = None;
+        for request in &*requests {
+            if let FortressRequest::LoadGameState { frame, .. } = request {
+                load_count = load_count.saturating_add(1);
+                snapshot_frame = Some(*frame);
+            } else {
+                other_count = other_count.saturating_add(1);
+            }
+        }
+        assert_eq!(
+            load_count, 1,
+            "the joiner's first advance must return exactly one LoadGameState"
+        );
+        assert_eq!(
+            other_count, 0,
+            "the joiner's first advance must return only the LoadGameState"
+        );
+        let snapshot_frame = snapshot_frame.expect("the joiner must report a snapshot frame");
+        let mut joiner_state = BrowserState::default();
+        apply_requests(&mut joiner_state, requests);
+        assert_eq!(
+            joiner_state.frame,
+            snapshot_frame.as_i32(),
+            "the loaded snapshot must position the joiner on the served frame"
+        );
+        assert_eq!(
+            host.current_state(),
+            SessionState::Running,
+            "the host must resume Running once the join commits"
+        );
+
+        // Advance both peers in lockstep. The joiner's own frame cursor starts
+        // one frame behind the host's current frame (the host keeps running
+        // while the snapshot is served), so drive enough frames for the joined
+        // slot's activation frame to clear before checking confirmations.
+        for index in 0..6u32 {
+            host.add_local_input(
+                PlayerHandle::new(0),
+                BrowserInput {
+                    value: 1_000 + index,
+                },
+            )
+            .expect("post-join host input must be accepted");
+            joiner
+                .add_local_input(
+                    PlayerHandle::new(1),
+                    BrowserInput {
+                        value: 2_000 + index,
+                    },
+                )
+                .expect("post-join joined-slot input must be accepted");
+            apply_requests(
+                &mut host_state,
+                host.advance_frame().expect("post-join host must advance"),
+            );
+            apply_requests(
+                &mut joiner_state,
+                joiner
+                    .advance_frame()
+                    .expect("post-join joiner must advance"),
+            );
+            for _ in 0..INPUT_POLL_BUDGET {
+                poll_pair_with_clock(&mut host, &mut joiner, &offset_ms);
+            }
+        }
+
+        let confirm_floor = Frame::new(snapshot_frame.as_i32() + 2);
+        for _ in 0..HOT_JOIN_POLL_BUDGET {
+            if host.confirmed_frame() >= confirm_floor && joiner.confirmed_frame() >= confirm_floor
+            {
+                break;
+            }
+            poll_pair_with_clock(&mut host, &mut joiner, &offset_ms);
+        }
+        let last_confirmed = Frame::new(
+            host.confirmed_frame()
+                .as_i32()
+                .min(joiner.confirmed_frame().as_i32()),
+        );
+        assert!(
+            last_confirmed >= confirm_floor,
+            "post-join confirmation stalled at {last_confirmed:?} \
+             (floor {confirm_floor:?}, snapshot {snapshot_frame:?})"
+        );
+
+        let mut joined_frames_confirmed = 0u32;
+        let mut previous_joined_input = None;
+        for offset in 0..HOT_JOIN_CONFIRMED_FRAMES as i32 {
+            let frame = Frame::new(last_confirmed.as_i32() - offset);
+            let host_inputs = host
+                .confirmed_inputs_for_frame(frame)
+                .expect("host must expose confirmed post-join inputs");
+            let joiner_inputs = joiner
+                .confirmed_inputs_for_frame(frame)
+                .expect("joiner must expose confirmed post-join inputs");
+            assert_eq!(
+                host_inputs, joiner_inputs,
+                "both peers must confirm identical inputs at post-join frame {frame:?}"
+            );
+            let joined_input = host_inputs
+                .get(1)
+                .copied()
+                .expect("the joined slot must have a confirmed input");
+            assert_ne!(
+                joined_input,
+                BrowserInput::default(),
+                "the joined slot must not confirm the frozen default input at frame {frame:?}"
+            );
+            if let Some(previous) = previous_joined_input {
+                assert_ne!(
+                    joined_input, previous,
+                    "the joined slot must advance its input stream at frame {frame:?}"
+                );
+            }
+            previous_joined_input = Some(joined_input);
+            joined_frames_confirmed = joined_frames_confirmed.saturating_add(1);
+        }
+
+        assert_eq!(
+            joined_frames_confirmed, HOT_JOIN_CONFIRMED_FRAMES,
+            "the joined slot must confirm exactly {HOT_JOIN_CONFIRMED_FRAMES} checked frames"
+        );
+    }
+
     #[wasm_bindgen_test]
     fn default_clock_receive_does_not_panic_in_browser() {
         let config = ChaosConfig::builder().seed(42).build();
@@ -595,7 +811,7 @@ mod tests {
         value: u32,
     }
 
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     struct BrowserState {
         frame: i32,
         input_sum: u64,
