@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795074965901,
+  "lastUpdate": 1795077938069,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "de1cdf9d09c9e16e45eaf95c2170f0ca26014c41",
-          "message": "test(transport): complete real-path bounds and scope ack exposure (#392)\n\n## Summary\n\nFinishes the active P1 transport slice and scopes the #388 follow-up. No\nprotocol or wire behavior changes.\n\n### Transport completion\n\n- `SocketMetrics` gains `queue_depth` and `oldest_queued_ms`. Built-in\nUDP/Tokio report zero (direct\n  submit); `ChaosSocket` reports its held-packet queue.\n- New real-loopback sampler: 100 datagrams through a seeded 25%\n`ChaosSocket` send-loss path.\nAccepted sends + adapter drops equal 100, delivered traffic is a\npositive subset of accepted, and\nthe loop's decoded count matches the receiver adapter counter. This\nrecords actual adapter\n  acceptance/loss instead of inferring from enqueue demand.\n- New deterministic 150-step (2.4 s) peer-suspension row under an\nexplicit 5 s disconnect timeout.\nBoth peers resume, confirm >500 frames, stay within the prediction\nwindow, and replay exactly.\n- New queue-age test: a 200 ms shaping queue reports depth 1/age 0,\ndepth 1/age 75 ms after 75 ms of\n  virtual time, and depth 0/age 0 after delivery.\n- Existing evidence retained and cited: 256 raw/decoded per-poll cap\nwith next-poll valid recovery;\n128-frame pending-output retransmission boundary and fail-closed beyond;\nbandwidth/MTU/rebind\n  census rows; protocol-valid lie coverage.\n- P1 transport item removed from `PLAN.md`; docs now include a\n\"Transport bound evidence\" section.\n\n### #388 scope\n\nRecorded an explicitly scoped, falsifiable experiment in\n`.agents/skills/design-decisions/references/network.txt` and posted it\non #388:\n\n1. Receipt-only confirmed frame (current bounded split tail).\n2. Always fold `last_acked_input.frame` into `confirmed_frame()`\n(rejected prototype).\n3. Gate only when the unacked span exceeds half the prediction window.\n\nInstrument `last_acked_input.frame`, `confirmed_frame()`, and survivor\nprogress on the #386 one-way\nrow plus `ChaosConfig::terrible_network`; accept only if the cut tail is\n≤1 frame and survivor\nprogress stays within 10% of baseline. The #389 baseline is 6.90/8\nframes mean lag on a lossless\n200 ms 4-peer row, so always-ack-bounding cannot fit the default window.\n\n## Verification\n\n- `cargo nextest run --features tokio,json`: 3,112 passed, 73 skipped, 0\nfailed\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings`: clean\n- `agent-preflight.py --auto-fix`, markdownlint, typos,\nchangelog/version/plan hooks: clean\n- Public API census: 2,746 symbols, snapshot matches\n- Diff mutation: the new `ChaosSocket::socket_metrics_impl` mutant is\ncaught by the queue-age test",
-          "timestamp": "2026-11-11T00:09:30-08:00",
-          "tree_id": "658d76b6b365e28acfd1718e05b63af25bc9dab5",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/de1cdf9d09c9e16e45eaf95c2170f0ca26014c41"
-        },
-        "date": 1794384989333,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 25453,
-            "range": "± 451",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 15453,
-            "range": "± 886",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 473,
-            "range": "± 16",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 589,
-            "range": "± 87",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 5374,
-            "range": "± 173",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 5098,
             "range": "± 155",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "52052fe82ea5fd1a3c4e08bfec87f36e2b3a0d51",
+          "message": "fix: keep periodic hot-join cycles live through stale freeze gossip (#489)\n\n## Description\n\nFixes the red `CI - Network Tests (Nightly)` soak on `main`. The\n4,000,000-frame\n\n`network::soak::four_million_frame_soak_preserves_bounds_replay_and_lifecycle`\nstopped at the\n36th periodic hot-join (confirmed frame 3,600,006): slot 0 stayed in\n`HotJoining` for millions of\npolls while survivors 1-3 remained `Running`, so the mesh never reached\nthe target.\n\n### Root causes\n\nDiagnostics (connect-status dumps + observer violations at the stall)\nshowed both survivors\nrejecting the coordinator's `ReactivateSlot` because a running peer\nstill claimed slot 0\nconnected, while the coordinator repeatedly aborted the serve\n(`last_saved_frame` moved off the\npinned snapshot during rollback repair) and the joiner retried forever.\n\n1. **A committed drop closed only a REOPENED `pending_reactivation`.** A\nnot-yet-reopened pending\nsurvived the drop. Its shield exempts the slot from the\ndisconnect-convergence fold and\nreopened attempts are never superseded, so the slot stayed connected and\nevery later directive\nwas rejected. `close_reopened_reactivation_for_drop_targets` now closes\n**any** pending for a\ndrop target: aborted (restore the pre-reopen freeze) for a\nnever-reopened attempt, committed\n   close preserved for a reopened one (the D17 implied-commit behavior).\n2. **Stale connected gossip above the local freeze blocked\nconvergence.** A prediction-capped\nsurvivor stops sending inputs with its pre-drop connected claim, and\npeers kept waiting for it\nto converge. A connected claim whose frame is **above** the survivor's\nown freeze cannot\nundercut that freeze, and the claiming peer's own gate still requires it\nto be locally frozen\nbefore it can reopen. The gate now blocks only on connected claims\nat/below the local freeze\n(or NULL claims), and also skips the joining endpoint's own self-claim.\n\n### Tests\n\n- `drop_commit_closes_a_not_yet_reopened_reactivation` — red without fix\n1.\n- `npeer_survivor_ignores_a_stale_connected_claim_above_its_freeze` —\nred without fix 2.\n-\n`npeer_survivor_ignores_the_joiners_own_connected_claim_for_convergence`\n— red without the\n  joiner self-claim skip.\n- `d17_new_drop_fence_outlives_delayed_prior_join_commit` still passes\n(reopened close semantics\n  preserved).\n\n### Verification\n\n- `FORTRESS_SOAK_TARGET_FRAMES=...` 3.7M release soak: passed in 330s\n(previously wedged at 3.6M).\n- Full `cargo nextest run --profile ci-network-nightly --release\n--run-ignored ignored-only -E\n\n'test(network::soak::four_million_frame_soak_preserves_bounds_replay_and_lifecycle)'\n--test\n  network --features hot-join`: **1 passed** in 336s.\n- `cargo nextest run --lib` 1947 passed; `--features hot-join` 2183\npassed.\n- `cargo nextest run --test simulation` 472 passed; `cargo tfull` 3326\npassed.\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings` clean;\n  `python3 scripts/ci/agent-preflight.py` passed.\n\n## Type of Change\n\n- [x] Bug fix (non-breaking change that fixes an issue)\n- [x] Test (adding or updating tests)\n\n## Related Issues\n\nRelates to #486 (merged nightly regression source), #488.",
+          "timestamp": "2026-11-19T08:33:13Z",
+          "tree_id": "7c6475be7b880b79fcd1ea90a4b0f888bb1cfd96",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/52052fe82ea5fd1a3c4e08bfec87f36e2b3a0d51"
+        },
+        "date": 1795077936599,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 61815,
+            "range": "± 1549",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31423,
+            "range": "± 691",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1862,
+            "range": "± 109",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1555,
+            "range": "± 75",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3131,
+            "range": "± 175",
             "unit": "ns/iter"
           }
         ]
