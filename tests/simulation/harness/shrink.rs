@@ -1080,6 +1080,7 @@ mod tests {
             peer_event_counts: BTreeMap::new(),
             peer_event_counts_by_peer: vec![BTreeMap::new(); n],
             peer_event_payload_counts_by_peer: vec![BTreeMap::new(); n],
+            peer_dropped_order_by_peer: vec![Vec::new(); n],
             spectator_applied_frames: 0,
             spectator_max_frame: None,
             spectator_final_hosts: None,

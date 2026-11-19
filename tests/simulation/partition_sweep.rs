@@ -2843,6 +2843,12 @@ fn concurrent_disjoint_graceful_removals_certify_both_without_fork() {
             BTreeSet::from([1, 3]),
             "survivor {survivor} must observe a committed drop for each scheduled target"
         );
+        assert_eq!(
+            report.peer_dropped_order_by_peer[survivor],
+            vec![1, 3],
+            "survivor {survivor} must observe each certificate's PeerDropped in sorted \
+             target order, not just the right set"
+        );
     }
     assert!(
         report.final_confirmed[0].abs_diff(report.final_confirmed[2])

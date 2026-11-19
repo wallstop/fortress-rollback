@@ -1343,6 +1343,9 @@ pub struct RunReport {
     /// Same event counts split by observing peer and relevant event payload.
     /// Indexed by observing peer.
     pub peer_event_payload_counts_by_peer: Vec<BTreeMap<PeerEventKey, u64>>,
+    /// Ordered `PeerDropped` handles each peer observed, in emission order.
+    /// Indexed by observing peer; bounded to one entry per other player.
+    pub peer_dropped_order_by_peer: Vec<Vec<u16>>,
     /// Component-scoped confirmed-history evidence captured when
     /// [`RunOptions::component_scope`] declared a partition layout.
     pub component_scope: Option<ComponentScopeEvidence>,
@@ -3914,6 +3917,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     let mut peer_event_counts: BTreeMap<EventKind, u64> = BTreeMap::new();
     let mut peer_event_counts_by_peer = vec![BTreeMap::new(); n];
     let mut peer_event_payload_counts_by_peer = vec![BTreeMap::new(); n];
+    let mut peer_dropped_order_by_peer: Vec<Vec<u16>> = vec![Vec::new(); n];
     let mut load_game_state_observations: Vec<LoadGameStateObservation> = Vec::new();
     let mut next_event = 0usize;
     // Per-peer stall deadline (exclusive step): peer `i` is frozen while
@@ -4703,6 +4707,15 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                         *peer_event_counts_by_peer[i].entry(kind).or_default() += 1;
                         if let Some(key) = peer_event_key::<I>(event) {
                             *peer_event_payload_counts_by_peer[i].entry(key).or_default() += 1;
+                        }
+                        // alloc-bound: one handle per other player in a
+                        // mesh bounded to 16 players.
+                        if let FortressEvent::PeerDropped { handle, .. } = event {
+                            if let Ok(handle) = u16::try_from(handle.as_usize()) {
+                                if peer_dropped_order_by_peer[i].len() < n {
+                                    peer_dropped_order_by_peer[i].push(handle);
+                                }
+                            }
                         }
                         if let FortressEvent::DesyncDetected { frame, .. } = event {
                             oracle.observe_desync_event(i, *frame);
@@ -5947,6 +5960,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         peer_event_counts,
         peer_event_counts_by_peer,
         peer_event_payload_counts_by_peer,
+        peer_dropped_order_by_peer,
         spectator_applied_frames,
         spectator_max_frame,
         spectator_final_hosts,
