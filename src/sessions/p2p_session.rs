@@ -3116,11 +3116,16 @@ impl<T: Config> P2PSession<T> {
             Self::reset_coordinated_drop_backfill_grid(active);
         }
         active.backfill_donor = Some(backfill.donor);
-        if backfill.chunk_count == 0
-            || backfill.frame_count == 0
-            || backfill.chunk_index >= backfill.chunk_count
-            || backfill.start_frame > cut
-        {
+        if backfill.chunk_count == 0 {
+            return Err(DropAbortReason::ConflictingHistory);
+        }
+        if backfill.frame_count == 0 {
+            return Err(DropAbortReason::ConflictingHistory);
+        }
+        // An out-of-range chunk index is rejected by the frame-count check
+        // below: its implied slice is empty (`expected_frames == 0`) while the
+        // payload is non-empty.
+        if backfill.start_frame > cut {
             return Err(DropAbortReason::ConflictingHistory);
         }
         let expected_frames = std::cmp::min(
