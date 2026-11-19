@@ -184,6 +184,7 @@ for (const mode of MODES) {
         godot_threads: mode.godotThreads,
         real_clock_smoke: true,
         removal_certified: true,
+        hot_join_activated: true,
         ping_a_ms: 50,
         ping_b_ms: 50,
         replay_frames: 4096,

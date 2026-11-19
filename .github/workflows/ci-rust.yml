@@ -639,7 +639,7 @@ jobs:
           export CHROMEDRIVER="${CHROMEWEBDRIVER}/chromedriver"
           google-chrome --version 2>&1 | tee test-results/wasm-browser-runtime.log
           "${CHROMEDRIVER}" --version 2>&1 | tee -a test-results/wasm-browser-runtime.log
-          cargo test -p wasm-browser-smoke --target ${{ matrix.target }} --lib -- --nocapture 2>&1 | tee -a test-results/wasm-browser-runtime.log
+          cargo test -p wasm-browser-smoke --features hot-join --target ${{ matrix.target }} --lib -- --nocapture 2>&1 | tee -a test-results/wasm-browser-runtime.log
 
       - name: Upload browser runtime failure diagnostics
         if: failure() && steps.browser_session_runtime.outcome == 'failure' && matrix.target == 'wasm32-unknown-unknown'

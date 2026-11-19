@@ -14,7 +14,7 @@ default = []
 nothreads = ["godot/experimental-wasm-nothreads"]
 
 [dependencies]
-fortress-rollback = { path = "../.." }
+fortress-rollback = { path = "../..", features = ["hot-join"] }
 fortress-replay-fixture = { path = "../replay-fixture" }
 godot = { version = "=0.5.5", features = ["api-4-7", "experimental-wasm", "lazy-function-tables"] }
 web-time = "1.1"

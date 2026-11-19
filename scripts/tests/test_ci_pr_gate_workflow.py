@@ -151,8 +151,8 @@ def test_pr_gate_compiles_the_browser_runtime_test_crate() -> None:
     runs = [step.get("run", "").strip() for step in jobs["wasm-check"]["steps"]]
 
     assert (
-        "cargo check -p wasm-browser-smoke --target wasm32-unknown-unknown --lib --tests"
-        in runs
+        "cargo check -p wasm-browser-smoke --features hot-join "
+        "--target wasm32-unknown-unknown --lib --tests" in runs
     ), "the PR gate must compile the browser runtime tests it relies on"
 
 

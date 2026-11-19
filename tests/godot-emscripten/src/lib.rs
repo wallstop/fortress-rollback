@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use fortress_replay_fixture::{EXPECTED_DIGEST, EXPECTED_FRAMES, EXPECTED_REQUEST_DIGEST};
 use fortress_rollback::{
-    ClockFn, Config, DisconnectBehavior, FortressEvent, FortressRequest, Message, NetworkStats,
-    NonBlockingSocket, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, RequestVec,
-    SessionBuilder, SessionState,
+    ClockFn, Config, DisconnectBehavior, FortressEvent, FortressRequest, Frame, Message,
+    NetworkStats, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType, ProtocolConfig,
+    RequestVec, SessionBuilder, SessionState,
 };
 use godot::prelude::*;
 use web_time::{Duration, Instant};
@@ -21,6 +21,9 @@ const SECOND_ADDRESS: u8 = 2;
 const MAX_QUEUED_MESSAGES: usize = 256;
 const MAX_SYNC_POLLS: usize = 100;
 const MAX_REMOVAL_POLLS: usize = 512;
+const MAX_HOT_JOIN_POLLS: usize = 512;
+const MAX_CONFIRM_POLLS: usize = 64;
+const HOT_JOIN_CONFIRMED_FRAMES: usize = 2;
 const REAL_CLOCK_DEADLINE: Duration = Duration::from_millis(100);
 const VIRTUAL_POLL_INTERVAL_MS: u64 = 50;
 const VIRTUAL_MEASUREMENT_POLLS: usize = 40;
@@ -30,7 +33,10 @@ struct ProbeConfig;
 
 impl Config for ProbeConfig {
     type Input = u8;
-    type State = ();
+    // A real 64-bit state makes the hot-join snapshot exercise non-unit
+    // serialization under the 32-bit Emscripten ABI instead of round-tripping
+    // an empty value.
+    type State = u64;
     type Address = u8;
 }
 
@@ -256,17 +262,35 @@ fn run_virtual_clock_probe() -> Result<(u128, u128), String> {
     Ok((first_ping, second_ping))
 }
 
-fn handle_probe_requests(requests: RequestVec<ProbeConfig>) {
-    for request in requests {
-        match request {
-            FortressRequest::SaveGameState { cell, frame } => {
-                cell.save(frame, Some(()), None);
-            },
-            FortressRequest::LoadGameState { cell, .. } => {
-                let _ = cell.load();
-            },
-            FortressRequest::AdvanceFrame { .. } => {},
+#[derive(Default)]
+struct ProbeGame {
+    state: u64,
+    last_saved: Option<(Frame, u64)>,
+}
+
+impl ProbeGame {
+    fn handle(&mut self, requests: RequestVec<ProbeConfig>) -> Result<(), String> {
+        for request in requests {
+            match request {
+                FortressRequest::SaveGameState { cell, frame } => {
+                    cell.save(frame, Some(self.state), None);
+                    self.last_saved = Some((frame, self.state));
+                },
+                FortressRequest::LoadGameState { cell, .. } => {
+                    self.state = cell
+                        .load()
+                        .ok_or_else(|| "hot-join snapshot had no saved state".to_owned())?;
+                },
+                FortressRequest::AdvanceFrame { inputs } => {
+                    let frame_sum: u64 = inputs
+                        .iter()
+                        .map(|(input, _status)| u64::from(*input))
+                        .sum();
+                    self.state = self.state.saturating_add(frame_sum);
+                },
+            }
         }
+        Ok(())
     }
 }
 
@@ -290,6 +314,7 @@ fn run_removal_probe() -> Result<(), String> {
     let _ = pair.first.events().count();
     let _ = pair.second.events().count();
 
+    let mut game = ProbeGame::default();
     for frame_index in 0..3u8 {
         pair.first
             .add_local_input(PlayerHandle::new(0), frame_index)
@@ -297,16 +322,16 @@ fn run_removal_probe() -> Result<(), String> {
         pair.second
             .add_local_input(PlayerHandle::new(1), frame_index)
             .map_err(|error| format!("removed-player input: {error}"))?;
-        handle_probe_requests(
+        game.handle(
             pair.first
                 .advance_frame()
                 .map_err(|error| format!("survivor advance: {error}"))?,
-        );
-        handle_probe_requests(
+        )?;
+        game.handle(
             pair.second
                 .advance_frame()
                 .map_err(|error| format!("removed-player advance: {error}"))?,
-        );
+        )?;
         pair.first.poll_remote_clients();
         pair.second.poll_remote_clients();
         offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
@@ -363,13 +388,223 @@ fn run_removal_probe() -> Result<(), String> {
     pair.first
         .add_local_input(PlayerHandle::new(0), 99)
         .map_err(|error| format!("post-removal survivor input: {error}"))?;
-    handle_probe_requests(
+    game.handle(
         pair.first
             .advance_frame()
             .map_err(|error| format!("post-removal survivor advance: {error}"))?,
-    );
+    )?;
     if pair.first.current_state() != SessionState::Running {
         return Err("the Emscripten survivor left Running on the frozen-slot advance".to_owned());
+    }
+    Ok(())
+}
+
+/// Hot join must complete under Emscripten's 32-bit runtime, including the
+/// snapshot transfer, snapshot apply, activation-frame gate, and joined-slot
+/// input contribution. The host runs solo with a reserved slot, the joiner
+/// loads the served snapshot, and the joined slot must confirm at least two
+/// real inputs after activation.
+fn run_hot_join_probe() -> Result<(), String> {
+    let base = Instant::now();
+    let offset_ms = Arc::new(AtomicU64::new(0));
+    let clock_offset = Arc::clone(&offset_ms);
+    let clock: ClockFn =
+        Arc::new(move || base + Duration::from_millis(clock_offset.load(Ordering::Relaxed)));
+    let protocol_config = |seed| ProtocolConfig {
+        protocol_rng_seed: Some(seed),
+        clock: Some(clock.clone()),
+        ..ProtocolConfig::default()
+    };
+
+    let (host_socket, joiner_socket, health) = create_socket_pair();
+    let mut host = SessionBuilder::<ProbeConfig>::new()
+        .with_protocol_config(protocol_config(303))
+        .with_num_players(2)
+        .map_err(|error| format!("hot-join host player count: {error}"))?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))
+        .map_err(|error| format!("hot-join host local player: {error}"))?
+        .add_reserved_player(SECOND_ADDRESS, PlayerHandle::new(1))
+        .map_err(|error| format!("hot-join host reserved slot: {error}"))?
+        .start_p2p_session(host_socket)
+        .map_err(|error| format!("hot-join host session: {error}"))?;
+
+    host.poll_remote_clients();
+    if host.current_state() != SessionState::Running {
+        return Err("the Emscripten hot-join host did not run solo before the join".to_owned());
+    }
+    let _ = host.events().count();
+
+    let mut host_game = ProbeGame::default();
+    for frame_index in 0..3u8 {
+        host.add_local_input(PlayerHandle::new(0), frame_index)
+            .map_err(|error| format!("pre-join host input: {error}"))?;
+        host_game.handle(
+            host.advance_frame()
+                .map_err(|error| format!("pre-join host advance: {error}"))?,
+        )?;
+        host.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+    }
+
+    let mut joiner = SessionBuilder::<ProbeConfig>::new()
+        .with_protocol_config(protocol_config(404))
+        .with_num_players(2)
+        .map_err(|error| format!("hot-join joiner player count: {error}"))?
+        .add_player(PlayerType::Remote(FIRST_ADDRESS), PlayerHandle::new(0))
+        .map_err(|error| format!("hot-join joiner host slot: {error}"))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))
+        .map_err(|error| format!("hot-join joiner local slot: {error}"))?
+        .start_hot_join_session(joiner_socket, FIRST_ADDRESS)
+        .map_err(|error| format!("hot-join joiner session: {error}"))?;
+    if joiner.current_state() != SessionState::HotJoining {
+        return Err("the Emscripten joiner did not start in HotJoining".to_owned());
+    }
+
+    // The serving host pauses during the snapshot handshake, so polling alone
+    // completes the join and leaves both peers on the snapshot frame.
+    for _ in 0..MAX_HOT_JOIN_POLLS {
+        host.poll_remote_clients();
+        joiner.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+        if joiner.current_state() == SessionState::Running {
+            break;
+        }
+        if health.failed.get() {
+            return Err("in-memory socket failed during the hot-join probe".to_owned());
+        }
+    }
+    if joiner.current_state() != SessionState::Running {
+        return Err(
+            "the Emscripten joiner did not complete the snapshot handshake within the poll budget"
+                .to_owned(),
+        );
+    }
+
+    // The joiner's first advance after the join applies the snapshot.
+    let mut joiner_game = ProbeGame::default();
+    let requests = joiner
+        .advance_frame()
+        .map_err(|error| format!("hot-join snapshot apply: {error}"))?;
+    let mut load_count = 0usize;
+    let mut other_count = 0usize;
+    let mut snapshot_frame = None;
+    for request in &*requests {
+        if let FortressRequest::LoadGameState { frame, .. } = request {
+            load_count = load_count.saturating_add(1);
+            snapshot_frame = Some(*frame);
+        } else {
+            other_count = other_count.saturating_add(1);
+        }
+    }
+    if load_count != 1 || other_count != 0 {
+        return Err(format!(
+            "the joiner's first advance must return only one LoadGameState; \
+             got {load_count} loads and {other_count} other requests"
+        ));
+    }
+    joiner_game.handle(requests)?;
+    let snapshot_frame =
+        snapshot_frame.ok_or_else(|| "the joiner did not report a snapshot frame".to_owned())?;
+    let (saved_frame, saved_state) = host_game.last_saved.ok_or_else(|| {
+        "the hot-join host did not save a state before serving the snapshot".to_owned()
+    })?;
+    if saved_frame != snapshot_frame || saved_state != joiner_game.state {
+        return Err(format!(
+            "loaded snapshot state diverged: joiner frame {snapshot_frame:?} state {}, \
+             host frame {saved_frame:?} state {saved_state}",
+            joiner_game.state
+        ));
+    }
+
+    // Advance both peers in lockstep. The joiner's own frame cursor starts one
+    // frame behind the host's current frame (the host keeps running while the
+    // snapshot is served), so drive enough frames for the joined slot's
+    // activation frame to clear before checking confirmations.
+    for index in 0..6u8 {
+        host.add_local_input(PlayerHandle::new(0), 100 + index)
+            .map_err(|error| format!("post-join host input: {error}"))?;
+        joiner
+            .add_local_input(PlayerHandle::new(1), 200 + index)
+            .map_err(|error| format!("post-join joined-slot input: {error}"))?;
+        host_game.handle(
+            host.advance_frame()
+                .map_err(|error| format!("post-join host advance: {error}"))?,
+        )?;
+        joiner_game.handle(
+            joiner
+                .advance_frame()
+                .map_err(|error| format!("post-join joiner advance: {error}"))?,
+        )?;
+        for _ in 0..MAX_CONFIRM_POLLS {
+            host.poll_remote_clients();
+            joiner.poll_remote_clients();
+            offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+        }
+    }
+
+    let confirm_floor = Frame::new(snapshot_frame.as_i32() + 2);
+    for _ in 0..MAX_HOT_JOIN_POLLS {
+        if host.confirmed_frame() >= confirm_floor && joiner.confirmed_frame() >= confirm_floor {
+            break;
+        }
+        host.poll_remote_clients();
+        joiner.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+    }
+    let last_confirmed = Frame::new(
+        host.confirmed_frame()
+            .as_i32()
+            .min(joiner.confirmed_frame().as_i32()),
+    );
+    if last_confirmed < confirm_floor {
+        return Err(format!(
+            "post-join confirmation stalled at {last_confirmed:?} \
+             (floor {confirm_floor:?}, snapshot {snapshot_frame:?})"
+        ));
+    }
+
+    let mut joined_frames_confirmed = 0usize;
+    let mut previous_joined_input = None;
+    for offset in 0..HOT_JOIN_CONFIRMED_FRAMES as i32 {
+        let frame = Frame::new(last_confirmed.as_i32() - offset);
+        let host_inputs = host
+            .confirmed_inputs_for_frame(frame)
+            .map_err(|error| format!("post-join host confirmed inputs: {error}"))?;
+        let joiner_inputs = joiner
+            .confirmed_inputs_for_frame(frame)
+            .map_err(|error| format!("post-join joiner confirmed inputs: {error}"))?;
+        if host_inputs != joiner_inputs {
+            return Err(format!(
+                "post-join confirmed inputs diverged at frame {frame:?}: \
+                 host {host_inputs:?}, joiner {joiner_inputs:?}"
+            ));
+        }
+        let joined_input = *host_inputs
+            .get(1)
+            .ok_or_else(|| format!("the joined slot has no confirmed input at frame {frame:?}"))?;
+        if joined_input == u8::default() {
+            return Err(format!(
+                "the joined slot confirmed the frozen default input at frame {frame:?}"
+            ));
+        }
+        if previous_joined_input == Some(joined_input) {
+            return Err(format!(
+                "the joined slot did not advance its input stream at frame {frame:?}"
+            ));
+        }
+        previous_joined_input = Some(joined_input);
+        joined_frames_confirmed = joined_frames_confirmed.saturating_add(1);
+    }
+
+    if joined_frames_confirmed != HOT_JOIN_CONFIRMED_FRAMES {
+        return Err(format!(
+            "the joined slot confirmed {joined_frames_confirmed} checked frames, expected \
+             {HOT_JOIN_CONFIRMED_FRAMES}"
+        ));
+    }
+    if health.failed.get() {
+        return Err("in-memory socket failed during the hot-join probe".to_owned());
     }
     Ok(())
 }
@@ -451,11 +686,13 @@ impl FortressEmscriptenProbe {
                 replay_evidence().map(|replay| (real_clock_send_delta, pings, replay))
             })
             .and_then(|evidence| run_removal_probe().map(|()| evidence))
+            .and_then(|evidence| run_hot_join_probe().map(|()| evidence))
         {
             Ok((real_clock_send_delta, (first_ping, second_ping), replay)) => {
                 result.set("ok", true);
                 result.set("real_clock_smoke", true);
                 result.set("removal_certified", true);
+                result.set("hot_join_activated", true);
                 result.set(
                     "real_clock_send_delta",
                     i64::try_from(real_clock_send_delta).unwrap_or(i64::MAX),
@@ -476,6 +713,7 @@ impl FortressEmscriptenProbe {
                 result.set("ok", false);
                 result.set("real_clock_smoke", false);
                 result.set("removal_certified", false);
+                result.set("hot_join_activated", false);
                 result.set("real_clock_send_delta", 0);
                 result.set("ping_a_ms", -1);
                 result.set("ping_b_ms", -1);

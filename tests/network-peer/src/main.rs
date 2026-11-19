@@ -794,9 +794,7 @@ struct EventSummary {
     peer_dropped: u32,
     replay_desync: u32,
     spectator_divergence: u32,
-    #[cfg(feature = "hot-join")]
     join_requested: u32,
-    #[cfg(feature = "hot-join")]
     peer_joined: u32,
 }
 
@@ -822,9 +820,7 @@ impl EventSummary {
             },
             FortressEvent::PeerDropped { .. } => self.peer_dropped += 1,
             FortressEvent::SpectatorDivergence { .. } => self.spectator_divergence += 1,
-            #[cfg(feature = "hot-join")]
             FortressEvent::JoinRequested { .. } => self.join_requested += 1,
-            #[cfg(feature = "hot-join")]
             FortressEvent::PeerJoined { .. } => self.peer_joined += 1,
         }
     }
