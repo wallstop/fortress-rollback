@@ -3417,9 +3417,15 @@ impl<T: Config> P2PSession<T> {
             }
         }
         // An operation this endpoint never observed can only be treated as a
-        // removal certificate when more than one endpoint agrees on it. Known
-        // operations keep their validated ordering rules below.
+        // removal certificate when it comes from the operation's coordinator
+        // or more than one endpoint agrees on it. Known operations keep their
+        // validated ordering rules below. Without signatures, a colluding
+        // strict majority is indistinguishable from a real certificate; the
+        // session trust model already assumes cooperative peers (the same
+        // assumption as input exchange). These two checks keep a single faulty
+        // or hostile peer from halting a live session.
         if !self.coordinated_drop_knows_operation(commit.operation)
+            && source != Some(commit.operation.coordinator)
             && !self.coordinated_drop_unseen_commit_corroborated(commit, source)
         {
             return Ok(());
@@ -18599,6 +18605,37 @@ mod tests {
         assert!(
             sent_message_count(&session, crate::metrics::MessageKind::DropReport) > before,
             "the target acknowledges its own removal"
+        );
+    }
+
+    #[test]
+    fn unseen_commit_from_the_coordinator_applies_without_corroboration() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 2,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 1,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_commit(
+                DropCommit {
+                    operation,
+                    cut: Frame::new(10),
+                    cut_digest: 7,
+                },
+                Some(1),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Synchronizing,
+            "the operation's coordinator is the certificate authority for its own operation"
         );
     }
 
