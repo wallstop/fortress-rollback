@@ -3471,15 +3471,16 @@ impl<T: Config> P2PSession<T> {
             return Ok(());
         }
         // An operation this endpoint never observed can only be treated as a
-        // removal certificate when it comes from the operation's coordinator
-        // or more than one endpoint agrees on it. Known operations keep their
-        // validated ordering rules below. Without signatures, a colluding
+        // removal certificate when more than one endpoint agrees on it. Known
+        // operations keep their validated ordering rules below. A commit body
+        // names no participant set and carries no signature, so even the named
+        // coordinator's copy is unverifiable on its own; the real certificate
+        // is broadcast by every survivor. Without signatures, a colluding
         // strict majority is indistinguishable from a real certificate; the
         // session trust model already assumes cooperative peers (the same
-        // assumption as input exchange). These two checks keep a single faulty
-        // or hostile peer from halting a live session.
+        // assumption as input exchange). Corroboration keeps a single faulty or
+        // hostile peer from halting a live session.
         if !self.coordinated_drop_knows_operation(commit.operation)
-            && source != Some(commit.operation.coordinator)
             && !self.coordinated_drop_unseen_commit_corroborated(commit, source)
         {
             return Ok(());
@@ -3540,9 +3541,7 @@ impl<T: Config> P2PSession<T> {
             // A commit for a different known operation can only make this
             // attempt yield when it carries the same evidence a certificate
             // needs; one peer must not fail-close an active attempt.
-            if source == Some(commit.operation.coordinator)
-                || self.coordinated_drop_unseen_commit_corroborated(commit, source)
-            {
+            if self.coordinated_drop_unseen_commit_corroborated(commit, source) {
                 return Err(DropAbortReason::ParticipantLost);
             }
             return Ok(());
@@ -18683,7 +18682,7 @@ mod tests {
     }
 
     #[test]
-    fn unseen_commit_from_the_coordinator_applies_without_corroboration() {
+    fn unseen_commit_from_the_coordinator_requires_corroboration() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let targets = vec![DropTarget {
             handle: 2,
@@ -18695,21 +18694,28 @@ mod tests {
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
         };
+        let commit = DropCommit {
+            operation,
+            cut: Frame::new(10),
+            cut_digest: 7,
+        };
         assert_eq!(
-            session.coordinated_drop_accept_commit(
-                DropCommit {
-                    operation,
-                    cut: Frame::new(10),
-                    cut_digest: 7,
-                },
-                Some(1),
-            ),
+            session.coordinated_drop_accept_commit(commit, Some(1)),
+            Ok(())
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Running,
+            "one endpoint naming itself the coordinator is not certificate evidence"
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_commit(commit, Some(2)),
             Ok(())
         );
         assert_eq!(
             session.current_state(),
             SessionState::Synchronizing,
-            "the operation's coordinator is the certificate authority for its own operation"
+            "a corroborated certificate from the coordinator applies"
         );
     }
 
@@ -18759,9 +18765,13 @@ mod tests {
             Ok(())
         );
         assert_eq!(
+            session.coordinated_drop_accept_commit(newer, Some(2)),
+            Ok(())
+        );
+        assert_eq!(
             session.current_state(),
             SessionState::Synchronizing,
-            "a cut above the watermark is a genuine certificate"
+            "a corroborated cut above the watermark is a genuine certificate"
         );
         // The watermark journal stays bounded.
         for sequence in 2..=8_u32 {

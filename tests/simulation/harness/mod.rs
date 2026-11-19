@@ -3907,12 +3907,6 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
     // the certified cut is observed from a survivor after the commit and can be
     // higher (the cut is the maximum target receipt across survivors).
     let mut live_removal_request_ceilings: Vec<Option<i32>> = vec![None; n];
-    // Steps a live target may remain unretired after leaving `Running` while
-    // the harness waits for a survivor to expose the certified cut. The commit
-    // that moved the target is already on the wire; a poll interval is normally
-    // enough, and the bound keeps a genuinely premature exit visible.
-    const LIVE_REMOVAL_CERTIFIED_CUT_GRACE_STEPS: u32 = 16;
-    let mut live_removal_cut_grace = vec![LIVE_REMOVAL_CERTIFIED_CUT_GRACE_STEPS; n];
     let mut differential_hot_join_control: Option<DifferentialHotJoinControl> = None;
     #[cfg(feature = "hot-join")]
     let mut pending_hot_join: Option<PendingHotJoin<I>> = None;
@@ -5061,27 +5055,12 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                         // may simply be waiting for it to join.
                         continue;
                     }
-                    if live_removal_cut_grace[*target] > 0 {
-                        // The target can observe its certificate a poll before
-                        // a survivor's endpoint bookkeeping is sampled. Hold
-                        // the retirement (and the fallback cap) briefly so a
-                        // late-observable certified cut still wins.
-                        live_removal_cut_grace[*target] -= 1;
-                        continue;
-                    }
-                    if let Some(ceiling) = live_removal_request_ceilings[*target] {
-                        oracle.cap_retired_confirmed_inputs(*target, ceiling);
-                        oracle.cap_retired_state_comparison(*target, ceiling.saturating_add(1));
-                    }
-                    oracle.observe_runner_error(
-                        "live_target_premature_exit",
-                        *target,
-                        step,
-                        format!(
-                            "live graceful-removal target left Running before any survivor certified its removal (state={:?})",
-                            peers[*target].session.current_state()
-                        ),
-                    );
+                    // The target can observe its certificate before a
+                    // survivor's endpoint bookkeeping is sampled, especially
+                    // under asymmetric delivery. Defer the retirement, the
+                    // fallback cap, and the premature-exit verdict to the end
+                    // of the run so a later-observable certified cut wins.
+                    continue;
                 }
                 retire_peer_for_lifecycle(
                     *target,
@@ -5727,6 +5706,54 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
             totals
         })
         .collect();
+
+    // Finalize live graceful-removal targets that left `Running` before a
+    // survivor's certified cut was sampled. If a survivor eventually exposed
+    // the certified cut, it is the exact bound; otherwise the request-time
+    // ceiling is the fallback and the early exit is a genuine regression.
+    for target in &live_removal_targets {
+        if dead[*target] {
+            continue;
+        }
+        let handle = PlayerHandle::new(*target);
+        let certified_cut = peers
+            .iter()
+            .enumerate()
+            .filter(|(observer, _slot)| *observer != *target && !dead[*observer])
+            .filter(|(_observer, slot)| {
+                slot.session.diagnostic_player_connected(handle) == Some(false)
+            })
+            .filter_map(|(_observer, slot)| slot.session.diagnostic_player_receipt_frame(handle))
+            .map(Frame::as_i32)
+            .max();
+        if let Some(cut) = certified_cut {
+            oracle.cap_retired_confirmed_inputs(*target, cut);
+            oracle.cap_retired_state_comparison(*target, cut.saturating_add(1));
+        } else if live_removal_seen_running[*target] {
+            if let Some(ceiling) = live_removal_request_ceilings[*target] {
+                oracle.cap_retired_confirmed_inputs(*target, ceiling);
+                oracle.cap_retired_state_comparison(*target, ceiling.saturating_add(1));
+            }
+            oracle.observe_runner_error(
+                "live_target_premature_exit",
+                *target,
+                schedule.config.steps.saturating_sub(1),
+                format!(
+                    "live graceful-removal target left Running before any survivor certified its removal (state={:?})",
+                    peers[*target].session.current_state()
+                ),
+            );
+        } else {
+            continue;
+        }
+        retire_peer_for_lifecycle(
+            *target,
+            &peers,
+            &mut dead,
+            &mut oracle,
+            spectator_enabled.then_some(&mut spectator_required_min_frame),
+        );
+    }
 
     // Hand the oracle the (c) bounded post-heal liveness inputs. `window_steps`
     // is the ACTUAL anchor span (B, or B-1 at an exact-boundary drain where the
