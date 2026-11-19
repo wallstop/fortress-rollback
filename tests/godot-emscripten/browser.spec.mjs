@@ -183,6 +183,7 @@ for (const mode of MODES) {
         godot_version: GODOT_VERSION,
         godot_threads: mode.godotThreads,
         real_clock_smoke: true,
+        removal_certified: true,
         ping_a_ms: 50,
         ping_b_ms: 50,
         replay_frames: 4096,

@@ -3,9 +3,9 @@ mod tests {
     use fortress_replay_fixture::{EXPECTED_DIGEST, EXPECTED_FRAMES, EXPECTED_REQUEST_DIGEST};
     use fortress_rollback::network::codec;
     use fortress_rollback::{
-        ChaosConfig, ChaosSocket, Config, FortressRequest, Frame, InputVec, Message,
-        NonBlockingSocket, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, RequestVec,
-        SessionBuilder, SessionState,
+        ChaosConfig, ChaosSocket, Config, DisconnectBehavior, FortressEvent, FortressRequest,
+        Frame, InputVec, Message, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType,
+        ProtocolConfig, RequestVec, SessionBuilder, SessionState,
     };
     use serde::{Deserialize, Serialize};
     use std::cell::RefCell;
@@ -22,6 +22,7 @@ mod tests {
     const MAX_QUEUED_RAW_PACKETS: usize = 64;
     const SYNC_POLL_BUDGET: usize = 256;
     const INPUT_POLL_BUDGET: usize = 64;
+    const REMOVAL_POLL_BUDGET: usize = 512;
     const FRAME_COUNT: u32 = 2;
     const MALFORMED_PACKET_COUNT: usize = MAX_RAW_PACKETS_PER_POLL + 1;
 
@@ -81,6 +82,13 @@ mod tests {
     fn build_virtual_clock_sessions(
         clock: fortress_rollback::ClockFn,
     ) -> (P2PSession<BrowserConfig>, P2PSession<BrowserConfig>) {
+        build_virtual_clock_sessions_with_behavior(clock, DisconnectBehavior::Halt)
+    }
+
+    fn build_virtual_clock_sessions_with_behavior(
+        clock: fortress_rollback::ClockFn,
+        behavior: DisconnectBehavior,
+    ) -> (P2PSession<BrowserConfig>, P2PSession<BrowserConfig>) {
         let (socket1, socket2, _bus) = RawBus::pair();
         let first = SessionBuilder::<BrowserConfig>::new()
             .with_protocol_config(ProtocolConfig {
@@ -88,6 +96,7 @@ mod tests {
                 clock: Some(clock.clone()),
                 ..ProtocolConfig::default()
             })
+            .with_disconnect_behavior(behavior)
             .add_player(PlayerType::Local, PlayerHandle::new(0))
             .and_then(|builder| {
                 builder.add_player(PlayerType::Remote(BrowserPeer(1)), PlayerHandle::new(1))
@@ -100,6 +109,7 @@ mod tests {
                 clock: Some(clock),
                 ..ProtocolConfig::default()
             })
+            .with_disconnect_behavior(behavior)
             .add_player(PlayerType::Remote(BrowserPeer(0)), PlayerHandle::new(0))
             .and_then(|builder| builder.add_player(PlayerType::Local, PlayerHandle::new(1)))
             .and_then(|builder| builder.start_p2p_session(socket2))
@@ -332,6 +342,117 @@ mod tests {
             let _ = drain_link_events(&mut session1);
             let _ = drain_link_events(&mut session2);
         }
+    }
+
+    /// Explicit graceful removal must complete under the browser's 32-bit
+    /// `usize` world, not only in the native simulation harness. The survivor
+    /// certifies the drop, the removed target learns its committed certificate
+    /// and stops, and the survivor keeps advancing on the frozen slot.
+    #[wasm_bindgen_test]
+    fn explicit_graceful_removal_certifies_in_browser() {
+        let (clock, offset_ms) = virtual_clock();
+        let (mut survivor, mut removed) =
+            build_virtual_clock_sessions_with_behavior(clock, DisconnectBehavior::ContinueWithout);
+
+        let mut sync_polls = 0usize;
+        while sync_polls < SYNC_POLL_BUDGET
+            && (survivor.current_state() != SessionState::Running
+                || removed.current_state() != SessionState::Running)
+        {
+            poll_pair_with_clock(&mut survivor, &mut removed, &offset_ms);
+            sync_polls = sync_polls.saturating_add(1);
+        }
+        assert!(
+            survivor.current_state() == SessionState::Running
+                && removed.current_state() == SessionState::Running,
+            "removal sessions failed to synchronize in the browser"
+        );
+        let _ = survivor.events().count();
+        let _ = removed.events().count();
+
+        let mut survivor_state = BrowserState::default();
+        let mut removed_state = BrowserState::default();
+        for frame_index in 0..4u32 {
+            let input = BrowserInput { value: frame_index };
+            survivor
+                .add_local_input(PlayerHandle::new(0), input)
+                .expect("survivor input must be accepted");
+            removed
+                .add_local_input(PlayerHandle::new(1), input)
+                .expect("removed-player input must be accepted");
+            apply_requests(
+                &mut survivor_state,
+                survivor
+                    .advance_frame()
+                    .expect("survivor must advance before the removal"),
+            );
+            apply_requests(
+                &mut removed_state,
+                removed
+                    .advance_frame()
+                    .expect("removed player must advance before the removal"),
+            );
+            poll_pair_with_clock(&mut survivor, &mut removed, &offset_ms);
+        }
+
+        let cut = survivor.confirmed_frame();
+        survivor
+            .remove_player(PlayerHandle::new(1))
+            .expect("explicit graceful removal must be accepted");
+
+        let mut dropped = false;
+        let mut removed_stopped = false;
+        for _ in 0..REMOVAL_POLL_BUDGET {
+            poll_pair_with_clock(&mut survivor, &mut removed, &offset_ms);
+            for event in survivor.events() {
+                if let FortressEvent::PeerDropped { handle, .. } = event {
+                    assert_eq!(
+                        handle,
+                        PlayerHandle::new(1),
+                        "the certificate must drop exactly the requested handle"
+                    );
+                    dropped = true;
+                }
+            }
+            let _ = removed.events().count();
+            removed_stopped = removed.current_state() == SessionState::Synchronizing;
+            if dropped && removed_stopped {
+                break;
+            }
+        }
+        assert!(
+            dropped,
+            "the browser survivor must certify the requested removal"
+        );
+        assert!(
+            removed_stopped,
+            "the removed target must fail closed to Synchronizing after applying its committed certificate"
+        );
+        assert_eq!(
+            survivor.current_state(),
+            SessionState::Running,
+            "the survivor must keep running after the removal"
+        );
+        assert!(
+            survivor.confirmed_frame() >= cut,
+            "the survivor must retain its confirmed prefix across the removal"
+        );
+
+        survivor
+            .add_local_input(PlayerHandle::new(0), BrowserInput { value: 99 })
+            .expect("post-removal survivor input must be accepted");
+        apply_requests(
+            &mut survivor_state,
+            survivor
+                .advance_frame()
+                .expect("the survivor must keep advancing on the frozen slot"),
+        );
+        poll_pair_with_clock(&mut survivor, &mut removed, &offset_ms);
+        assert_eq!(
+            survivor.current_state(),
+            SessionState::Running,
+            "the survivor must stay live after the frozen-slot advance"
+        );
     }
 
     #[wasm_bindgen_test]

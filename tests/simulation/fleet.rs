@@ -1304,6 +1304,33 @@ fn smoke_traces_match_checked_in_cross_architecture_digests() {
     }
 }
 
+/// Cross-architecture identity for the N-peer hot-join membership path.
+///
+/// The main trace contract above runs with the default feature set, so the
+/// feature-gated hot join lane never executes on the `cross-arch-runtime`
+/// matrix. This pins the same folded trace for the canonical N-peer
+/// reactivation schedule: every confirmed input, event stream, checksum, and
+/// simulated wire counter must match the x86_64 reference under qemu-aarch64
+/// and on 32-bit i686.
+#[cfg(feature = "hot-join")]
+#[test]
+fn hot_join_trace_matches_checked_in_cross_architecture_digest() {
+    const EXPECTED_HASH: u64 = 0xe493_827c_d108_44b0;
+    const EXPECTED_CONFIRMED: [i32; 4] = [859, 860, 860, 860];
+
+    let schedule = super::census::clean_npeer_hot_join_schedule(4);
+    let report = run(&schedule, &RunOptions::default());
+    report.expect_pass(&schedule);
+    assert_eq!(
+        report.trace_hash, EXPECTED_HASH,
+        "hot-join trace digest diverged from the checked-in x86_64 reference"
+    );
+    assert_eq!(
+        report.final_confirmed, EXPECTED_CONFIRMED,
+        "hot-join confirmed-frame evidence diverged from the checked-in reference"
+    );
+}
+
 /// Negative control (real divergence): corrupting one peer's simulated state
 /// mid-run must trip BOTH detection layers — the oracle's recorded-state
 /// comparison and the library's in-band desync detector.
