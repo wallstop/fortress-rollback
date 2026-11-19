@@ -964,3 +964,13 @@ jobs:
           cargo nextest run --profile ci-cross-arch --target ${{ matrix.target }}
           --workspace --features tokio,json
           -E "${{ matrix.filter }}"
+
+      # The hot-join membership lane is feature-gated, so the suite above
+      # compiles it out. Run its pinned cross-architecture trace separately:
+      # the N-peer reactivation path must fold to the same digest and
+      # confirmed-frame vector on every target.
+      - name: Run hot-join cross-architecture trace
+        run: >-
+          cargo nextest run --profile ci-cross-arch --target ${{ matrix.target }}
+          --test simulation --features tokio,json,hot-join
+          -E "test(hot_join_trace_matches_checked_in_cross_architecture_digest)"

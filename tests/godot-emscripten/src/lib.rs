@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use fortress_replay_fixture::{EXPECTED_DIGEST, EXPECTED_FRAMES, EXPECTED_REQUEST_DIGEST};
 use fortress_rollback::{
-    ClockFn, Config, Message, NetworkStats, NonBlockingSocket, P2PSession, PlayerHandle,
-    PlayerType, ProtocolConfig, SessionBuilder, SessionState,
+    ClockFn, Config, DisconnectBehavior, FortressEvent, FortressRequest, Message, NetworkStats,
+    NonBlockingSocket, P2PSession, PlayerHandle, PlayerType, ProtocolConfig, RequestVec,
+    SessionBuilder, SessionState,
 };
 use godot::prelude::*;
 use web_time::{Duration, Instant};
@@ -120,6 +121,7 @@ fn create_socket_pair() -> (MemorySocket, MemorySocket, Rc<SocketHealth>) {
 fn create_sessions(
     clock: Option<ClockFn>,
     quality_interval: Duration,
+    behavior: DisconnectBehavior,
 ) -> Result<SessionPair, String> {
     let (first_socket, second_socket, health) = create_socket_pair();
     let protocol_config = |seed| ProtocolConfig {
@@ -131,6 +133,7 @@ fn create_sessions(
 
     let first = SessionBuilder::<ProbeConfig>::new()
         .with_protocol_config(protocol_config(101))
+        .with_disconnect_behavior(behavior)
         .add_player(PlayerType::Local, PlayerHandle::new(0))
         .map_err(|error| format!("first local player: {error}"))?
         .add_player(PlayerType::Remote(SECOND_ADDRESS), PlayerHandle::new(1))
@@ -140,6 +143,7 @@ fn create_sessions(
 
     let second = SessionBuilder::<ProbeConfig>::new()
         .with_protocol_config(protocol_config(202))
+        .with_disconnect_behavior(behavior)
         .add_player(PlayerType::Remote(FIRST_ADDRESS), PlayerHandle::new(0))
         .map_err(|error| format!("second remote player: {error}"))?
         .add_player(PlayerType::Local, PlayerHandle::new(1))
@@ -176,7 +180,7 @@ fn synchronize_sessions(
 }
 
 fn run_real_clock_probe() -> Result<u64, String> {
-    let mut pair = create_sessions(None, Duration::from_millis(1))?;
+    let mut pair = create_sessions(None, Duration::from_millis(1), DisconnectBehavior::Halt)?;
     synchronize_sessions(&mut pair, || {})?;
 
     for _ in 0..4 {
@@ -221,6 +225,7 @@ fn run_virtual_clock_probe() -> Result<(u128, u128), String> {
     let mut pair = create_sessions(
         Some(clock),
         ProtocolConfig::default().quality_report_interval,
+        DisconnectBehavior::Halt,
     )?;
     synchronize_sessions(&mut pair, || {
         offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
@@ -248,6 +253,108 @@ fn run_virtual_clock_probe() -> Result<(u128, u128), String> {
     }
 
     Ok((first_ping, second_ping))
+}
+
+fn handle_probe_requests(requests: RequestVec<ProbeConfig>) {
+    for request in requests {
+        match request {
+            FortressRequest::SaveGameState { cell, frame } => {
+                cell.save(frame, Some(()), None);
+            },
+            FortressRequest::LoadGameState { cell, .. } => {
+                let _ = cell.load();
+            },
+            FortressRequest::AdvanceFrame { .. } => {},
+        }
+    }
+}
+
+/// Explicit graceful removal must complete under Emscripten's 32-bit runtime,
+/// including the live-target commit retransmission path. The survivor certifies
+/// the drop and the removed session applies its own committed certificate.
+fn run_removal_probe() -> Result<(), String> {
+    let offset_ms = Arc::new(AtomicU64::new(0));
+    let clock_offset = Arc::clone(&offset_ms);
+    let clock: ClockFn = Arc::new(move || {
+        Instant::now() + Duration::from_millis(clock_offset.load(Ordering::Relaxed))
+    });
+    let mut pair = create_sessions(
+        Some(clock),
+        ProtocolConfig::default().quality_report_interval,
+        DisconnectBehavior::ContinueWithout,
+    )?;
+    synchronize_sessions(&mut pair, || {
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+    })?;
+    let _ = pair.first.events().count();
+    let _ = pair.second.events().count();
+
+    for frame_index in 0..3u8 {
+        pair.first
+            .add_local_input(PlayerHandle::new(0), frame_index)
+            .map_err(|error| format!("survivor input: {error}"))?;
+        pair.second
+            .add_local_input(PlayerHandle::new(1), frame_index)
+            .map_err(|error| format!("removed-player input: {error}"))?;
+        handle_probe_requests(
+            pair.first
+                .advance_frame()
+                .map_err(|error| format!("survivor advance: {error}"))?,
+        );
+        handle_probe_requests(
+            pair.second
+                .advance_frame()
+                .map_err(|error| format!("removed-player advance: {error}"))?,
+        );
+        pair.first.poll_remote_clients();
+        pair.second.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+    }
+
+    pair.first
+        .remove_player(PlayerHandle::new(1))
+        .map_err(|error| format!("explicit graceful removal: {error}"))?;
+
+    let mut dropped = false;
+    let mut removed_stopped = false;
+    for _ in 0..512 {
+        pair.first.poll_remote_clients();
+        pair.second.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+
+        for event in pair.first.events() {
+            if let FortressEvent::PeerDropped { handle, .. } = event {
+                if handle != PlayerHandle::new(1) {
+                    return Err(format!(
+                        "the removal certificate dropped handle {} instead of 1",
+                        handle.as_usize()
+                    ));
+                }
+                dropped = true;
+            }
+        }
+        let _ = pair.second.events().count();
+        removed_stopped = pair.second.current_state() != SessionState::Running;
+        if dropped && removed_stopped {
+            break;
+        }
+        if pair.health.failed.get() {
+            return Err("in-memory socket failed during removal probe".to_owned());
+        }
+    }
+
+    if !dropped {
+        return Err("the Emscripten survivor did not certify the removal".to_owned());
+    }
+    if !removed_stopped {
+        return Err(
+            "the removed Emscripten target did not apply its committed certificate".to_owned(),
+        );
+    }
+    if pair.first.current_state() != SessionState::Running {
+        return Err("the Emscripten survivor left Running after the removal".to_owned());
+    }
+    Ok(())
 }
 
 fn mode() -> &'static str {
@@ -325,10 +432,13 @@ impl FortressEmscriptenProbe {
             })
             .and_then(|(real_clock_send_delta, pings)| {
                 replay_evidence().map(|replay| (real_clock_send_delta, pings, replay))
-            }) {
+            })
+            .and_then(|evidence| run_removal_probe().map(|()| evidence))
+        {
             Ok((real_clock_send_delta, (first_ping, second_ping), replay)) => {
                 result.set("ok", true);
                 result.set("real_clock_smoke", true);
+                result.set("removal_certified", true);
                 result.set(
                     "real_clock_send_delta",
                     i64::try_from(real_clock_send_delta).unwrap_or(i64::MAX),
@@ -348,6 +458,7 @@ impl FortressEmscriptenProbe {
             Err(error) => {
                 result.set("ok", false);
                 result.set("real_clock_smoke", false);
+                result.set("removal_certified", false);
                 result.set("real_clock_send_delta", 0);
                 result.set("ping_a_ms", -1);
                 result.set("ping_b_ms", -1);
