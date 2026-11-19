@@ -63,6 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** periodic hot-join cycles no longer wedge after many rejoins. A committed drop
+  for a slot now supersedes an in-flight but not-yet-reopened reactivation for that slot (its
+  shield previously kept the slot connected forever and blocked every later directive), and the
+  survivor-side freeze-convergence gate ignores the joining endpoint's own connected claim for the
+  slot it is reactivating, and ignores a stale connected claim whose frame is above the survivor's
+  own freeze (a peer that is ahead cannot undercut the local freeze, and its own directive gate
+  still requires it to be locally frozen before reopening). The directive is accepted, the slot
+  reactivates, and rejoin cycles keep completing. Pinned by
+  `drop_commit_closes_a_not_yet_reopened_reactivation`,
+  `npeer_survivor_ignores_the_joiners_own_connected_claim_for_convergence`,
+  `npeer_survivor_ignores_a_stale_connected_claim_above_its_freeze`, and the 4,000,000-frame
+  nightly soak.
 - **Pre-existing:** a live gracefully removed target now learns its certificate even when the
   first commit datagrams are lost, and a participant that becomes able to donate after its
   start-of-attempt inventory can still complete a backfill. Survivors retransmit the commit into
