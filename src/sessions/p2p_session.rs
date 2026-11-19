@@ -3778,21 +3778,6 @@ impl<T: Config> P2PSession<T> {
             self.close_reactivation_for_drop_targets(&targets);
         }
 
-        // The certificate is authoritative for the target's frozen era. A
-        // target that timed out while the removal was in flight may carry an
-        // earlier disconnect high-water; the ordinary disconnect fold only
-        // lowers a disconnected slot, which would freeze its value below the
-        // certified cut while the fence records the cut. Raise that view to the
-        // certificate before the fold so the frozen value is the certified one.
-        for target in &targets {
-            let handle = PlayerHandle::new(usize::from(target.handle));
-            if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
-                if status.disconnected && status.last_frame < commit.cut {
-                    status.last_frame = commit.cut;
-                }
-            }
-        }
-
         self.coordinated_drop_record_closed_cut(&commit);
         let mut cuts = Vec::new();
         cuts.try_reserve_exact(targets.len())
@@ -3853,6 +3838,19 @@ impl<T: Config> P2PSession<T> {
             );
         }
         self.disconnect_player_at_frames(representative, commit.cut, Some(&overrides));
+
+        // The certificate is authoritative for the target's frozen era. The
+        // disconnect fold mines a disconnected slot down to its earlier
+        // disconnect high-water, which would freeze its value below the
+        // certified cut while the fence records the cut. Re-apply the certified
+        // cut so the status and frozen value always describe the certificate.
+        for target in &targets {
+            let handle = PlayerHandle::new(usize::from(target.handle));
+            if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
+                status.last_frame = commit.cut;
+            }
+            self.sync_layer.set_frozen_value_at(handle, commit.cut);
+        }
 
         // The certified cut is the MAXIMUM target receipt across survivors, so a
         // survivor whose own receipt trailed the cut had to backfill it. Any
@@ -17919,6 +17917,12 @@ mod tests {
         };
         session.coordinated_drop_close_operation(operation);
         session.coordinated_drop_record_closed_commit(commit);
+        session.coordinated_drop_record_closed_commit(commit);
+        assert_eq!(
+            session.coordinated_drop.closed_commits.len(),
+            1,
+            "recording the same certificate twice must not duplicate the journal"
+        );
         let retrying_addr = test_addr(9401);
         let other_addr = test_addr(9402);
         let before_retrying = sent_message_count_to(
