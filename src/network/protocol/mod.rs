@@ -4789,6 +4789,52 @@ mod tests {
     // ==========================================
 
     #[test]
+    fn synchronizing_and_disconnected_admit_only_target_acks_and_sync_requests() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        let operation = crate::network::messages::DropOperationId::default();
+        let ack = DropReport {
+            operation,
+            participant: 1,
+            stage: DropReportStage::TargetAck,
+            exposed_confirmed: Frame::NULL,
+            cut: Frame::new(10),
+            cut_digest: 7,
+            receipts: Vec::new(),
+        };
+        let inventory = DropReport {
+            stage: DropReportStage::Inventory,
+            ..ack.clone()
+        };
+        let request = matching_sync_request(&protocol, 7);
+
+        protocol.state = ProtocolState::Synchronizing;
+        assert!(protocol.message_allowed_in_current_state(&MessageBody::SyncRequest(request)));
+        assert!(
+            protocol.message_allowed_in_current_state(&MessageBody::DropReport(ack.clone())),
+            "a rearmed endpoint must admit the removed target's acknowledgement"
+        );
+        assert!(
+            !protocol.message_allowed_in_current_state(&MessageBody::DropReport(inventory.clone())),
+            "non-acknowledgement reports stay filtered during synchronization"
+        );
+
+        protocol.state = ProtocolState::Disconnected;
+        assert!(
+            protocol.message_allowed_in_current_state(&MessageBody::SyncRequest(request)),
+            "the shutdown window still answers a peer's sync request"
+        );
+        assert!(
+            protocol.message_allowed_in_current_state(&MessageBody::DropReport(ack)),
+            "the shutdown window admits the target acknowledgement"
+        );
+        assert!(
+            !protocol.message_allowed_in_current_state(&MessageBody::DropReport(inventory)),
+            "inventory reports cannot influence another operation from a disconnected address"
+        );
+    }
+
+    #[test]
     fn synchronizing_endpoint_answers_sync_requests() {
         let mut protocol: UdpProtocol<TestConfig> =
             create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);

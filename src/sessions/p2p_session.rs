@@ -262,7 +262,6 @@ struct CoordinatedDropAttempt<A> {
     cut: Option<Frame>,
     cut_digest: Option<u64>,
     pending_commit: Option<DropCommit>,
-    backfill_sent: bool,
     backfill_chunks: BTreeMap<u16, DropBackfill>,
     relayed_backfill: BTreeMap<u16, DropBackfill>,
     next_backfill_chunk: u16,
@@ -2104,7 +2103,6 @@ impl<T: Config> P2PSession<T> {
             cut: None,
             cut_digest: None,
             pending_commit: None,
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
@@ -2451,7 +2449,6 @@ impl<T: Config> P2PSession<T> {
             cut: None,
             cut_digest: None,
             pending_commit: None,
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
@@ -2670,70 +2667,53 @@ impl<T: Config> P2PSession<T> {
                 };
                 match active.donor_announcements.get(&report.participant) {
                     Some(existing) => {
-                        if *existing == announcement {
-                            // A DIRECT donor retransmission is forwarded again
-                            // so a lost relayed copy can be repaired. A
-                            // duplicate that itself arrived through a relay is
-                            // not re-relayed, which bounds propagation.
-                            relay = source == Some(report.participant);
-                        } else {
-                            // An announcement for the same operation, donor,
-                            // and certified cut can only differ by its start
-                            // range. A delayed inventory report lowers the
-                            // required start, so the earliest range wins
-                            // regardless of delivery order: replace on an
-                            // earlier start and reset the not-yet-installed
-                            // grid; ignore a delayed narrower copy. A changed
-                            // digest is real equivocation.
-                            if report.cut_digest != existing.cut_digest {
-                                return Err(DropAbortReason::ConflictingHistory);
-                            }
-                            let extends_range = report
-                                .cut
-                                .distance_to(existing.start_frame)
-                                .is_some_and(|distance| distance > 0);
-                            if extends_range {
-                                active
-                                    .donor_announcements
-                                    .insert(report.participant, announcement);
-                                Self::reset_coordinated_drop_backfill_grid(active);
-                                // A newly accepted extension is forwarded
-                                // exactly once per node, regardless of how it
-                                // arrived: a receiver that learned start 8
-                                // through a relay must be able to propagate
-                                // start 5 further.
-                                relay = true;
-                            } else if report.cut == existing.start_frame {
-                                // Defensive: the derived chunk count cannot
-                                // differ for one start and cut; keep the first
-                                // copy.
-                                relay = source == Some(report.participant);
-                            }
-                            // A delayed narrower (later-start) copy is ignored.
+                        // One participant can only change the start of its
+                        // announced range; a changed digest is real
+                        // equivocation.
+                        if report.cut_digest != existing.cut_digest {
+                            return Err(DropAbortReason::ConflictingHistory);
                         }
+                        if report.cut < existing.start_frame {
+                            // A delayed inventory report lowered the required
+                            // start. The earliest range wins regardless of
+                            // delivery order: replace it and reset the
+                            // not-yet-installed grid. A newly accepted
+                            // extension is forwarded exactly once per node,
+                            // regardless of how it arrived: a receiver that
+                            // learned start 8 through a relay must be able to
+                            // propagate start 5 further.
+                            active
+                                .donor_announcements
+                                .insert(report.participant, announcement);
+                            Self::reset_coordinated_drop_backfill_grid(active);
+                            relay = true;
+                        } else if report.cut == existing.start_frame {
+                            // Same start: keep the first copy. A DIRECT donor
+                            // retransmission is forwarded again so a lost
+                            // relayed copy can be repaired; a duplicate that
+                            // itself arrived through a relay is not re-relayed,
+                            // which bounds propagation.
+                            relay = source == Some(report.participant);
+                        }
+                        // A delayed narrower (later-start) copy is ignored.
                     },
                     None => {
                         if active.donor_announcements.len() >= self.num_players {
                             return Err(DropAbortReason::ResourceLimit);
                         }
-                        let required_start = Self::coordinated_drop_required_start(active, cut)?;
-                        let previous_min = active
-                            .donor_announcements
-                            .iter()
-                            .filter(|(_, existing)| {
-                                required_start.is_none_or(|start| existing.start_frame <= start)
-                            })
-                            .map(|(&participant, _)| participant)
-                            .min();
+                        let _ = Self::coordinated_drop_required_start(active, cut)?;
                         active
                             .donor_announcements
                             .insert(report.participant, announcement);
                         self.coordinated_drop_donor_announcements =
                             self.coordinated_drop_donor_announcements.saturating_add(1);
-                        if previous_min.is_none_or(|min| report.participant < min) {
-                            // A lower-handle donor becomes the deterministic
-                            // choice; discard any buffered grid from the
-                            // previous candidate.
+                        // BTreeMap iterates in ascending handle order, so the
+                        // first key is the deterministic donor choice. Reset
+                        // the not-yet-installed grid whenever a newly accepted
+                        // announcement becomes that choice.
+                        if active.donor_announcements.keys().next().copied()
+                            == Some(report.participant)
+                        {
                             Self::reset_coordinated_drop_backfill_grid(active);
                         }
                         relay = true;
@@ -2828,7 +2808,6 @@ impl<T: Config> P2PSession<T> {
         active.expected_backfill_start = None;
         active.backfill_grid_source = None;
         active.backfill_donor = None;
-        active.backfill_sent = false;
     }
 
     /// Computes the canonical chunk layout for `[start, cut]` across
@@ -3027,7 +3006,11 @@ impl<T: Config> P2PSession<T> {
         // not depend on the chunk layout alone: two donors can share a layout
         // while disagreeing about the earlier inputs in the range.
         let range_start = backfill.range_start;
-        if !range_start.is_valid() || range_start > start {
+        if !range_start.is_valid() {
+            // An invalid range identifier cannot describe any canonical grid.
+            return Ok(());
+        }
+        if range_start > start {
             // A chunk from the donor's superseded (higher-start) grid. A
             // delayed report lowered the required start; the donor retries from
             // there. Never abort the removal on the stale copy.
@@ -3128,22 +3111,25 @@ impl<T: Config> P2PSession<T> {
             plan.frames_per_chunk,
             plan.frame_count.saturating_sub(chunk_offset),
         );
-        if plan.chunk_count != backfill.chunk_count
-            || usize::from(backfill.frame_count) != expected_frames
-        {
+        if plan.chunk_count != backfill.chunk_count {
             return Err(DropAbortReason::ConflictingHistory);
         }
-        if active
-            .expected_backfill_chunks
-            .is_some_and(|expected| expected != backfill.chunk_count)
-            || active
-                .expected_backfill_start
-                .is_some_and(|expected| expected != range_start)
-        {
-            // A chunk from a different grid than the one this receiver already
-            // locked belongs to a racing donor; discard it instead of failing
-            // the certificate. The selected donor's chunks still arrive.
-            return Ok(());
+        if usize::from(backfill.frame_count) != expected_frames {
+            return Err(DropAbortReason::ConflictingHistory);
+        }
+        if let Some(expected) = active.expected_backfill_chunks {
+            if expected != backfill.chunk_count {
+                // A chunk from a different grid than the one this receiver
+                // already locked belongs to a racing donor; discard it instead
+                // of failing the certificate. The selected donor's chunks still
+                // arrive.
+                return Ok(());
+            }
+        }
+        if let Some(expected) = active.expected_backfill_start {
+            if expected != range_start {
+                return Ok(());
+            }
         }
         active
             .expected_backfill_chunks
@@ -3293,13 +3279,18 @@ impl<T: Config> P2PSession<T> {
         // on a history that already dropped it. Operations this endpoint HAS
         // observed (active, deferred, rejected, or closed) keep the ordering
         // rules below instead.
-        if self
+        let active_operation = self
             .coordinated_drop
             .active
             .as_ref()
-            .is_some_and(|active| active.operation != commit.operation)
-            && !self.coordinated_drop_knows_operation(commit.operation)
-        {
+            .map(|active| active.operation);
+        if matches!(
+            (
+                active_operation,
+                self.coordinated_drop_knows_operation(commit.operation)
+            ),
+            (Some(active), false) if active != commit.operation
+        ) {
             self.enter_fail_closed_disconnect_state_at(self.confirmed_frame());
             self.coordinated_drop_ack_unknown_commit(commit);
             return Ok(());
@@ -3927,16 +3918,7 @@ impl<T: Config> P2PSession<T> {
             return;
         }
 
-        let (
-            operation,
-            targets,
-            cut,
-            local_participant,
-            inventory_donor,
-            donor,
-            required_start,
-            backfill_sent,
-        ) = {
+        let (operation, targets, cut, local_participant, inventory_donor, donor, required_start) = {
             let Some(active) = self.coordinated_drop.active.as_ref() else {
                 return;
             };
@@ -3969,10 +3951,9 @@ impl<T: Config> P2PSession<T> {
                 inventory_donor,
                 donor,
                 required_start,
-                active.backfill_sent,
             )
         };
-        if required_start.is_some() && donor.is_none() {
+        if let (Some(_), None) = (required_start, donor) {
             // Inventory completeness reports what peers retained when they
             // snapshotted, not what they can retain later. A participant can
             // still receive the last missing target inputs and announce before
@@ -3980,7 +3961,9 @@ impl<T: Config> P2PSession<T> {
             // timeout is the only terminal no-donor verdict. If the local
             // history already became complete through received chunks, fall
             // through to the Ready check.
-            if !self.coordinated_drop_local_history_complete(&targets, cut) {
+            if self.coordinated_drop_local_history_complete(&targets, cut) {
+                // A complete local history falls through to the Ready check.
+            } else {
                 return;
             }
         }
@@ -4013,14 +3996,11 @@ impl<T: Config> P2PSession<T> {
                         &targets,
                     );
                 }
-                if !backfill_sent || retry_due {
-                    if let Err(reason) = self.coordinated_drop_send_backfill(start, cut) {
-                        self.coordinated_drop_fail_closed(reason, true);
-                        return;
-                    }
-                    if let Some(active) = self.coordinated_drop.active.as_mut() {
-                        active.backfill_sent = true;
-                    }
+                // Retransmission is deliberately poll-driven: every poll
+                // sends the current chunks while the attempt stays active.
+                if let Err(reason) = self.coordinated_drop_send_backfill(start, cut) {
+                    self.coordinated_drop_fail_closed(reason, true);
+                    return;
                 }
             }
         }
@@ -17523,7 +17503,6 @@ mod tests {
             cut: Some(cut),
             cut_digest: Some(0),
             pending_commit: Some(commit),
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
@@ -17591,7 +17570,6 @@ mod tests {
             cut: Some(cut),
             cut_digest: Some(0),
             pending_commit: None,
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
@@ -17689,7 +17667,6 @@ mod tests {
             cut: Some(cut),
             cut_digest: None,
             pending_commit: None,
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
@@ -18122,6 +18099,197 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_donor_announcement_keeps_the_locked_grid() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
+            .expect("announcement accepted");
+        session
+            .coordinated_drop_accept_backfill(
+                1,
+                backfill_chunk(operation, Frame::new(3), &[3, 4, 5]),
+            )
+            .expect("chunk installs");
+        let locked = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .and_then(|active| active.expected_backfill_start);
+        assert_eq!(locked, Some(Frame::new(3)));
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
+            .expect("duplicate announcement accepted");
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.expected_backfill_start),
+            locked,
+            "a same-start duplicate must not reset the locked grid"
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(5))),
+            "the installed history stays installed"
+        );
+    }
+
+    #[test]
+    fn higher_handle_announcement_keeps_the_locked_grid() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
+            .expect("lowest donor accepted");
+        session
+            .coordinated_drop_accept_backfill(
+                1,
+                backfill_chunk(operation, Frame::new(3), &[3, 4, 5]),
+            )
+            .expect("lowest donor's chunk installs");
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 2, Frame::new(3)), Some(2))
+            .expect("second announcement accepted");
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.expected_backfill_start),
+            Some(Frame::new(3)),
+            "a higher-handle announcement does not change the deterministic choice"
+        );
+    }
+
+    #[test]
+    fn invalid_backfill_range_is_discarded() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(
+                1,
+                backfill_chunk_from(operation, 1, Frame::NULL, Frame::NULL, &[3, 4, 5]),
+            ),
+            Ok(()),
+            "an invalid range identifier is discarded, never failed closed"
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(2))),
+            "the invalid chunk must not install"
+        );
+    }
+
+    #[test]
+    fn backfill_with_a_wrong_chunk_count_fails_closed() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            let report = active.reports.get_mut(&1).expect("participant 1 report");
+            report.receipts[0].contiguous_through = Frame::new(5);
+        }
+        let mut chunk = backfill_chunk(operation, Frame::new(3), &[3, 4, 5]);
+        chunk.chunk_count = 2;
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(1, chunk),
+            Err(DropAbortReason::ConflictingHistory)
+        );
+    }
+
+    #[test]
+    fn backfill_with_a_wrong_frame_count_fails_closed() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            let report = active.reports.get_mut(&1).expect("participant 1 report");
+            report.receipts[0].contiguous_through = Frame::new(5);
+        }
+        let mut chunk = backfill_chunk(operation, Frame::new(3), &[3, 4, 5]);
+        chunk.frame_count = 2;
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(1, chunk),
+            Err(DropAbortReason::ConflictingHistory)
+        );
+    }
+
+    #[test]
+    fn backfill_with_a_different_locked_chunk_count_is_discarded() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
+            .expect("announcement accepted");
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            active.expected_backfill_chunks = Some(2);
+            active.expected_backfill_start = Some(Frame::new(3));
+        }
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(
+                1,
+                backfill_chunk(operation, Frame::new(3), &[3, 4, 5]),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(2))),
+            "a chunk with a different locked chunk count is not installed"
+        );
+    }
+
+    #[test]
+    fn backfill_with_a_different_locked_start_is_discarded() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
+            .expect("announcement accepted");
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            active.expected_backfill_chunks = Some(1);
+            active.expected_backfill_start = Some(Frame::new(2));
+        }
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(
+                1,
+                backfill_chunk(operation, Frame::new(3), &[3, 4, 5]),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(2))),
+            "a chunk with a different locked start is not installed"
+        );
+    }
+
+    #[test]
+    fn a_commit_for_a_known_operation_does_not_halt_an_active_attempt() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        let known = DropOperationId {
+            sequence: 0,
+            ..operation
+        };
+        session.coordinated_drop_close_operation(known);
+        assert_eq!(
+            session.coordinated_drop_accept_commit(DropCommit {
+                operation: known,
+                cut: Frame::new(5),
+                cut_digest: staged_donor_cut_digest(),
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Running,
+            "a stale commit for a known operation must not fail the active attempt closed"
+        );
+        assert!(session.coordinated_drop.active.is_some());
+    }
+
+    #[test]
     fn same_grid_chunks_from_a_second_donor_are_not_interleaved() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
@@ -18319,7 +18487,6 @@ mod tests {
             cut: Some(Frame::new(127)),
             cut_digest: None,
             pending_commit: None,
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
@@ -18463,7 +18630,6 @@ mod tests {
             cut: Some(Frame::new(127)),
             cut_digest: None,
             pending_commit: None,
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
@@ -19182,7 +19348,6 @@ mod tests {
             cut: None,
             cut_digest: None,
             pending_commit: None,
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
@@ -19427,7 +19592,6 @@ mod tests {
                 cut: None,
                 cut_digest: None,
                 pending_commit: None,
-                backfill_sent: false,
                 backfill_chunks: BTreeMap::new(),
                 relayed_backfill: BTreeMap::new(),
                 next_backfill_chunk: 0,
@@ -19613,7 +19777,6 @@ mod tests {
             cut: Some(cut),
             cut_digest: Some(0),
             pending_commit: Some(commit),
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
@@ -19749,7 +19912,6 @@ mod tests {
             cut: Some(cut),
             cut_digest: Some(cut_digest),
             pending_commit: None,
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
@@ -21257,7 +21419,6 @@ mod tests {
             cut: Some(Frame::new(0)),
             cut_digest: Some(0),
             pending_commit: None,
-            backfill_sent: false,
             backfill_chunks: BTreeMap::new(),
             relayed_backfill: BTreeMap::new(),
             next_backfill_chunk: 0,
