@@ -1661,32 +1661,47 @@ impl<T: Config> P2PSession<T> {
         if source != report.participant {
             return false;
         }
-        let handle = PlayerHandle::new(usize::from(report.participant));
-        let Some(pending) = self.coordinated_drop.retiring.get(&handle) else {
+        // A multi-handle endpoint acknowledges with its SMALLEST local handle,
+        // which need not be the removed handle the fence is keyed by. Attribute
+        // the ack by the sender's endpoint address instead: every fence at that
+        // address with the acknowledged commit belongs to the same departing
+        // process, so one ack clears them all.
+        let Some(PlayerType::Remote(source_addr)) = self
+            .player_reg
+            .handles
+            .get(&PlayerHandle::new(usize::from(source)))
+        else {
             return false;
         };
-        if pending.commit.operation != report.operation
-            || pending.commit.cut != report.cut
-            || pending.commit.cut_digest != report.cut_digest
-        {
-            // The entry exists but the ack does not describe its commit: an
-            // advisory mismatch is consumed without changing retry state.
-            return true;
+        let source_addr = source_addr.clone();
+        let matches = |entry: &PendingTargetCommit<T::Address>| {
+            entry.addr == source_addr
+                && entry.commit.operation == report.operation
+                && entry.commit.cut == report.cut
+                && entry.commit.cut_digest == report.cut_digest
+        };
+        if !self.coordinated_drop.retiring.values().any(matches) {
+            #[cfg(test)]
+            eprintln!(
+                "DBG ack no fence: source={source} addr={source_addr:?} pending={:?}",
+                self.coordinated_drop
+                    .retiring
+                    .iter()
+                    .map(|(h, e)| (
+                        *h,
+                        e.addr.clone(),
+                        e.commit.operation,
+                        e.commit.cut,
+                        e.commit.cut_digest
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            // No fence for this endpoint and commit exists: a stale or
+            // misattributed ack is consumed without changing retry state.
+            return false;
         }
-        // One endpoint can own several target handles, and it acknowledges with
-        // its smallest local handle. Every pending fence for that endpoint and
-        // operation is delivered by the same process, so one ack clears them
-        // all instead of retransmitting to the other handles until the deadline.
-        let addr = pending.addr.clone();
-        let operation = pending.commit.operation;
-        let cut = pending.commit.cut;
-        let cut_digest = pending.commit.cut_digest;
         for entry in self.coordinated_drop.retiring.values_mut() {
-            if entry.addr == addr
-                && entry.commit.operation == operation
-                && entry.commit.cut == cut
-                && entry.commit.cut_digest == cut_digest
-            {
+            if matches(entry) {
                 entry.acked = true;
             }
         }
@@ -19070,7 +19085,7 @@ mod tests {
             PlayerHandle::new(1),
             PendingTargetCommit {
                 commit,
-                addr: test_addr(9410),
+                addr: test_addr(9401),
                 conn_id: 0,
                 deadline: now + web_time::Duration::from_secs(1),
                 acked: false,
@@ -19327,7 +19342,7 @@ mod tests {
             cut_digest: 7,
         };
         let now = session.coordinated_drop_now();
-        let addr = test_addr(9410);
+        let addr = test_addr(9401);
         for handle in [1_usize, 2] {
             session.coordinated_drop.retiring.insert(
                 PlayerHandle::new(handle),
@@ -19389,6 +19404,64 @@ mod tests {
                 .expect("fence retained")
                 .acked,
             "an entry for a different commit at the same address stays pending"
+        );
+    }
+
+    #[test]
+    fn target_ack_matches_a_multi_handle_endpoint_by_address() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 2,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let commit = DropCommit {
+            operation,
+            cut: Frame::new(10),
+            cut_digest: 7,
+        };
+        let now = session.coordinated_drop_now();
+        // Only handle 2 is removed, but the endpoint at 9401 also owns handle
+        // 1, which is how it identifies its acknowledgement.
+        session.coordinated_drop.retiring.insert(
+            PlayerHandle::new(2),
+            PendingTargetCommit {
+                commit,
+                addr: test_addr(9401),
+                conn_id: 0,
+                deadline: now + web_time::Duration::from_secs(1),
+                acked: false,
+            },
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_report_from(
+                DropReport {
+                    operation,
+                    participant: 1,
+                    stage: DropReportStage::TargetAck,
+                    exposed_confirmed: Frame::NULL,
+                    cut: commit.cut,
+                    cut_digest: commit.cut_digest,
+                    receipts: Vec::new(),
+                },
+                Some(1),
+            ),
+            Ok(())
+        );
+        assert!(
+            session
+                .coordinated_drop
+                .retiring
+                .get(&PlayerHandle::new(2))
+                .expect("fence retained")
+                .acked,
+            "an ack from the removed endpoint's smallest handle must clear the \
+             fence keyed by the removed handle"
         );
     }
 
