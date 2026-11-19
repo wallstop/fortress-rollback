@@ -509,6 +509,7 @@ def test_wasm_job_runs_browser_session_transport_in_browser() -> None:
     assert _option_values(command, "--package") + _option_values(command, "-p") == [
         "wasm-browser-smoke"
     ]
+    assert _option_values(command, "--features") == ["hot-join"]
     assert _option_values(command, "--target") == [MATRIX_TARGET_EXPRESSION]
     assert command.count("--lib") == 1
     test_args = command[command.index("--") + 1 :]
