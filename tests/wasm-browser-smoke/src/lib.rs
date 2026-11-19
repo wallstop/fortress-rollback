@@ -22,6 +22,7 @@ mod tests {
     const MAX_QUEUED_RAW_PACKETS: usize = 64;
     const SYNC_POLL_BUDGET: usize = 256;
     const INPUT_POLL_BUDGET: usize = 64;
+    const REMOVAL_POLL_BUDGET: usize = 512;
     const FRAME_COUNT: u32 = 2;
     const MALFORMED_PACKET_COUNT: usize = MAX_RAW_PACKETS_PER_POLL + 1;
 
@@ -401,7 +402,7 @@ mod tests {
 
         let mut dropped = false;
         let mut removed_stopped = false;
-        for _ in 0..512 {
+        for _ in 0..REMOVAL_POLL_BUDGET {
             poll_pair_with_clock(&mut survivor, &mut removed, &offset_ms);
             for event in survivor.events() {
                 if let FortressEvent::PeerDropped { handle, .. } = event {

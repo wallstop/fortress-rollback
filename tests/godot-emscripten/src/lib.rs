@@ -20,6 +20,7 @@ const FIRST_ADDRESS: u8 = 1;
 const SECOND_ADDRESS: u8 = 2;
 const MAX_QUEUED_MESSAGES: usize = 256;
 const MAX_SYNC_POLLS: usize = 100;
+const MAX_REMOVAL_POLLS: usize = 512;
 const REAL_CLOCK_DEADLINE: Duration = Duration::from_millis(100);
 const VIRTUAL_POLL_INTERVAL_MS: u64 = 50;
 const VIRTUAL_MEASUREMENT_POLLS: usize = 40;
@@ -317,7 +318,7 @@ fn run_removal_probe() -> Result<(), String> {
 
     let mut dropped = false;
     let mut removed_stopped = false;
-    for _ in 0..512 {
+    for _ in 0..MAX_REMOVAL_POLLS {
         pair.first.poll_remote_clients();
         pair.second.poll_remote_clients();
         offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
