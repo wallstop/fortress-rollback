@@ -415,7 +415,7 @@ mod tests {
                 }
             }
             let _ = removed.events().count();
-            removed_stopped = removed.current_state() != SessionState::Running;
+            removed_stopped = removed.current_state() == SessionState::Synchronizing;
             if dropped && removed_stopped {
                 break;
             }
@@ -426,7 +426,7 @@ mod tests {
         );
         assert!(
             removed_stopped,
-            "the removed target must apply its committed certificate and stop"
+            "the removed target must fail closed to Synchronizing after applying its committed certificate"
         );
         assert_eq!(
             survivor.current_state(),

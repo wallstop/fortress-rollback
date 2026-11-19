@@ -335,7 +335,7 @@ fn run_removal_probe() -> Result<(), String> {
             }
         }
         let _ = pair.second.events().count();
-        removed_stopped = pair.second.current_state() != SessionState::Running;
+        removed_stopped = pair.second.current_state() == SessionState::Synchronizing;
         if dropped && removed_stopped {
             break;
         }
@@ -349,7 +349,9 @@ fn run_removal_probe() -> Result<(), String> {
     }
     if !removed_stopped {
         return Err(
-            "the removed Emscripten target did not apply its committed certificate".to_owned(),
+            "the removed Emscripten target did not fail closed to Synchronizing after applying \
+             its committed certificate"
+                .to_owned(),
         );
     }
     if pair.first.current_state() != SessionState::Running {
