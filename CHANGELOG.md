@@ -65,13 +65,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Pre-existing:** periodic hot-join cycles no longer wedge after many rejoins. A committed drop
   for a slot now supersedes an in-flight but not-yet-reopened reactivation for that slot (its
-  shield previously kept the slot connected forever and blocked every later directive), and the
-  survivor-side freeze-convergence gate ignores the joining endpoint's own connected claim for the
-  slot it is reactivating, and ignores a stale connected claim whose frame is above the survivor's
-  own freeze (a peer that is ahead cannot undercut the local freeze, and its own directive gate
-  still requires it to be locally frozen before reopening). The directive is accepted, the slot
-  reactivates, and rejoin cycles keep completing. Pinned by
-  `drop_commit_closes_a_not_yet_reopened_reactivation`,
+  shield previously kept the slot connected forever and blocked every later directive), including
+  when the target timed out during the removal: the certificate is applied at the target's exact
+  disconnected generation, clears the pending reactivation without re-freezing its queue, and
+  installs the membership fence. The survivor-side freeze-convergence gate ignores the joining
+  endpoint's own connected claim for the slot it is reactivating, and ignores a stale connected
+  claim whose frame is above the survivor's own freeze (a peer that is ahead cannot undercut the
+  local freeze, and its own directive gate still requires it to be locally frozen before
+  reopening). The directive is accepted, the slot reactivates, and rejoin cycles keep completing.
+  Pinned by `drop_commit_closes_a_not_yet_reopened_reactivation`,
+  `disconnected_target_commit_closes_reactivation_and_installs_the_fence`,
   `npeer_survivor_ignores_the_joiners_own_connected_claim_for_convergence`,
   `npeer_survivor_ignores_a_stale_connected_claim_above_its_freeze`, and the 4,000,000-frame
   nightly soak.
@@ -200,6 +203,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   certificate needs; after that commit, the queued retry for peer 3 runs against the remaining
   membership. A conflict after an attempt has left inventory (for example, a required participant
   removed by an earlier commit) still fails closed rather than forking.
+- **Pre-existing:** a participant that missed the coordinated-drop commit burst can now recover
+  after every other survivor closed the operation. Applied certificates are retained in a bounded
+  per-player journal, and a repeated `Ready` report naming the matching cut and digest is answered
+  with the certificate instead of being ignored, so quorum completion no longer strands the last
+  witness until its timeout. Pinned by
+  `closed_commit_answers_a_ready_retry_with_the_certificate`.
 - **Pre-existing:** a coordinated graceful-drop retry no longer has its `Prepare` swallowed by the
   terminal-operation history. The retry advances the coordinator-local sequence past the closed
   attempt, so it opens a fresh identity instead of re-deriving the target's generation-local one;

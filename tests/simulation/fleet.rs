@@ -690,15 +690,18 @@ fn swarm_materialized_schedule_replays_bit_identically_under_full_oracle() {
 /// (#460); each row must keep one survivor history and recover after the heal.
 ///
 /// `donor_announcements` counts accepted current-history announcements, not
-/// completed backfills. Installation through the announced path is pinned by
-/// the unit-level reordered-grid tests in `p2p_session.rs`, and
-/// `announced_backfill_chunks` reports any row that installs such a chunk
-/// end-to-end.
+/// completed backfills. Seed 43 installs both an announced chunk and an
+/// inventory-donor chunk end to end, so the assertion below pins that the
+/// announced grid actually attributes and commits rather than merely being
+/// accepted.
 #[test]
 fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
     let mut announcement_rows = 0_usize;
+    let mut announced_install_rows = 0_usize;
+    let mut inventory_install_rows = 0_usize;
     let mut backfill_rows = 0_usize;
     for (seed, n_players, noise) in [
+        (43_u64, 3_usize, BackgroundNoise::Mild),
         (133_u64, 2_usize, BackgroundNoise::Rough),
         (203, 2, BackgroundNoise::Swarm),
         (273, 2, BackgroundNoise::Mild),
@@ -717,6 +720,21 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
         if report.donor_announcements.iter().any(|count| *count > 0) {
             announcement_rows += 1;
         }
+        if report
+            .announced_backfill_chunks
+            .iter()
+            .any(|count| *count > 0)
+        {
+            announced_install_rows += 1;
+        }
+        if report
+            .backfill_chunks
+            .iter()
+            .zip(&report.announced_backfill_chunks)
+            .any(|(total, announced)| total > announced)
+        {
+            inventory_install_rows += 1;
+        }
         if report.backfill_chunks.iter().any(|count| *count > 0) {
             backfill_rows += 1;
         }
@@ -729,11 +747,48 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
             "seed {seed}: installed announced chunks require an accepted announcement"
         );
         report.expect_pass(&schedule);
+        if seed == 43 {
+            assert!(
+                report
+                    .announced_backfill_chunks
+                    .iter()
+                    .any(|count| *count > 0),
+                "the pinned announced-donor row must install an announced chunk"
+            );
+            assert!(
+                report
+                    .backfill_chunks
+                    .iter()
+                    .zip(&report.announced_backfill_chunks)
+                    .any(|(total, announced)| total > announced),
+                "the pinned announced-donor row must also install an inventory chunk"
+            );
+            let encoded = serde_json::to_vec(&schedule).expect("lossy schedule serializes");
+            let replay: Schedule =
+                serde_json::from_slice(&encoded).expect("lossy schedule deserializes");
+            let replayed = run(&replay, &RunOptions::default());
+            replayed.expect_pass(&replay);
+            assert_eq!(report.trace_hash, replayed.trace_hash);
+            assert_eq!(
+                report.announced_backfill_chunks,
+                replayed.announced_backfill_chunks
+            );
+        }
     }
     assert!(
         announcement_rows > 0,
         "at least one lossy graceful-removal row must exercise a current-history \
          donor announcement, not only start-of-attempt inventory donors"
+    );
+    assert!(
+        announced_install_rows > 0,
+        "at least one lossy graceful-removal row must install a chunk attributed to \
+         the announced donor grid, not only accept the announcement"
+    );
+    assert!(
+        inventory_install_rows > 0,
+        "at least one lossy graceful-removal row must install a chunk through the \
+         inventory-donor path, not only through an announcement"
     );
     assert!(
         backfill_rows > 0,
@@ -5531,13 +5586,12 @@ fn nightly_rare_state_coverage_cell_is_present_and_exercises_ring_and_prediction
 }
 
 /// Permanent regression for the PCT-exposed freeze-frame oracle false
-/// positive. A one-change PCT interleaving at step 302 moves the removed target
-/// (peer 4) to the front; peer 0 advances ahead while peers 1-3 stop within one
-/// frame of each other under the strict-majority certificate. The oracle used
-/// to read a lagging survivor's unobserved `None` as a disagreement. It must ignore a survivor
-/// whose confirmed prefix ends before the earliest observed freeze, while still
-/// failing a survivor that reached that freeze and never observed a stable
-/// `Disconnected` run.
+/// positive. A one-change PCT interleaving with seed 9 leaves two survivors a
+/// frame behind the third while peer 0 advances ahead under the strict-majority
+/// certificate. The oracle used to read a lagging survivor's unobserved `None`
+/// as a disagreement. It must ignore a survivor whose confirmed prefix ends
+/// before the earliest observed freeze, while still failing a survivor that
+/// reached that freeze and never observed a stable `Disconnected` run.
 #[test]
 fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     let mut schedule: Schedule = serde_json::from_str(include_str!(
@@ -5552,7 +5606,7 @@ fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     validate_schedule(&schedule).expect("checked-in D14 schedule must be valid");
     let options = RunOptions {
         pct: Some(PctOptions {
-            seed: 0xD14,
+            seed: 9,
             priority_changes: 1,
         }),
         ..RunOptions::default()
@@ -5560,7 +5614,7 @@ fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     let report = run(&schedule, &options);
     assert_eq!(
         report.final_confirmed,
-        vec![356, 350, 350, 351, 290],
+        vec![382, 376, 376, 377, 316],
         "the regression depends on the lagging-survivor interleaving"
     );
     assert!(
