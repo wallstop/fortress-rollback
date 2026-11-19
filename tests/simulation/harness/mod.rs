@@ -1282,6 +1282,10 @@ pub struct RunReport {
     /// Accepted current-history donor announcements per peer. This counts
     /// announcement acceptance, not completed backfills.
     pub donor_announcements: Vec<u64>,
+    /// Backfill chunks installed from an announced current-history donor's
+    /// grid, per peer. A nonzero value proves the announced path supplied
+    /// history that was actually installed.
+    pub announced_backfill_chunks: Vec<u64>,
     /// Bounded samples for skew/control-loop analysis: ordinary runs retain at
     /// most 12, schema-v17 wait-policy runs at most 100 fixed cuts, and dense
     /// H-SKEW runs use the player-scaled phase capacity. Empty for legacy
@@ -5451,6 +5455,13 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         .iter()
         .map(|slot| slot.session.diagnostic_donor_announcements_accepted())
         .collect();
+    let announced_backfill_chunks: Vec<u64> = peers
+        .iter()
+        .map(|slot| {
+            slot.session
+                .diagnostic_announced_backfill_chunks_installed()
+        })
+        .collect();
 
     // Final observations.
     let mut violation_census: BTreeMap<ViolationSignature, u64> = BTreeMap::new();
@@ -5903,6 +5914,7 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
         max_confirmation_stall_steps_by_peer,
         metrics,
         donor_announcements,
+        announced_backfill_chunks,
         progress_samples,
         frame_opportunities,
         wait_frames_obeyed,

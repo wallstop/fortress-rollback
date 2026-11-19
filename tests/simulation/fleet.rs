@@ -688,9 +688,15 @@ fn swarm_materialized_schedule_replays_bit_identically_under_full_oracle() {
 /// target's private post-cut tail. These are the exact seeds/events that
 /// reproduced the N=3 certificate wedge and the N=2 target-tail divergence
 /// (#460); each row must keep one survivor history and recover after the heal.
+///
+/// `donor_announcements` counts accepted current-history announcements, not
+/// completed backfills. Installation through the announced path is pinned by
+/// the unit-level reordered-grid tests in `p2p_session.rs`, and
+/// `announced_backfill_chunks` reports any row that installs such a chunk
+/// end-to-end.
 #[test]
 fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
-    let mut donor_rows = 0_usize;
+    let mut announcement_rows = 0_usize;
     for (seed, n_players, noise) in [
         (133_u64, 2_usize, BackgroundNoise::Rough),
         (203, 2, BackgroundNoise::Swarm),
@@ -708,12 +714,20 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
         let schedule = generate(seed, config);
         let report = run(&schedule, &RunOptions::default());
         if report.donor_announcements.iter().any(|count| *count > 0) {
-            donor_rows += 1;
+            announcement_rows += 1;
         }
+        assert!(
+            !report
+                .announced_backfill_chunks
+                .iter()
+                .any(|count| *count > 0)
+                || report.donor_announcements.iter().any(|count| *count > 0),
+            "seed {seed}: installed announced chunks require an accepted announcement"
+        );
         report.expect_pass(&schedule);
     }
     assert!(
-        donor_rows > 0,
+        announcement_rows > 0,
         "at least one lossy graceful-removal row must exercise a current-history \
          donor announcement, not only start-of-attempt inventory donors"
     );

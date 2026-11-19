@@ -538,6 +538,9 @@ where
     /// (participants that became able to donate after their inventory report).
     /// Doc-hidden diagnostic only; saturating.
     coordinated_drop_donor_announcements: u64,
+    /// Cumulative count of backfill chunks installed from a current-history
+    /// donor's announced grid. Doc-hidden diagnostic only; saturating.
+    coordinated_drop_announced_backfill_chunks: u64,
 
     /// Cumulative, always-on session metrics (see [`P2PSession::metrics`]).
     metrics: SessionMetrics,
@@ -2477,18 +2480,19 @@ impl<T: Config> P2PSession<T> {
         report: DropReport,
         source: Option<u16>,
     ) -> Result<(), DropAbortReason> {
-        if self.coordinated_drop_reject_retransmission(report.operation) {
-            return Ok(());
-        }
-        if self.coordinated_drop_accept_target_ack(&report, source) {
-            return Ok(());
-        }
-        // EVERY target acknowledgement is advisory. An omitted peer that
-        // synchronized after the attempt opened receives the commit, fails
-        // closed, and acknowledges; it is neither a participant nor a target of
-        // this operation, so it must never reach participant validation or
-        // change survivor state.
+        // EVERY target acknowledgement is advisory and consumed before any
+        // operation journal. An ack for a committed removal must always clear
+        // its retry fence, even when the operation also lingers in the
+        // rejected-operation journal; an omitted peer that synchronized after
+        // the attempt opened receives the commit, fails closed, and
+        // acknowledges, so it is neither a participant nor a target of this
+        // operation and must never reach participant validation or change
+        // survivor state.
         if report.stage == DropReportStage::TargetAck {
+            let _ = self.coordinated_drop_accept_target_ack(&report, source);
+            return Ok(());
+        }
+        if self.coordinated_drop_reject_retransmission(report.operation) {
             return Ok(());
         }
         let relay_message = report.clone();
@@ -3051,7 +3055,13 @@ impl<T: Config> P2PSession<T> {
         let announced_donor = active
             .donor_announcements
             .iter()
-            .filter(|(_, announcement)| announcement.start_frame <= start)
+            .filter(|(participant, announcement)| {
+                announcement.start_frame <= start
+                    && !Self::coordinated_drop_participant_unresponsive(
+                        &self.player_reg,
+                        **participant,
+                    )
+            })
             .map(|(&participant, announcement)| (participant, *announcement))
             .min_by_key(|(participant, _)| *participant);
         let announced = announced_donor.is_some_and(|(handle, announcement)| {
@@ -3093,13 +3103,19 @@ impl<T: Config> P2PSession<T> {
         }
         // One donor owns the locked grid: mixing chunks from two donors that
         // share a layout could splice different earlier inputs into one range.
-        if let Some(locked) = active.backfill_donor {
-            if locked != backfill.donor {
-                return Ok(());
-            }
-        } else {
-            active.backfill_donor = Some(backfill.donor);
+        // `backfill.donor` has already been matched to the current selection
+        // (inventory or announced), so a different lock means the selection
+        // changed (a delayed inventory report, a lower-handle announcement, or
+        // an unresponsive donor being replaced). Drop the abandoned donor's
+        // uninstalled grid so the new donor's canonical layout can be accepted;
+        // installed values remain subject to the normal overlap validation.
+        if active
+            .backfill_donor
+            .is_some_and(|locked| locked != backfill.donor)
+        {
+            Self::reset_coordinated_drop_backfill_grid(active);
         }
+        active.backfill_donor = Some(backfill.donor);
         if backfill.chunk_count == 0
             || backfill.frame_count == 0
             || backfill.chunk_index >= backfill.chunk_count
@@ -3170,14 +3186,18 @@ impl<T: Config> P2PSession<T> {
         }
 
         loop {
-            let (chunk, targets) = {
+            let (chunk, targets, announced_grid) = {
                 let Some(active) = self.coordinated_drop.active.as_mut() else {
                     return Ok(());
                 };
                 let Some(chunk) = active.backfill_chunks.remove(&active.next_backfill_chunk) else {
                     break;
                 };
-                (chunk, active.targets.clone())
+                (
+                    chunk,
+                    active.targets.clone(),
+                    active.backfill_grid_source == Some(BackfillGridSource::Announced),
+                )
             };
             let input_width = crate::network::codec::encoded_len(&T::Input::default())
                 .map_err(|_error| DropAbortReason::ResourceLimit)?;
@@ -3239,6 +3259,11 @@ impl<T: Config> P2PSession<T> {
                         } => DropAbortReason::ConflictingHistory,
                         _ => DropAbortReason::MissingHistory,
                     })?;
+            }
+            if announced_grid {
+                self.coordinated_drop_announced_backfill_chunks = self
+                    .coordinated_drop_announced_backfill_chunks
+                    .saturating_add(1);
             }
             let Some(active) = self.coordinated_drop.active.as_mut() else {
                 return Ok(());
@@ -4328,6 +4353,7 @@ impl<T: Config> P2PSession<T> {
             sometimes_state_seen: AtomicU8::new(0),
             coordinated_drop: CoordinatedDropState::default(),
             coordinated_drop_donor_announcements: 0,
+            coordinated_drop_announced_backfill_chunks: 0,
             metrics: SessionMetrics::new(),
             event_discard_warned: false,
             unknown_source_warned: false,
@@ -9922,6 +9948,18 @@ impl<T: Config> P2PSession<T> {
     #[must_use]
     pub fn diagnostic_donor_announcements_accepted(&self) -> u64 {
         self.coordinated_drop_donor_announcements
+    }
+
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): cumulative count of backfill chunks installed from a
+    /// current-history donor's announced grid.
+    ///
+    /// A nonzero value proves the announced donor's chunks were used by an
+    /// installation, not merely that an announcement was accepted.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_announced_backfill_chunks_installed(&self) -> u64 {
+        self.coordinated_drop_announced_backfill_chunks
     }
 
     /// Doc-hidden diagnostic compatibility surface: returns the monotonic v1
@@ -17766,6 +17804,11 @@ mod tests {
             Some((Frame::new(0), Frame::new(5))),
             "the announced suffix must join the retained prefix"
         );
+        assert_eq!(
+            session.diagnostic_announced_backfill_chunks_installed(),
+            1,
+            "the installed chunk must be attributed to the announced donor path"
+        );
 
         session.drive_coordinated_drop();
         let phase = session.coordinated_drop.active.as_ref().map(|a| a.phase);
@@ -18551,6 +18594,183 @@ mod tests {
     }
 
     #[test]
+    fn announced_donor_grid_resets_when_the_selected_donor_changes() {
+        let mut session = sixteen_player_backfill_session();
+        let targets: Vec<DropTarget> = (1_u16..16)
+            .map(|handle| DropTarget {
+                handle,
+                generation: 0,
+            })
+            .collect();
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        for target in &targets {
+            let handle = PlayerHandle::new(usize::from(target.handle));
+            session
+                .sync_layer
+                .install_missing_backfill(handle, &[PlayerInput::new(Frame::new(0), 0_u8)])
+                .expect("frame zero");
+        }
+        let now = session.coordinated_drop_now();
+        let receipts: Vec<DropReceipt> = targets
+            .iter()
+            .map(|target| DropReceipt {
+                target: target.handle,
+                available_from: Frame::new(0),
+                contiguous_through: Frame::new(0),
+            })
+            .collect();
+        let reports = [0_u16, 1, 2]
+            .into_iter()
+            .map(|participant| {
+                (
+                    participant,
+                    DropReport {
+                        operation,
+                        participant,
+                        stage: DropReportStage::Inventory,
+                        exposed_confirmed: Frame::new(0),
+                        cut: Frame::NULL,
+                        cut_digest: 0,
+                        receipts: receipts.clone(),
+                    },
+                )
+            })
+            .collect();
+        session.coordinated_drop.active = Some(CoordinatedDropAttempt {
+            operation,
+            target_addr: test_addr(9501),
+            targets: targets.clone(),
+            participants: vec![0, 1, 2],
+            quorum: 2,
+            local_participant: 0,
+            held_at: Frame::new(127),
+            phase: CoordinatedDropPhase::Backfill,
+            reports,
+            ready: std::collections::BTreeSet::new(),
+            ready_transcripts: BTreeMap::new(),
+            committed_acks: std::collections::BTreeSet::new(),
+            cut: Some(Frame::new(127)),
+            cut_digest: None,
+            pending_commit: None,
+            backfill_chunks: BTreeMap::new(),
+            relayed_backfill: BTreeMap::new(),
+            next_backfill_chunk: 0,
+            expected_backfill_chunks: None,
+            expected_backfill_start: None,
+            backfill_grid_source: None,
+            backfill_donor: None,
+            donor_announcements: BTreeMap::new(),
+            started_at: now,
+            last_broadcast_at: now,
+        });
+        for donor in [1_u16, 2] {
+            session
+                .coordinated_drop_accept_report_from(
+                    donor_report(operation, donor, Frame::new(1)),
+                    Some(donor),
+                )
+                .expect("donor announcement accepted");
+        }
+        let targets_len = targets.len();
+        let plan = P2PSession::<TestConfig>::coordinated_drop_backfill_plan(
+            targets_len,
+            Frame::new(1),
+            Frame::new(127),
+        )
+        .expect("plan");
+        assert_eq!(plan.chunk_count, 2, "the fixture needs two chunks");
+        let trailing_frames = 127 - plan.frames_per_chunk;
+        let chunk_bytes = |frames: usize| {
+            let mut bytes = Vec::new();
+            for _ in 0..frames * targets_len {
+                bytes.extend(crate::network::codec::encode(&9_u8).expect("input encodes"));
+            }
+            bytes
+        };
+        // The later chunk of the lowest announced donor's grid is buffered but
+        // never installed, because chunk 0 has not arrived.
+        session
+            .coordinated_drop_accept_backfill(
+                1,
+                DropBackfill {
+                    operation,
+                    donor: 1,
+                    range_start: Frame::new(1),
+                    chunk_index: 1,
+                    chunk_count: 2,
+                    start_frame: Frame::new(
+                        i32::try_from(1 + plan.frames_per_chunk).expect("frame fits"),
+                    ),
+                    frame_count: u16::try_from(trailing_frames).expect("frames fit"),
+                    bytes: chunk_bytes(trailing_frames),
+                },
+            )
+            .expect("the selected donor's later chunk is buffered");
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.backfill_donor),
+            Some(1),
+            "the buffered grid is locked to the first donor"
+        );
+        // The lowest announced donor stops responding, so the next announced
+        // handle takes over and must not be rejected by the stale grid lock.
+        session
+            .player_reg
+            .remotes
+            .get_mut(&test_addr(9501))
+            .expect("peer 1 endpoint")
+            .disconnect_remote();
+        session
+            .coordinated_drop_accept_backfill(
+                2,
+                DropBackfill {
+                    operation,
+                    donor: 2,
+                    range_start: Frame::new(1),
+                    chunk_index: 1,
+                    chunk_count: 2,
+                    start_frame: Frame::new(
+                        i32::try_from(1 + plan.frames_per_chunk).expect("frame fits"),
+                    ),
+                    frame_count: u16::try_from(trailing_frames).expect("frames fit"),
+                    bytes: chunk_bytes(trailing_frames),
+                },
+            )
+            .expect("the live donor's grid replaces the abandoned lock");
+        session
+            .coordinated_drop_accept_backfill(
+                2,
+                DropBackfill {
+                    operation,
+                    donor: 2,
+                    range_start: Frame::new(1),
+                    chunk_index: 0,
+                    chunk_count: 2,
+                    start_frame: Frame::new(1),
+                    frame_count: u16::try_from(plan.frames_per_chunk).expect("frames fit"),
+                    bytes: chunk_bytes(plan.frames_per_chunk),
+                },
+            )
+            .expect("the live donor's first chunk installs the reset grid");
+        for target in &targets {
+            let handle = PlayerHandle::new(usize::from(target.handle));
+            assert_eq!(
+                session.diagnostic_player_retained_input_range(handle),
+                Some((Frame::new(0), Frame::new(127))),
+                "the takeover donor's complete range must be installed"
+            );
+        }
+    }
+
+    #[test]
     fn inventory_donor_multi_chunk_reordered_installs() {
         let mut session = sixteen_player_backfill_session();
         let targets: Vec<DropTarget> = (1_u16..15)
@@ -18804,6 +19024,98 @@ mod tests {
             "the local current-history donor must replace an unresponsive inventory donor"
         );
         assert!(session.coordinated_drop.active.is_some());
+    }
+
+    #[test]
+    fn announced_donor_takeover_when_the_lowest_donor_disconnects() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        // Two participants announce the same current-history range, so the
+        // lowest handle is the deterministic choice.
+        for donor in [1_u16, 4] {
+            session
+                .coordinated_drop_accept_report_from(
+                    donor_report(operation, donor, Frame::new(3)),
+                    Some(donor),
+                )
+                .expect("donor announcement accepted");
+        }
+        session
+            .player_reg
+            .remotes
+            .get_mut(&test_addr(9401))
+            .expect("peer 1 endpoint")
+            .disconnect_remote();
+        session
+            .coordinated_drop_accept_backfill(
+                4,
+                backfill_chunk_from(operation, 4, Frame::new(3), Frame::new(3), &[3_u8, 4, 5]),
+            )
+            .expect("the live announced donor takes over");
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(5))),
+            "the live donor's chunks must install after the selected donor disconnects"
+        );
+    }
+
+    #[test]
+    fn target_ack_clears_the_fence_of_a_rejected_operation() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 1,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let commit = DropCommit {
+            operation,
+            cut: Frame::new(10),
+            cut_digest: 7,
+        };
+        let now = session.coordinated_drop_now();
+        session.coordinated_drop.retiring.insert(
+            PlayerHandle::new(1),
+            PendingTargetCommit {
+                commit,
+                addr: test_addr(9401),
+                conn_id: 0,
+                deadline: now + web_time::Duration::from_secs(1),
+                acked: false,
+            },
+        );
+        // A loser can linger in the supersede journal while a committed
+        // certificate for the same operation is delivered elsewhere.
+        session.coordinated_drop_note_rejected(operation, &targets);
+        assert_eq!(
+            session.coordinated_drop_accept_report_from(
+                DropReport {
+                    operation,
+                    participant: 1,
+                    stage: DropReportStage::TargetAck,
+                    exposed_confirmed: Frame::NULL,
+                    cut: commit.cut,
+                    cut_digest: commit.cut_digest,
+                    receipts: Vec::new(),
+                },
+                Some(1),
+            ),
+            Ok(())
+        );
+        assert!(
+            session
+                .coordinated_drop
+                .retiring
+                .get(&PlayerHandle::new(1))
+                .expect("fence retained")
+                .acked,
+            "a target acknowledgement must clear its fence even when the operation \
+             also lingers in the rejected-operation journal"
+        );
     }
 
     #[test]
