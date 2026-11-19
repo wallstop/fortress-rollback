@@ -3458,10 +3458,11 @@ fn p2p_n4_stale_echo_freeze_dropped_slot_converges_across_survivors() -> Result<
 // byte-equal and neither may advance past the warmup prefix. An EMPTY divergence
 // list is the GREEN signal (a NON-EMPTY one is a REGRESSION). The decisive
 // SIGNATURE of this corner (vs a plain input split) is that D's confirmed
-// *inputs* also CONVERGE across A and C (both frozen at F) — so the library's own
-// input-checksum desync detector (BLIND to the pre-fix state divergence) would
-// agree while the held states disagree. Pre-fix, the same choreography advances
-// A past the safe prefix and diverges.
+// *inputs* also CONVERGE across A and C (both frozen at F) — so no input
+// comparison can reveal the pre-fix state divergence; only an
+// application-supplied state checksum covering the affected frames would, and
+// those frames may already be outside the retained history. Pre-fix, the same
+// choreography advances A past the safe prefix and diverges.
 
 /// A graceful drop whose declared survivors are split into disconnected
 /// components cannot form an all-participant certificate. The frontier must
@@ -3711,7 +3712,7 @@ fn p2p_n4_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
     // frames (`F + 1` .. the early window) are by now FULLY DISCARDED from the
     // input ring — `confirmed_inputs_for_frame` returns `Err`/`None` for them —
     // which STRENGTHENS the detector-blind claim: the divergence lives in discarded
-    // history the input-checksum detector cannot inspect. So we filter to the frames
+    // history any input comparison can inspect. So we filter to the frames
     // that ARE queryable (both peers return `Ok`) and assert NON-VACUOUSLY that D's
     // converged input matches across A and C on at least one genuine frame (a plain
     // `None == None` on a discarded frame must not count as a match).
@@ -3764,6 +3765,19 @@ fn p2p_n4_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
         confirmed_bound <= warmup_frames as i32,
         "the uncertified frontier advanced past the safe prefix: bound={confirmed_bound}, \
          advance_error={a_stall_error:?}"
+    );
+    // Bound each survivor separately: the shared `min` above passes if one peer
+    // holds while the other advances past the warmup prefix.
+    assert!(
+        sess_a.confirmed_frame().as_i32() <= warmup_frames as i32,
+        "A advanced its uncertified frontier past the safe prefix: {} vs {warmup_frames}, \
+         advance_error={a_stall_error:?}",
+        sess_a.confirmed_frame()
+    );
+    assert!(
+        sess_c.confirmed_frame().as_i32() <= warmup_frames as i32,
+        "C advanced its held frontier past the safe prefix: {} vs {warmup_frames}",
+        sess_c.confirmed_frame()
     );
     assert!(
         divergences.is_empty(),
@@ -4045,6 +4059,24 @@ fn p2p_n5_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
         confirmed_bound <= warmup_frames as i32,
         "the uncertified frontier advanced past the safe prefix: bound={confirmed_bound}, \
          advance_error={a_stall_error:?}"
+    );
+    // Bound each survivor separately: the shared `min` above passes if one peer
+    // holds while another advances past the warmup prefix.
+    assert!(
+        sess_a.confirmed_frame().as_i32() <= warmup_frames as i32,
+        "A advanced its uncertified frontier past the safe prefix: {} vs {warmup_frames}, \
+         advance_error={a_stall_error:?}",
+        sess_a.confirmed_frame()
+    );
+    assert!(
+        sess_c.confirmed_frame().as_i32() <= warmup_frames as i32,
+        "C advanced its held frontier past the safe prefix: {} vs {warmup_frames}",
+        sess_c.confirmed_frame()
+    );
+    assert!(
+        sess_c2.confirmed_frame().as_i32() <= warmup_frames as i32,
+        "C2 advanced its held frontier past the safe prefix: {} vs {warmup_frames}",
+        sess_c2.confirmed_frame()
     );
     assert!(
         divergences.is_empty(),

@@ -3910,7 +3910,9 @@ fn skew_gated_partition_healed_before_timeout_keeps_one_history() {
 /// coordinator's endpoint times out during the bounded attempt. The reachable
 /// majority must reconcile its membership, certify the requested removal (and
 /// the departed coordinator slot), and keep confirming on one history; the
-/// isolated coordinator fails closed.
+/// isolated coordinator fails closed. The target stays connected to the
+/// majority, so its drop proves the requested certificate committed rather than
+/// being explained by the target's own timeout.
 #[test]
 fn isolated_coordinator_removal_still_commits_on_reachable_majority() {
     const N: usize = 5;
@@ -3941,24 +3943,6 @@ fn isolated_coordinator_removal_still_commits_on_reachable_majority() {
             },
         ));
     }
-    for other in 0..(N - 1) {
-        events.push((
-            CUT_STEP,
-            ScheduleEvent::Block {
-                from: N - 1,
-                to: other,
-                blocked: true,
-            },
-        ));
-        events.push((
-            CUT_STEP,
-            ScheduleEvent::Block {
-                from: other,
-                to: N - 1,
-                blocked: true,
-            },
-        ));
-    }
     events.push((
         120,
         ScheduleEvent::GracefulRemove {
@@ -3984,6 +3968,7 @@ fn isolated_coordinator_removal_still_commits_on_reachable_majority() {
     };
     let options = RunOptions {
         disconnect_timeout: Some(Duration::from_secs(2)),
+        live_graceful_target: true,
         ..RunOptions::default()
     };
 
@@ -4016,11 +4001,13 @@ fn isolated_coordinator_removal_still_commits_on_reachable_majority() {
             "majority survivor {survivor} must certify both the isolated coordinator and the requested target: {dropped:?}"
         );
     }
-    assert_eq!(
-        final_snapshot.session_states.first(),
-        Some(&TraceSessionState::Synchronizing),
-        "the isolated coordinator must fail closed"
-    );
+    for detached in [0_usize, N - 1] {
+        assert_eq!(
+            final_snapshot.session_states.get(detached),
+            Some(&TraceSessionState::Synchronizing),
+            "detached peer {detached} must fail closed (isolated coordinator / removed target)"
+        );
+    }
     assert!(
         report
             .blocked_drops_by_link

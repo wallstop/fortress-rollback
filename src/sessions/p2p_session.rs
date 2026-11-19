@@ -9971,12 +9971,15 @@ impl<T: Config> P2PSession<T> {
     /// run past a freeze frame the mesh may later agree on for a dropping
     /// peer — so the dropped slot's input at the agreed frame is never lost
     /// and the post-agreement rollback target always stays inside the
-    /// prediction window. At `N >= 4` the same bound strictly NARROWS the
-    /// race but does not fully close it: one residual remains (the
-    /// **double-failure relay** — confirmation outruns a freeze only when the
-    /// low value's origin survivor dies and is pruned from the fold before its
-    /// relayed value lands; the sibling "stale-echo" framing was arbitrated
-    /// NOTABUG in Session 41). See the "Documented residuals" section of
+    /// prediction window. At `N >= 4` the same bound originally left one
+    /// residual (the **double-failure relay** — confirmation outruns a freeze
+    /// only when the low value's origin survivor dies and is pruned from the
+    /// fold before its relayed value lands; the sibling "stale-echo" framing
+    /// was arbitrated NOTABUG in Session 41). The residual is closed by the
+    /// sequence-numbered floor round
+    /// ([`Self::pessimistic_floor_relay_topology`],
+    /// [`Self::slot_round_incomplete`], [`Self::pessimistic_floors`]); see the
+    /// "`N >= 4` corners and their closure" section of
     /// `remote_slot_confirmed_bound`.
     ///
     /// A slot whose disconnect is **mesh-agreed** (locally disconnected and no
@@ -12931,7 +12934,8 @@ impl<T: Config> P2PSession<T> {
     ///   discarded frames keep our real-input state while the relaying survivor
     ///   froze at `F` — a permanent cross-survivor confirmed-STATE divergence
     ///   whose CONVERGED confirmed inputs still match (frozen at `F` on both),
-    ///   so the input-checksum desync detector stays silent. This is the
+    ///   so no input comparison can reveal it; only an application-supplied
+    ///   state checksum covering the affected frames would. This is the
     ///   `N >= 4` instance of the discard-before-convergence residual the
     ///   barrier closed at `N == 3`; it needs TWO simultaneous failures (origin
     ///   death + relay delay).
