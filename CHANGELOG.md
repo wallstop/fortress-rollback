@@ -83,8 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so clearing its retry fence no longer depends on which of its handles the certificate removed. A
   committed certificate naming a coordinator generation the receiver has already moved past is
   ignored rather than failing the live session closed, and an unseen certificate is applied only
-  from the operation's coordinator or after a second endpoint corroborates it (a single peer
-  cannot halt a live session alone; a two-player session has no second endpoint). A bounded
+  after a second endpoint corroborates it (a single peer cannot halt a live session alone, even
+  when it names itself the operation's coordinator; a two-player session has no second endpoint).
+  A bounded
   per-coordinator-identity replay watermark also rejects a delayed duplicate whose operation has
   already left the closed journal, and a commit for a competing known operation needs the same
   evidence before it can make an active attempt yield. The deterministic simulation
