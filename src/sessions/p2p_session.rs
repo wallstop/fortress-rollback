@@ -18717,6 +18717,11 @@ mod tests {
             cut_digest: 7,
         };
         session.coordinated_drop_record_closed_cut(&commit);
+        // A lower cut for the same identity never lowers the watermark.
+        session.coordinated_drop_record_closed_cut(&DropCommit {
+            cut: Frame::new(9),
+            ..commit
+        });
         assert!(session.coordinated_drop_commit_is_stale(&commit));
         // The bounded operation journals have forgotten the identity, but the
         // replay watermark still rejects a delayed duplicate.
@@ -18742,6 +18747,19 @@ mod tests {
             session.current_state(),
             SessionState::Synchronizing,
             "a cut above the watermark is a genuine certificate"
+        );
+        // The watermark journal stays bounded.
+        for sequence in 2..=8_u32 {
+            let mut identity = operation;
+            identity.sequence = sequence;
+            session.coordinated_drop_record_closed_cut(&DropCommit {
+                operation: identity,
+                ..commit
+            });
+        }
+        assert!(
+            session.coordinated_drop.closed_commit_cuts.len() <= session.num_players,
+            "the replay watermark journal must stay bounded"
         );
     }
 
