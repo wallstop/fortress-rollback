@@ -401,6 +401,11 @@ struct CoordinatedDropState<A> {
     /// Unseen certificates seen from one endpoint and awaiting corroboration
     /// from another. Bounded by `num_players`.
     unseen_commits: VecDeque<UnseenCommitEvidence>,
+    /// Highest cut already applied for one (coordinator, coordinator
+    /// generation, target-set digest) identity. Retained after the operation
+    /// leaves the bounded closed journal so a delayed duplicate cannot be
+    /// mistaken for a new removal certificate. Bounded by `num_players`.
+    closed_commit_cuts: VecDeque<((u16, u16, u64), Frame)>,
 }
 
 impl<A> Default for CoordinatedDropState<A> {
@@ -416,6 +421,7 @@ impl<A> Default for CoordinatedDropState<A> {
             halted_targets: std::collections::BTreeSet::new(),
             retiring: BTreeMap::new(),
             unseen_commits: VecDeque::new(),
+            closed_commit_cuts: VecDeque::new(),
         }
     }
 }
@@ -3377,6 +3383,47 @@ impl<T: Config> P2PSession<T> {
         corroborated
     }
 
+    /// Records the highest cut applied for one operation identity.
+    fn coordinated_drop_record_closed_cut(&mut self, commit: &DropCommit) {
+        let key = (
+            commit.operation.coordinator,
+            commit.operation.coordinator_generation,
+            commit.operation.target_set_digest,
+        );
+        if let Some((_, cut)) = self
+            .coordinated_drop
+            .closed_commit_cuts
+            .iter_mut()
+            .find(|(existing, _)| *existing == key)
+        {
+            *cut = std::cmp::max(*cut, commit.cut);
+            return;
+        }
+        while self.coordinated_drop.closed_commit_cuts.len() >= self.num_players {
+            self.coordinated_drop.closed_commit_cuts.pop_front();
+        }
+        // alloc-bound: the watermark journal is trimmed to `num_players`
+        // entries immediately above.
+        self.coordinated_drop
+            .closed_commit_cuts
+            .push_back((key, commit.cut));
+    }
+
+    /// Whether an operation identity has already committed at or above this
+    /// cut. Such a commit is a delayed duplicate, not a new certificate.
+    fn coordinated_drop_commit_is_stale(&self, commit: &DropCommit) -> bool {
+        let key = (
+            commit.operation.coordinator,
+            commit.operation.coordinator_generation,
+            commit.operation.target_set_digest,
+        );
+        self.coordinated_drop
+            .closed_commit_cuts
+            .iter()
+            .find(|(existing, _)| *existing == key)
+            .is_some_and(|(_, cut)| commit.cut <= *cut)
+    }
+
     fn coordinated_drop_accept_commit(
         &mut self,
         commit: DropCommit,
@@ -3415,6 +3462,13 @@ impl<T: Config> P2PSession<T> {
             ) {
                 return Ok(());
             }
+        }
+        // A delayed duplicate for an identity whose committed cut the closed
+        // journal already forgot is still stale, never a new certificate.
+        if !self.coordinated_drop_knows_operation(commit.operation)
+            && self.coordinated_drop_commit_is_stale(&commit)
+        {
+            return Ok(());
         }
         // An operation this endpoint never observed can only be treated as a
         // removal certificate when it comes from the operation's coordinator
@@ -3625,6 +3679,7 @@ impl<T: Config> P2PSession<T> {
             self.close_reopened_reactivation_for_drop_targets(&targets);
         }
 
+        self.coordinated_drop_record_closed_cut(&commit);
         let mut cuts = Vec::new();
         cuts.try_reserve_exact(targets.len())
             .map_err(|_error| DropAbortReason::ResourceLimit)?;
@@ -17790,6 +17845,10 @@ mod tests {
             Some(CoordinatedDropPhase::Committed),
             "the coordinator may commit once the missing witness is unresponsive"
         );
+        assert!(
+            !session.coordinated_drop.closed_commit_cuts.is_empty(),
+            "applying a certificate must record its replay watermark"
+        );
     }
 
     /// Stages a one-target attempt at a certified cut of 5 where every
@@ -18636,6 +18695,53 @@ mod tests {
             session.current_state(),
             SessionState::Synchronizing,
             "the operation's coordinator is the certificate authority for its own operation"
+        );
+    }
+
+    #[test]
+    fn delayed_duplicate_commit_after_journal_eviction_is_stale() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 2,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 1,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let commit = DropCommit {
+            operation,
+            cut: Frame::new(10),
+            cut_digest: 7,
+        };
+        session.coordinated_drop_record_closed_cut(&commit);
+        assert!(session.coordinated_drop_commit_is_stale(&commit));
+        // The bounded operation journals have forgotten the identity, but the
+        // replay watermark still rejects a delayed duplicate.
+        assert!(!session.coordinated_drop_knows_operation(operation));
+        assert_eq!(
+            session.coordinated_drop_accept_commit(commit, Some(1)),
+            Ok(())
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Running,
+            "a delayed duplicate from before the closed-journal eviction must not halt"
+        );
+        let newer = DropCommit {
+            cut: Frame::new(11),
+            ..commit
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_commit(newer, Some(1)),
+            Ok(())
+        );
+        assert_eq!(
+            session.current_state(),
+            SessionState::Synchronizing,
+            "a cut above the watermark is a genuine certificate"
         );
     }
 
