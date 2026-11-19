@@ -1358,19 +1358,31 @@ impl<T: Config> P2PSession<T> {
     }
 
     #[cfg(feature = "hot-join")]
-    fn close_reopened_reactivation_for_drop_targets(&mut self, targets: &[DropTarget]) {
+    fn close_reactivation_for_drop_targets(&mut self, targets: &[DropTarget]) {
+        // A committed drop for the slot supersedes ANY in-flight reactivation
+        // for it. Closing only a REOPENED attempt left a not-yet-reopened
+        // pending alive: its shield permanently exempts the slot from the
+        // disconnect-convergence fold and reopened attempts are never
+        // superseded, so the next removal's `ReactivateSlot` was rejected
+        // forever and the periodic-hot-join soak wedged after ~35 cycles.
+        // The drop is authoritative, so close the attempt as ABORTED (restore
+        // the pre-reopen freeze); the drop's own freeze/disconnect follows in
+        // this same apply.
         let closes_pending = self
             .hot_join
             .pending_reactivation
             .as_ref()
-            .is_some_and(|pending| {
-                pending.reopened
-                    && targets
-                        .iter()
-                        .any(|target| usize::from(target.handle) == pending.handle.as_usize())
+            .and_then(|pending| {
+                targets
+                    .iter()
+                    .any(|target| usize::from(target.handle) == pending.handle.as_usize())
+                    .then_some(pending.reopened)
             });
-        if closes_pending {
-            self.close_unheard_reopened_attempt(true);
+        if let Some(reopened) = closes_pending {
+            // A reopen the drop can prove was heard is closed as the committed
+            // reactivation it is (the pre-existing D17 behavior); an attempt
+            // that never reopened carries no commit evidence and is aborted.
+            self.close_unheard_reopened_attempt(reopened);
         }
     }
 
@@ -3690,7 +3702,7 @@ impl<T: Config> P2PSession<T> {
             // Close that older lifecycle before installing the new drop fence:
             // otherwise a delayed JoinCommitted could mistake the new fence
             // for the old era and advance/remove it.
-            self.close_reopened_reactivation_for_drop_targets(&targets);
+            self.close_reactivation_for_drop_targets(&targets);
         }
 
         self.coordinated_drop_record_closed_cut(&commit);
@@ -7562,15 +7574,30 @@ impl<T: Config> P2PSession<T> {
         if !status.last_frame.is_null() {
             let mut any_connected_claim = false;
             let mut claim_min: Option<Frame> = None;
-            for endpoint in self.player_reg.remotes.values() {
+            for (addr, endpoint) in &self.player_reg.remotes {
                 if !endpoint.is_running() {
                     continue;
                 }
                 if self.hot_join.endpoint_is_reserved(endpoint) {
                     continue;
                 }
+                // The joining endpoint reports its OWN slot connected. That
+                // self-claim says nothing about the pre-attempt freeze, and a
+                // replacement whose handshake completes before the directive
+                // arrives would otherwise make this gate reject every retry
+                // forever (the 4-player periodic-hot-join soak stalled here).
+                if addr == &joiner_addr {
+                    continue;
+                }
                 let claim = endpoint.peer_connect_status(handle);
-                if !claim.disconnected {
+                // A connected claim ABOVE this survivor's own freeze is stale
+                // pre-freeze gossip from an endpoint that is itself ahead: it
+                // cannot undercut the local freeze, and that endpoint's own
+                // directive gate still requires it to be locally frozen
+                // before it can reopen. Only a connected claim at or below the
+                // local freeze (including a NULL default, which carries no
+                // freeze evidence at all) blocks convergence.
+                if !claim.disconnected && claim.last_frame <= status.last_frame {
                     any_connected_claim = true;
                 }
                 claim_min = Some(match claim_min {
@@ -20906,7 +20933,7 @@ mod tests {
             handle: 1,
             generation: 2,
         }];
-        session.close_reopened_reactivation_for_drop_targets(&targets);
+        session.close_reactivation_for_drop_targets(&targets);
         assert!(session.hot_join.pending_reactivation.is_none());
         assert_eq!(
             session.coordinated_drop.membership_generations.get(&handle),
@@ -20947,6 +20974,43 @@ mod tests {
             session.coordinated_drop.membership_generations.get(&handle),
             Some(&2),
             "a delayed old JoinCommitted must not advance the later membership era"
+        );
+    }
+
+    /// A not-yet-reopened reactivation must not survive a committed drop for
+    /// its slot: its shield would keep the slot connected forever and block
+    /// every future reactivate directive (the periodic-hot-join soak wedged
+    /// after ~35 cycles).
+    #[cfg(feature = "hot-join")]
+    #[test]
+    fn drop_commit_closes_a_not_yet_reopened_reactivation() {
+        let mut session = create_two_player_session();
+        let handle = PlayerHandle::new(1);
+        session.local_connect_status[handle.as_usize()] = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(0),
+            epoch: 5,
+        };
+        session.hot_join.pending_reactivation = Some(PendingReactivation {
+            handle,
+            frame: Frame::new(1),
+            coordinator_addr: test_addr(8081),
+            joiner_addr: test_addr(8080),
+            pre_freeze_status: ConnectionStatus {
+                disconnected: true,
+                last_frame: Frame::new(0),
+                epoch: 5,
+            },
+            pre_freeze_input: Some(0),
+            reopened: false,
+        });
+        session.close_reactivation_for_drop_targets(&[DropTarget {
+            handle: 1,
+            generation: 2,
+        }]);
+        assert!(
+            session.hot_join.pending_reactivation.is_none(),
+            "a committed drop for the slot supersedes an in-flight reactivation"
         );
     }
 
@@ -33166,6 +33230,84 @@ mod tests {
             assert!(
                 !duo.b.local_connect_status[2].disconnected,
                 "the committed slot's status stays connected"
+            );
+        }
+
+        /// A replacement whose handshake completes before the coordinator's
+        /// directive arrives reports its OWN slot connected. That self-claim
+        /// says nothing about the pre-attempt freeze; counting it made the
+        /// convergence gate reject every retry forever (the 4-player periodic
+        /// hot-join soak stalled after ~35 rejoin cycles).
+        #[test]
+        fn npeer_survivor_ignores_the_joiners_own_connected_claim_for_convergence() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+            let confirmed = duo.b.confirmed_frame();
+            let joiner = duo
+                .b
+                .player_reg
+                .remotes
+                .get_mut(&addr_c())
+                .expect("B's joiner endpoint");
+            joiner.force_running_for_tests();
+            joiner.set_peer_connect_status_for_tests(
+                PlayerHandle::new(2),
+                ConnectionStatus {
+                    disconnected: false,
+                    last_frame: confirmed,
+                    epoch: 0,
+                },
+            );
+            let frame = Frame::new(confirmed.as_i32() + 10);
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_received_reactivate_slot_for_test(ReactivateSlot { handle: 2, frame });
+            duo.b.poll_remote_clients();
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_some(),
+                "the replacement's self-claim must not reject the coordinator's directive"
+            );
+        }
+
+        /// A peer's stale CONNECTED claim at a frame above this survivor's own
+        /// freeze cannot undercut the local freeze. It is pre-freeze gossip
+        /// from an endpoint that is ahead (the periodic-hot-join soak's
+        /// prediction-capped survivors kept exactly this stale claim and
+        /// rejected every retry); the directive must still be accepted.
+        #[test]
+        fn npeer_survivor_ignores_a_stale_connected_claim_above_its_freeze() {
+            let mut duo = mesh_with_dropped_slot(600, 6);
+            let local_freeze = duo.b.local_connect_status[2].last_frame;
+            assert!(
+                duo.b.local_connect_status[2].disconnected,
+                "the fixture drops slot 2 on B"
+            );
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_peer_connect_status_for_tests(
+                    PlayerHandle::new(2),
+                    ConnectionStatus {
+                        disconnected: false,
+                        last_frame: Frame::new(local_freeze.as_i32() + 10),
+                        epoch: 0,
+                    },
+                );
+            let frame = Frame::new(duo.b.confirmed_frame().as_i32() + 20);
+            duo.b
+                .player_reg
+                .remotes
+                .get_mut(&addr_a())
+                .expect("B's coordinator endpoint")
+                .set_received_reactivate_slot_for_test(ReactivateSlot { handle: 2, frame });
+            duo.b.poll_remote_clients();
+            assert!(
+                duo.b.hot_join.pending_reactivation.is_some(),
+                "a stale connected claim above the local freeze must not block the directive"
             );
         }
 
