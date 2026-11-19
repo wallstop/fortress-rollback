@@ -67,8 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a slot now supersedes an in-flight but not-yet-reopened reactivation for that slot (its
   shield previously kept the slot connected forever and blocked every later directive), including
   when the target timed out during the removal: the certificate is applied at the target's exact
-  disconnected generation, clears the pending reactivation without re-freezing its queue, and
-  installs the membership fence. The survivor-side freeze-convergence gate ignores the joining
+  disconnected generation, clears the pending reactivation without re-freezing its queue, installs
+  the membership fence, and re-asserts the certified cut as the target's frozen value. The
+  survivor-side freeze-convergence gate ignores the joining
   endpoint's own connected claim for the slot it is reactivating, and ignores a stale connected
   claim whose frame is above the survivor's own freeze (a peer that is ahead cannot undercut the
   local freeze, and its own directive gate still requires it to be locally frozen before
