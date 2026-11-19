@@ -2544,28 +2544,43 @@ impl<T: Config> P2PSession<T> {
             return Ok(());
         }
         let relay_message = report.clone();
-        if self.coordinated_drop.active.is_none() {
-            // A participant that missed the initial commit burst keeps
-            // retransmitting its Ready report. Every survivor may already have
-            // closed the operation once quorum acknowledged, so answer that
-            // retry with the retained certificate instead of leaving the last
-            // witness to time out. A Ready report names the exact certified
-            // cut/digest, so only the matching certificate is replayed.
-            if report.stage == DropReportStage::Ready {
-                let commit = self
-                    .coordinated_drop
-                    .closed_commits
-                    .iter()
-                    .find(|commit| {
-                        commit.operation == report.operation
-                            && commit.cut == report.cut
-                            && commit.cut_digest == report.cut_digest
-                    })
-                    .copied();
-                if let Some(commit) = commit {
-                    self.coordinated_drop_broadcast_commit(DropControlMessage::Commit(commit));
-                }
+        // A participant that missed the initial commit burst keeps
+        // retransmitting its Ready report. Every survivor may already have
+        // closed the operation once quorum acknowledged, so answer that retry
+        // with the retained certificate even while a later operation is active,
+        // without disturbing that later operation. A Ready report names the
+        // exact certified cut/digest, so only the matching certificate is
+        // replayed. Delivery is direct to the retrying endpoint: broadcasting
+        // an old certificate could reach a replacement generation that never
+        // observed the operation. A report for the currently active operation
+        // keeps the ordinary in-attempt handling below.
+        let replays_closed_certificate = report.stage == DropReportStage::Ready
+            && self
+                .coordinated_drop
+                .active
+                .as_ref()
+                .is_none_or(|active| active.operation != report.operation);
+        if replays_closed_certificate {
+            let commit = self
+                .coordinated_drop
+                .closed_commits
+                .iter()
+                .find(|commit| {
+                    commit.operation == report.operation
+                        && commit.cut == report.cut
+                        && commit.cut_digest == report.cut_digest
+                })
+                .copied();
+            if let Some(commit) = commit {
+                let recipient = source.unwrap_or(report.participant);
+                self.coordinated_drop_send_control_to(
+                    recipient,
+                    DropControlMessage::Commit(commit),
+                );
+                return Ok(());
             }
+        }
+        if self.coordinated_drop.active.is_none() {
             return Ok(());
         }
         let Some(active) = self.coordinated_drop.active.as_mut() else {
@@ -3761,6 +3776,21 @@ impl<T: Config> P2PSession<T> {
             // otherwise a delayed JoinCommitted could mistake the new fence
             // for the old era and advance/remove it.
             self.close_reactivation_for_drop_targets(&targets);
+        }
+
+        // The certificate is authoritative for the target's frozen era. A
+        // target that timed out while the removal was in flight may carry an
+        // earlier disconnect high-water; the ordinary disconnect fold only
+        // lowers a disconnected slot, which would freeze its value below the
+        // certified cut while the fence records the cut. Raise that view to the
+        // certificate before the fold so the frozen value is the certified one.
+        for target in &targets {
+            let handle = PlayerHandle::new(usize::from(target.handle));
+            if let Some(status) = self.local_connect_status.get_mut(handle.as_usize()) {
+                if status.disconnected && status.last_frame < commit.cut {
+                    status.last_frame = commit.cut;
+                }
+            }
         }
 
         self.coordinated_drop_record_closed_cut(&commit);
@@ -17866,6 +17896,7 @@ mod tests {
     #[test]
     fn closed_commit_answers_a_ready_retry_with_the_certificate() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (active_operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
         let targets = vec![DropTarget {
             handle: 3,
             generation: 0,
@@ -17873,7 +17904,7 @@ mod tests {
         let operation = DropOperationId {
             coordinator: 0,
             coordinator_generation: 0,
-            sequence: 1,
+            sequence: 2,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
         };
         let cut = Frame::new(0);
@@ -17884,7 +17915,18 @@ mod tests {
         };
         session.coordinated_drop_close_operation(operation);
         session.coordinated_drop_record_closed_commit(commit);
-        let before = sent_message_count(&session, crate::metrics::MessageKind::DropCommit);
+        let retrying_addr = test_addr(9401);
+        let other_addr = test_addr(9402);
+        let before_retrying = sent_message_count_to(
+            &session,
+            retrying_addr,
+            crate::metrics::MessageKind::DropCommit,
+        );
+        let before_other = sent_message_count_to(
+            &session,
+            other_addr,
+            crate::metrics::MessageKind::DropCommit,
+        );
 
         let ready_retry = DropReport {
             operation,
@@ -17900,21 +17942,51 @@ mod tests {
             Ok(())
         );
         assert!(
-            sent_message_count(&session, crate::metrics::MessageKind::DropCommit) > before,
+            sent_message_count_to(
+                &session,
+                retrying_addr,
+                crate::metrics::MessageKind::DropCommit
+            ) > before_retrying,
             "a closed participant must answer the last witness's Ready retry with the commit"
+        );
+        assert_eq!(
+            sent_message_count_to(
+                &session,
+                other_addr,
+                crate::metrics::MessageKind::DropCommit
+            ),
+            before_other,
+            "recovery must target the retrying endpoint, not fan out to other generations"
+        );
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .map(|a| a.operation),
+            Some(active_operation),
+            "recovering an older certificate must not disturb the active operation"
         );
 
         let mismatched = DropReport {
             cut_digest: commit.cut_digest.wrapping_add(1),
             ..ready_retry
         };
-        let before = sent_message_count(&session, crate::metrics::MessageKind::DropCommit);
+        let before = sent_message_count_to(
+            &session,
+            retrying_addr,
+            crate::metrics::MessageKind::DropCommit,
+        );
         assert_eq!(
             session.coordinated_drop_accept_report_from(mismatched, Some(1)),
             Ok(())
         );
         assert_eq!(
-            sent_message_count(&session, crate::metrics::MessageKind::DropCommit),
+            sent_message_count_to(
+                &session,
+                retrying_addr,
+                crate::metrics::MessageKind::DropCommit
+            ),
             before,
             "a retry naming a different certificate must not replay the stored commit"
         );
@@ -21554,7 +21626,7 @@ mod tests {
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
         };
-        let cut = Frame::new(0);
+        let cut = Frame::new(1);
         let commit = DropCommit {
             operation,
             cut,
@@ -21630,6 +21702,17 @@ mod tests {
         assert!(
             session.hot_join.pending_reactivation.is_none(),
             "the certified drop must close the not-yet-reopened reactivation"
+        );
+        assert_eq!(
+            session.local_connect_status[3].last_frame, cut,
+            "the committed cut must override the target's earlier disconnect high-water"
+        );
+        assert_eq!(
+            session
+                .sync_layer
+                .player_last_confirmed_input(PlayerHandle::new(3)),
+            Some(7_u8),
+            "the frozen value must come from the certified cut, not the earlier disconnect frame"
         );
         let fence = session
             .coordinated_drop

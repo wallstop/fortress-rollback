@@ -698,6 +698,7 @@ fn swarm_materialized_schedule_replays_bit_identically_under_full_oracle() {
 fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
     let mut announcement_rows = 0_usize;
     let mut announced_install_rows = 0_usize;
+    let mut inventory_install_rows = 0_usize;
     let mut backfill_rows = 0_usize;
     for (seed, n_players, noise) in [
         (43_u64, 3_usize, BackgroundNoise::Mild),
@@ -726,6 +727,14 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
         {
             announced_install_rows += 1;
         }
+        if report
+            .backfill_chunks
+            .iter()
+            .zip(&report.announced_backfill_chunks)
+            .any(|(total, announced)| total > announced)
+        {
+            inventory_install_rows += 1;
+        }
         if report.backfill_chunks.iter().any(|count| *count > 0) {
             backfill_rows += 1;
         }
@@ -747,7 +756,11 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
                 "the pinned announced-donor row must install an announced chunk"
             );
             assert!(
-                report.backfill_chunks.iter().any(|count| *count > 0),
+                report
+                    .backfill_chunks
+                    .iter()
+                    .zip(&report.announced_backfill_chunks)
+                    .any(|(total, announced)| total > announced),
                 "the pinned announced-donor row must also install an inventory chunk"
             );
             let encoded = serde_json::to_vec(&schedule).expect("lossy schedule serializes");
@@ -771,6 +784,11 @@ fn lossy_graceful_removal_rows_keep_one_history_and_recover() {
         announced_install_rows > 0,
         "at least one lossy graceful-removal row must install a chunk attributed to \
          the announced donor grid, not only accept the announcement"
+    );
+    assert!(
+        inventory_install_rows > 0,
+        "at least one lossy graceful-removal row must install a chunk through the \
+         inventory-donor path, not only through an announcement"
     );
     assert!(
         backfill_rows > 0,
