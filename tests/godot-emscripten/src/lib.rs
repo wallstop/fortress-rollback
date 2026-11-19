@@ -33,7 +33,10 @@ struct ProbeConfig;
 
 impl Config for ProbeConfig {
     type Input = u8;
-    type State = ();
+    // A real 64-bit state makes the hot-join snapshot exercise non-unit
+    // serialization under the 32-bit Emscripten ABI instead of round-tripping
+    // an empty value.
+    type State = u64;
     type Address = u8;
 }
 
@@ -259,17 +262,35 @@ fn run_virtual_clock_probe() -> Result<(u128, u128), String> {
     Ok((first_ping, second_ping))
 }
 
-fn handle_probe_requests(requests: RequestVec<ProbeConfig>) {
-    for request in requests {
-        match request {
-            FortressRequest::SaveGameState { cell, frame } => {
-                cell.save(frame, Some(()), None);
-            },
-            FortressRequest::LoadGameState { cell, .. } => {
-                let _ = cell.load();
-            },
-            FortressRequest::AdvanceFrame { .. } => {},
+#[derive(Default)]
+struct ProbeGame {
+    state: u64,
+    last_saved: Option<(Frame, u64)>,
+}
+
+impl ProbeGame {
+    fn handle(&mut self, requests: RequestVec<ProbeConfig>) -> Result<(), String> {
+        for request in requests {
+            match request {
+                FortressRequest::SaveGameState { cell, frame } => {
+                    cell.save(frame, Some(self.state), None);
+                    self.last_saved = Some((frame, self.state));
+                },
+                FortressRequest::LoadGameState { cell, .. } => {
+                    self.state = cell
+                        .load()
+                        .ok_or_else(|| "hot-join snapshot had no saved state".to_owned())?;
+                },
+                FortressRequest::AdvanceFrame { inputs } => {
+                    let frame_sum: u64 = inputs
+                        .iter()
+                        .map(|(input, _status)| u64::from(*input))
+                        .sum();
+                    self.state = self.state.saturating_add(frame_sum);
+                },
+            }
         }
+        Ok(())
     }
 }
 
@@ -293,6 +314,7 @@ fn run_removal_probe() -> Result<(), String> {
     let _ = pair.first.events().count();
     let _ = pair.second.events().count();
 
+    let mut game = ProbeGame::default();
     for frame_index in 0..3u8 {
         pair.first
             .add_local_input(PlayerHandle::new(0), frame_index)
@@ -300,16 +322,16 @@ fn run_removal_probe() -> Result<(), String> {
         pair.second
             .add_local_input(PlayerHandle::new(1), frame_index)
             .map_err(|error| format!("removed-player input: {error}"))?;
-        handle_probe_requests(
+        game.handle(
             pair.first
                 .advance_frame()
                 .map_err(|error| format!("survivor advance: {error}"))?,
-        );
-        handle_probe_requests(
+        )?;
+        game.handle(
             pair.second
                 .advance_frame()
                 .map_err(|error| format!("removed-player advance: {error}"))?,
-        );
+        )?;
         pair.first.poll_remote_clients();
         pair.second.poll_remote_clients();
         offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
@@ -366,11 +388,11 @@ fn run_removal_probe() -> Result<(), String> {
     pair.first
         .add_local_input(PlayerHandle::new(0), 99)
         .map_err(|error| format!("post-removal survivor input: {error}"))?;
-    handle_probe_requests(
+    game.handle(
         pair.first
             .advance_frame()
             .map_err(|error| format!("post-removal survivor advance: {error}"))?,
-    );
+    )?;
     if pair.first.current_state() != SessionState::Running {
         return Err("the Emscripten survivor left Running on the frozen-slot advance".to_owned());
     }
@@ -413,13 +435,14 @@ fn run_hot_join_probe() -> Result<(), String> {
     }
     let _ = host.events().count();
 
+    let mut host_game = ProbeGame::default();
     for frame_index in 0..3u8 {
         host.add_local_input(PlayerHandle::new(0), frame_index)
             .map_err(|error| format!("pre-join host input: {error}"))?;
-        handle_probe_requests(
+        host_game.handle(
             host.advance_frame()
                 .map_err(|error| format!("pre-join host advance: {error}"))?,
-        );
+        )?;
         host.poll_remote_clients();
         offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
     }
@@ -459,6 +482,7 @@ fn run_hot_join_probe() -> Result<(), String> {
     }
 
     // The joiner's first advance after the join applies the snapshot.
+    let mut joiner_game = ProbeGame::default();
     let requests = joiner
         .advance_frame()
         .map_err(|error| format!("hot-join snapshot apply: {error}"))?;
@@ -479,9 +503,19 @@ fn run_hot_join_probe() -> Result<(), String> {
              got {load_count} loads and {other_count} other requests"
         ));
     }
-    handle_probe_requests(requests);
+    joiner_game.handle(requests)?;
     let snapshot_frame =
         snapshot_frame.ok_or_else(|| "the joiner did not report a snapshot frame".to_owned())?;
+    let (saved_frame, saved_state) = host_game.last_saved.ok_or_else(|| {
+        "the hot-join host did not save a state before serving the snapshot".to_owned()
+    })?;
+    if saved_frame != snapshot_frame || saved_state != joiner_game.state {
+        return Err(format!(
+            "loaded snapshot state diverged: joiner frame {snapshot_frame:?} state {}, \
+             host frame {saved_frame:?} state {saved_state}",
+            joiner_game.state
+        ));
+    }
 
     // Advance both peers in lockstep. The joiner's own frame cursor starts one
     // frame behind the host's current frame (the host keeps running while the
@@ -493,15 +527,15 @@ fn run_hot_join_probe() -> Result<(), String> {
         joiner
             .add_local_input(PlayerHandle::new(1), 200 + index)
             .map_err(|error| format!("post-join joined-slot input: {error}"))?;
-        handle_probe_requests(
+        host_game.handle(
             host.advance_frame()
                 .map_err(|error| format!("post-join host advance: {error}"))?,
-        );
-        handle_probe_requests(
+        )?;
+        joiner_game.handle(
             joiner
                 .advance_frame()
                 .map_err(|error| format!("post-join joiner advance: {error}"))?,
-        );
+        )?;
         for _ in 0..MAX_CONFIRM_POLLS {
             host.poll_remote_clients();
             joiner.poll_remote_clients();
