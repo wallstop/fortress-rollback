@@ -9976,9 +9976,8 @@ impl<T: Config> P2PSession<T> {
     /// only when the low value's origin survivor dies and is pruned from the
     /// fold before its relayed value lands; the sibling "stale-echo" framing
     /// was arbitrated NOTABUG in Session 41). The residual is closed by the
-    /// sequence-numbered floor round
-    /// ([`Self::pessimistic_floor_relay_topology`],
-    /// [`Self::slot_round_incomplete`], [`Self::pessimistic_floors`]); see the
+    /// sequence-numbered floor round (`pessimistic_floor_relay_topology`,
+    /// `slot_round_incomplete`, `pessimistic_floors`); see the
     /// "`N >= 4` corners and their closure" section of
     /// `remote_slot_confirmed_bound`.
     ///
