@@ -5049,7 +5049,6 @@ fn run_inner_with_final_game_frame_offset<I: SimInput>(
                     })
                     .map(Frame::as_i32)
                     .max();
-                let certified_by_survivor = certified_cut.is_some();
                 if let Some(cut) = certified_cut {
                     // The certified cut is the exact bound; deferring the cap
                     // until it is observable avoids permanently filtering
