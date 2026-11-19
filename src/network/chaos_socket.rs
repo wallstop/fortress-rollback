@@ -2030,8 +2030,13 @@ mod tests {
                 .jitter_ms(case.jitter_ms)
                 .seed(42)
                 .build();
-            let mut socket = ChaosSocket::new(inner, config);
-            let start = Instant::now();
+            // A wall clock makes "not delivered yet" depend on how long the
+            // test itself takes; Miri's slow interpreter can cross the entire
+            // minimum delay between the two receives. Drive the socket's clock
+            // explicitly instead so the assertion is deterministic on every
+            // target and instrumentation level.
+            let clock = TestClock::new();
+            let mut socket = ChaosSocket::new(inner, config).with_clock(clock.as_clock_fn());
 
             // First receive - packets go into in-flight queue; return value discarded, testing timing
             let _ = socket.receive_all_messages();
@@ -2040,19 +2045,17 @@ mod tests {
             // min_delivery_time = latency - jitter (but not less than 0)
             let min_delivery_ms = case.latency_ms.saturating_sub(case.jitter_ms);
 
-            // If there's a meaningful delay, check packets aren't delivered too early
-            if min_delivery_ms > 20 {
-                // Check immediately - no packets should be ready yet (return value is checked below)
+            if min_delivery_ms > 0 {
+                clock.advance(Duration::from_millis(min_delivery_ms.saturating_sub(1)));
                 let received = socket.receive_all_messages();
                 assert_eq!(
                     received.len(),
                     0,
-                    "[{}] Packets delivered too early! \
-                     min_delivery={}ms, jitter={}ms, elapsed={:?}",
+                    "[{}] Packets delivered before the minimum delivery time! \
+                     min_delivery={}ms, jitter={}ms",
                     case.name,
                     min_delivery_ms,
-                    case.jitter_ms,
-                    start.elapsed()
+                    case.jitter_ms
                 );
             }
         }
