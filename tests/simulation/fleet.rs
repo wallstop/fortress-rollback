@@ -5568,13 +5568,12 @@ fn nightly_rare_state_coverage_cell_is_present_and_exercises_ring_and_prediction
 }
 
 /// Permanent regression for the PCT-exposed freeze-frame oracle false
-/// positive. A one-change PCT interleaving at step 302 moves the removed target
-/// (peer 4) to the front; peer 0 advances ahead while peers 1-3 stop within one
-/// frame of each other under the strict-majority certificate. The oracle used
-/// to read a lagging survivor's unobserved `None` as a disagreement. It must ignore a survivor
-/// whose confirmed prefix ends before the earliest observed freeze, while still
-/// failing a survivor that reached that freeze and never observed a stable
-/// `Disconnected` run.
+/// positive. A one-change PCT interleaving with seed 9 leaves two survivors a
+/// frame behind the third while peer 0 advances ahead under the strict-majority
+/// certificate. The oracle used to read a lagging survivor's unobserved `None`
+/// as a disagreement. It must ignore a survivor whose confirmed prefix ends
+/// before the earliest observed freeze, while still failing a survivor that
+/// reached that freeze and never observed a stable `Disconnected` run.
 #[test]
 fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     let mut schedule: Schedule = serde_json::from_str(include_str!(
@@ -5589,7 +5588,7 @@ fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     validate_schedule(&schedule).expect("checked-in D14 schedule must be valid");
     let options = RunOptions {
         pct: Some(PctOptions {
-            seed: 0xD14,
+            seed: 9,
             priority_changes: 1,
         }),
         ..RunOptions::default()
@@ -5597,7 +5596,7 @@ fn pct_lagging_survivor_does_not_fake_a_freeze_divergence() {
     let report = run(&schedule, &options);
     assert_eq!(
         report.final_confirmed,
-        vec![356, 350, 350, 351, 290],
+        vec![382, 376, 376, 377, 316],
         "the regression depends on the lagging-survivor interleaving"
     );
     assert!(
