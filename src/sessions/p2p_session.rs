@@ -12880,7 +12880,7 @@ impl<T: Config> P2PSession<T> {
     /// `UdpProtocol::on_input` and the blackout regression in
     /// `tests/sessions/peer_drop.rs`).
     ///
-    /// # Documented residuals (`N >= 4`; not closed by the barrier or nudge)
+    /// # `N >= 4` corners and their closure
     ///
     /// The barrier closes the desync at `N == 3` and strictly narrows it at
     /// `N >= 4`. Two `N >= 4` corners were originally documented here as open;
@@ -12919,47 +12919,55 @@ impl<T: Config> P2PSession<T> {
     ///   double-failure relay below. (`N == 3` is doubly safe: a survivor has
     ///   one other survivor endpoint, so the flipping packet IS the term it
     ///   would min.)
-    /// - **Double-failure relay — REAL (arbitrated S41).** The genuine
-    ///   residual. When the global-min origin survivor DIES (its endpoint goes
-    ///   non-running and is pruned from BOTH folds) AFTER relaying its low
-    ///   freeze `F` to a third survivor but BEFORE delivering it to us, and the
-    ///   relay is loss-delayed, our bound (no longer folding the dead origin)
-    ///   lets us confirm and DISCARD the dropped slot's real inputs in
-    ///   `(F, window_floor]`; the relayed `{disconnected, F}` then lands, the
-    ///   rollback target `F + 1` is below the prediction-window floor, the S20
-    ///   clamp keeps us live, and the discarded frames keep our real-input
-    ///   state while the relaying survivor froze at `F` — a permanent
-    ///   cross-survivor confirmed-STATE divergence. Insidiously the dropped
-    ///   slot's CONVERGED confirmed inputs match (frozen at `F` on both), so the
-    ///   input-checksum desync detector stays silent. This is the `N >= 4`
-    ///   instance of the discard-before-convergence residual the barrier closed
-    ///   at `N == 3`; it needs TWO simultaneous failures (origin death + relay
-    ///   delay). Deterministically reproduced (first divergence at `F + 1`,
-    ///   non-vacuous) by `p2p_n4_double_failure_relay_*` in
-    ///   `tests/sessions/peer_drop.rs`.
+    /// - **Double-failure relay — CLOSED (arbitrated S41, fixed S55).** The one
+    ///   genuine residual. When the global-min origin survivor DIES (its
+    ///   endpoint goes non-running and is pruned from BOTH folds) AFTER
+    ///   relaying its low freeze `F` to a third survivor but BEFORE delivering
+    ///   it to us, and the relay is loss-delayed, our bound (no longer folding
+    ///   the dead origin) could otherwise confirm and DISCARD the dropped
+    ///   slot's real inputs in `(F, window_floor]`; the relayed
+    ///   `{disconnected, F}` then lands, the rollback target `F + 1` is below
+    ///   the prediction-window floor, the S20 clamp keeps us live, and the
+    ///   discarded frames keep our real-input state while the relaying survivor
+    ///   froze at `F` — a permanent cross-survivor confirmed-STATE divergence
+    ///   whose CONVERGED confirmed inputs still match (frozen at `F` on both),
+    ///   so the input-checksum desync detector stays silent. This is the
+    ///   `N >= 4` instance of the discard-before-convergence residual the
+    ///   barrier closed at `N == 3`; it needs TWO simultaneous failures (origin
+    ///   death + relay delay).
     ///
-    /// **Deferred fix (S41 — needs its own red-green + adversarial cycle; a
-    /// partial fix would regress liveness, so none is shipped).** The fix
-    /// direction is now machine-arbitrated in `specs/tla/DoubleFailureRelay.tla`
-    /// (S42/S44): close the fold-membership asymmetry by **(a)** a per-slot
-    /// DROP-EPOCH carried on connect-status gossip PLUS a `FRESH-ACK ROUND` that
-    /// holds confirmation of a not-yet-mesh-agreed dropped slot until a *fresh*
-    /// ack (one that postdates our intent to advance) from every reachable-alive
-    /// peer corroborates the floor — the epoch makes that ack a commitment under
-    /// latency (the wire-epoch direction, shared with the host->spectator
-    /// reactivation/epoch signal); this is the verified-SOUND `MeshAgree` policy.
-    /// **The cheaper alternatives are MACHINE-DISPROVEN:** (b) a dead-survivor
-    /// TOMBSTONE fold regresses liveness (a dead laggard's retained low term pins
-    /// a still-live slot forever — `Tombstone` cfg, conflicting with the S25
-    /// `is_running()`-filter arbitration); and the tempting NO-WIRE / cache-only
-    /// "inherited floor" (snapshot a departed source's low term, release on fresh
-    /// gossip corroboration) is UNSOUND via the *corroborate-then-drop race* — a
+    ///   The sequence-numbered floor round closes it: while the relay topology
+    ///   is engaged ([`Self::pessimistic_floor_relay_topology`]), every poll
+    ///   solicits each folded relay's CURRENT pessimistic queue-min floor over
+    ///   the dedicated `FloorRequest`/`FloorReply` channel
+    ///   ([`Self::pessimistic_floors`]), which surfaces a departed origin's low
+    ///   even after its endpoint leaves this fold. Until a reply for the current
+    ///   prune generation is fresh, [`Self::slot_round_incomplete`] holds the
+    ///   slot's contribution at the current confirmed frame, so the contested
+    ///   window is never confirmed and discarded; once the reply lands, the fold
+    ///   consumes the reorder-immune `min(last_frame, round_floor)` and
+    ///   convergence follows down. The policy is machine-verified
+    ///   (`AsyncAckSoundRoundSeq` in `specs/tla/DoubleFailureRelay.tla`, S55).
+    ///   The hold and release are pinned by
+    ///   `confirmed_frame_post_prune_unreplied_relay_holds_at_last_confirmed`
+    ///   and `remote_slot_confirmed_bound_consumes_relay_floor_round_after_prune`;
+    ///   the end-to-end partitioned-certificate choreography
+    ///   `p2p_n4_double_failure_certificate_partition_fails_closed` /
+    ///   `p2p_n5_double_failure_certificate_partition_fails_closed` in
+    ///   `tests/sessions/peer_drop.rs` guards the held frontier.
+    ///
+    /// The S41/S42/S44 arbitration still explains why the wire round (rather
+    /// than a cheaper alternative) is required: a dead-survivor TOMBSTONE fold
+    /// regresses liveness (a dead laggard's retained low term pins a still-live
+    /// slot forever — `Tombstone` cfg, conflicting with the S25
+    /// `is_running()`-filter arbitration), and the NO-WIRE / cache-only
+    /// "inherited floor" is UNSOUND via the *corroborate-then-drop race* — a
     /// peer corroborates connected-above-floor and then drops the slot low with
     /// its disconnect gossip still in flight, so we confirm+lock real inputs
-    /// above the freeze (`InheritedFloor` cfg). The obstruction is intrinsic: a
-    /// cache lags the corroborator's own in-flight drop, so PASSIVE gossip alone
-    /// cannot be the commitment — the fresh-ack *round* (not just a wire field)
-    /// is necessary. Byzantine peers are out of scope entirely.
+    /// above the freeze (`InheritedFloor` cfg). A cache lags the corroborator's
+    /// own in-flight drop, so PASSIVE gossip alone cannot be the commitment —
+    /// the fresh-ack *round* (not just a wire field) is necessary. Byzantine
+    /// peers are out of scope entirely.
     ///
     /// # `N == 2` identity (normal operation)
     ///
@@ -27831,9 +27839,11 @@ mod tests {
     // ========================================================================
     // Double-failure-relay fix (Session 55): the pessimistic queue-min
     // (`pessimistic_floors`, delivered in a `FloorReply`) + its gated consumption
-    // (the fresh round floor) in `remote_slot_confirmed_bound`. The integration
-    // guard `p2p_n4_double_failure_relay_dropped_slot_converges_across_survivors`
-    // exercises the end-to-end mesh path; these pin the mechanism in isolation.
+    // (the fresh round floor) in `remote_slot_confirmed_bound`. The end-to-end
+    // partitioned-certificate choreography
+    // `p2p_n4_double_failure_certificate_partition_fails_closed` /
+    // `p2p_n5_double_failure_certificate_partition_fails_closed` exercises the
+    // mesh path and holds the frontier; these pin the mechanism in isolation.
     // ========================================================================
 
     /// COMPUTATION: the per-slot pessimistic floor a relay REPORTS folds the `min`
