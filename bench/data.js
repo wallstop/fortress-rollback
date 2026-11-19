@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795113234715,
+  "lastUpdate": 1795118643949,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "ffe6c52d5ffd0208b18c41d77ac6ebedb4f7b1ea",
-          "message": "fix(examples): propagate request errors instead of warning (#397)\n\n## Summary\n\nCompletes the P1 safe-integration item. Canonical request loops now fail\nearly on missing rollback\nstate and checksum serialization errors instead of warning and\ncontinuing.\n\n### Changes\n\n- New public `try_handle_requests!`: each save/load/advance closure\nreturns a `Result`, and the\nfirst error aborts the request loop. `handle_requests!` remains the\ninfallible convenience form.\n- `examples/request_handling.rs` returns `Result<(),\nRequestHandlingError>` from both manual and\nmacro paths; missing `LoadGameState` state and `ChecksumError`\npropagate.\n- `examples/sync_test.rs` returns a structured internal error for a\nmissing rollback save.\n- `docs/getting-started.md` and `docs/user-guide.md` canonical loops\npropagate errors; macro\n  guidance uses `try_handle_requests!`.\n- New `tests/sessions/misuse.rs` counterexamples: missing saved state,\nchecksum serialization\n  failure, omitted local input (`MissingLocalInput`).\n- New macro regression test proves later requests are not processed\nafter an error.\n- Production checklist maps event starvation, variable-width input,\nconfig mismatch, and NAT\n  rebinding to their deterministic suites.\n- Changelog Added entry; public API census refreshed (2,750 symbols).\n- P1 safe-integration item removed from `PLAN.md`; two future items\nremain.\n\n## Testing\n\n- `cargo nextest run --features tokio,json`: 3,119 passed, 74 skipped, 0\nfailed\n- `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n-- -D warnings`: clean\n- `cargo run --example request_handling`: completes with checksums and\nno warn-and-continue path\n- `agent-preflight.py --auto-fix`, markdownlint, typos,\nchangelog/version/plan hooks: clean\n- `cargo update --workspace --dry-run`: 0 compatible updates",
-          "timestamp": "2026-11-11T06:17:46-08:00",
-          "tree_id": "47be49114991b630a2c5db0bbf782e19864d3ba8",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/ffe6c52d5ffd0208b18c41d77ac6ebedb4f7b1ea"
-        },
-        "date": 1794407121888,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 39547,
-            "range": "± 160",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 26773,
-            "range": "± 2149",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1091,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1246,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2773,
-            "range": "± 164",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3017,
             "range": "± 204",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "05998067b77cd45e1133cf5b354bb6e32208a22a",
+          "message": "test: pin cross-arch hot-join traces and wasm removal paths (#494)\n\n## Summary\n\nCloses two cross-platform coverage gaps without changing production\nbehavior.\n\n### N-peer hot-join trace on non-x86_64 targets\n\nThe `cross-arch-runtime` matrix compiles with `--features tokio,json`,\nso the feature-gated `ScheduleEvent::HotJoin` path never executed under\nqemu-aarch64 or on 32-bit i686. The new\n`hot_join_trace_matches_checked_in_cross_architecture_digest` pins the\ncanonical `clean_npeer_hot_join_schedule(4)` trace\n(`0xe493_827c_d108_44b0`, confirmed `[859, 860, 860, 860]`) and a\ndedicated CI step runs it in both cross-arch lanes.\n\n### Explicit graceful removal in the wasm runtimes\n\nThe browser and Godot probes exercised synchronization, replay, hashing,\ncompression, and tab suspension, but neither executed a coordinated drop\ncertificate or the live-target commit retransmission path.\n\n- `explicit_graceful_removal_certifies_in_browser`\n(wasm32-unknown-unknown) synchronizes a two-peer `ContinueWithout` pair,\nadvances four frames, removes the remote player, requires `PeerDropped`,\nrequires the target to apply its committed certificate and stop, and\nrequires the survivor to keep advancing on the frozen slot.\n- `run_removal_probe` performs the same flow under the Emscripten\nGDExtension build and reports `removal_certified: true`; both threaded\nand non-threaded Playwright rows assert it.\n\n## Validation\n\n- Extra nightly fleet seed sweep, 1,000 fresh seeds across all 8 shards:\n`8 passed` (363 s).\n- Pinned hot-join trace: x86_64 pass, i686 native pass, qemu-aarch64\npass (5.4 s).\n- Browser runtime in headless Chrome 158 (wasm32-unknown-unknown): `8\npassed; 0 failed`, including the new removal test.\n- `cargo nextest run --workspace --features tokio,json`: 3,334 passed,\n76 skipped.\n- `cargo nextest run --workspace --features tokio,json,hot-join`: 3,637\npassed, 77 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n-- -D warnings`: clean.\n- `cargo +nightly-2026-08-26 clippy --manifest-path\ntests/godot-emscripten/Cargo.toml --locked --all-targets --all-features\n-- -D warnings`: clean.\n- `cargo check -p wasm-browser-smoke --target wasm32-unknown-unknown\n--lib --tests`: pass.\n- `actionlint .github/workflows/ci-rust.yml`: pass.\n- `python3 scripts/ci/agent-preflight.py --auto-fix`: all checks passed.\n\n## Review audit\n\nRe-checked the review threads on every PR opened in the last five days\n(#414 through #492). The previously unresolved items from #474, #479,\n#481, #486, #489, and #491 are addressed in current `main`; #492 had\nzero review threads. No follow-up production change was required.\n\n## Follow-up\n\n#493 tracks the remaining wasm runtime gap: the N-peer hot-join\nhandshake/snapshot path is still native-only at runtime. It is listed in\n`PLAN.md` under Future with a concrete exit criterion.\n\nNo public API or user-observable behavior changes; no changelog entry.",
+          "timestamp": "2026-11-19T19:52:21Z",
+          "tree_id": "18549dd53d0b774973b8498df6743aca9ec6e0a8",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/05998067b77cd45e1133cf5b354bb6e32208a22a"
+        },
+        "date": 1795118642552,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39440,
+            "range": "± 411",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 23972,
+            "range": "± 758",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2771,
+            "range": "± 182",
             "unit": "ns/iter"
           }
         ]
