@@ -4126,6 +4126,22 @@ fn isolated_coordinator_removal_commits_under_long_disconnect_timeout() {
         ..RunOptions::default()
     };
 
+    // Prefix run: end after the two-second coordinated-drop deadline but well
+    // before the five-second socket timeout. A missing takeover would pass the
+    // full-length checks via the socket-timeout removal, so the prefix must
+    // already show the requested target certified.
+    let mut prefix_schedule = schedule.clone();
+    prefix_schedule.config.steps = 250;
+    let prefix = run_with_input::<StubInput>(&prefix_schedule, &options);
+    for survivor in [1_usize, 2, 3] {
+        assert!(
+            prefix.peer_dropped_order_by_peer[survivor].contains(&(N as u16 - 1)),
+            "majority survivor {survivor} must certify the requested removal before the five-second \
+             socket timeout: {:?}",
+            prefix.peer_dropped_order_by_peer
+        );
+    }
+
     let report = run_with_input::<StubInput>(&schedule, &options);
     let final_snapshot = report.trace_tail.last().expect("non-empty trace");
     for survivor in [1_usize, 2, 3] {
