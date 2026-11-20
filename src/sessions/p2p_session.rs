@@ -2775,6 +2775,8 @@ impl<T: Config> P2PSession<T> {
                 }
             }
         }
+        let operation_coordinator_heard =
+            self.coordinated_drop_coordinator_was_heard(report.operation);
         let relay_message = report.clone();
         // A participant that missed the initial commit burst keeps
         // retransmitting its Ready report. Every survivor may already have
@@ -2846,6 +2848,7 @@ impl<T: Config> P2PSession<T> {
                         let may_adopt = active.acting_coordinator.is_none()
                             && active.cut.is_none()
                             && !active.coordinator_heard
+                            && !operation_coordinator_heard
                             && Some(report.participant) == fallback
                             && active.participants.first().copied()
                                 != Some(active.local_participant)
@@ -2921,6 +2924,7 @@ impl<T: Config> P2PSession<T> {
                             Self::coordinated_drop_fallback_coordinator(&active.participants);
                         let may_adopt = active.acting_coordinator.is_none()
                             && !active.coordinator_heard
+                            && !operation_coordinator_heard
                             && Some(report.participant) == fallback
                             && active.participants.first().copied()
                                 != Some(active.local_participant)
@@ -23422,6 +23426,67 @@ mod tests {
             "a repeated request must keep the prepare's earlier failover grace"
         );
         assert!(session.coordinated_drop.fallback_prepare.is_none());
+    }
+
+    #[test]
+    fn coordinator_report_before_fallback_cut_blocks_adoption() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        // The coordinator is heard before the local attempt opens.
+        session
+            .coordinated_drop_accept_report_from(
+                DropReport {
+                    operation,
+                    participant: 0,
+                    stage: DropReportStage::Inventory,
+                    exposed_confirmed: Frame::new(0),
+                    cut: Frame::NULL,
+                    cut_digest: 0,
+                    receipts: Vec::new(),
+                },
+                Some(0),
+            )
+            .expect("coordinator report is recorded");
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("the local attempt opens");
+        let now = session.coordinated_drop_now();
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            active.started_at =
+                now - COORDINATED_DROP_FALLBACK_GRACE - web_time::Duration::from_millis(1);
+        }
+
+        let result = session.coordinated_drop_accept_report_from(
+            DropReport {
+                operation,
+                participant: 1,
+                stage: DropReportStage::Inventory,
+                exposed_confirmed: Frame::NULL,
+                cut: Frame::new(10),
+                cut_digest: 0,
+                receipts: Vec::new(),
+            },
+            Some(1),
+        );
+        assert!(
+            result.is_err(),
+            "a fallback cut must not be adopted after a coordinator report"
+        );
+        let active = session.coordinated_drop.active.as_ref().expect("active");
+        assert_eq!(active.acting_coordinator, None);
+        assert!(
+            active.cut.is_none(),
+            "the fallback cut must not be installed"
+        );
     }
 
     #[test]
