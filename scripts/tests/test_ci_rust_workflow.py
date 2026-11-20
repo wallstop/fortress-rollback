@@ -851,3 +851,16 @@ def test_cross_arch_runtime_executes_arm_and_32_bit_usize_targets() -> None:
         "the cross-architecture matrix must run nextest under each matrix "
         "target with the emulation-sized profile"
     )
+
+    deterministic = next(
+        step for step in job["steps"] if step.get("name") == "Run deterministic suite"
+    )
+    deterministic_commands = _shell_commands(deterministic)
+    assert len(deterministic_commands) == 1
+    deterministic_command = deterministic_commands[0]
+    assert _option_values(deterministic_command, "-p") == ["fortress-rollback"]
+    assert "--workspace" not in deterministic_command, (
+        "the default cross-arch suite must stay package-scoped: network-test-peer "
+        "always enables fortress-rollback/hot-join, so a workspace build unifies "
+        "the hot-join queues into this suite and exceeds the QEMU per-test budget"
+    )

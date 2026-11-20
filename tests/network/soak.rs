@@ -555,27 +555,48 @@ fn net_live_heap_bytes(stats: stats_alloc::Stats) -> i64 {
 
 #[test]
 fn stats_alloc_realloc_growth_is_already_embedded_in_allocated_bytes() {
-    // Pins stats_alloc's realloc contract end-to-end: one exact allocation
-    // followed by one exact growth must leave net_live_heap_bytes equal to
-    // the final outstanding size even though bytes_reallocated also carries
-    // the growth delta. If the deltas were not embedded -- or were added
-    // again here -- this would report 12,288 instead of 8,192.
+    // Pins stats_alloc's realloc contract end-to-end for one buffer: an exact
+    // initial allocation followed by one exact growth must leave
+    // net_live_heap_bytes equal to the final outstanding size even though
+    // bytes_reallocated also carries the growth delta. If the deltas were not
+    // embedded -- or were added again here -- this would report 3 MiB instead
+    // of 2 MiB.
+    //
+    // The region measures the process-global allocator, so the test harness
+    // may allocate a few dozen bytes on another thread while this test runs
+    // (observed under QEMU). Size the growth far above that noise and allow a
+    // small slack on the net-live assertion; the realloc counters are exact.
+    const INITIAL_BYTES: usize = 1_024 * 1_024;
+    const GROWN_BYTES: usize = 2 * INITIAL_BYTES;
+    const HARNESS_NOISE_BYTES: i64 = 64 * 1_024;
+
     let region = Region::new(SOAK_MEMORY);
     let mut buffer: Vec<u8> = Vec::new();
-    buffer.reserve_exact(4096);
-    buffer.reserve_exact(8192);
+    buffer.reserve_exact(INITIAL_BYTES);
+    buffer.reserve_exact(GROWN_BYTES);
     assert_eq!(buffer.len(), 0);
-    assert_eq!(buffer.capacity(), 8192);
+    assert_eq!(buffer.capacity(), GROWN_BYTES);
     let stats = region.change();
-    assert_eq!(stats.allocations, 1, "{stats:?}");
     assert_eq!(stats.reallocations, 1, "{stats:?}");
-    assert_eq!(stats.bytes_allocated, 8_192, "{stats:?}");
-    assert_eq!(stats.bytes_deallocated, 0, "{stats:?}");
-    assert_eq!(stats.bytes_reallocated, 4_096, "{stats:?}");
     assert_eq!(
-        net_live_heap_bytes(stats),
-        8_192,
-        "realloc growth must count exactly once toward outstanding bytes"
+        stats.bytes_reallocated,
+        isize::try_from(INITIAL_BYTES).unwrap_or(isize::MAX),
+        "{stats:?}"
+    );
+    assert!(
+        stats.bytes_allocated >= GROWN_BYTES,
+        "realloc growth must be embedded in bytes_allocated: {stats:?}"
+    );
+    let net_live = net_live_heap_bytes(stats);
+    let grown = i64::try_from(GROWN_BYTES).unwrap_or(i64::MAX);
+    assert!(
+        (net_live - grown).abs() <= HARNESS_NOISE_BYTES,
+        "realloc growth must count exactly once toward outstanding bytes: {stats:?}"
+    );
+    let doubled = grown + i64::try_from(INITIAL_BYTES).unwrap_or(i64::MAX);
+    assert!(
+        net_live < doubled - HARNESS_NOISE_BYTES,
+        "realloc growth must not be counted twice: {stats:?}"
     );
 }
 
