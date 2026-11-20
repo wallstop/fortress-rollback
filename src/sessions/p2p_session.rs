@@ -1525,9 +1525,8 @@ impl<T: Config> P2PSession<T> {
         }
         let now = self.coordinated_drop_now();
         if let Some(existing) = self.coordinated_drop.fallback_prepare.as_mut() {
-            if existing.prepare.operation == prepare.operation {
-                return;
-            }
+            // Equal operations also return here: a retransmission must keep the
+            // original first-seen deadline.
             if Self::coordinated_drop_operation_cmp(prepare.operation, existing.prepare.operation)
                 != std::cmp::Ordering::Less
             {
@@ -2581,7 +2580,9 @@ impl<T: Config> P2PSession<T> {
             // relay cannot open a conflicting attempt.
             self.coordinated_drop_send_prepare_direct(prepare, coordinator);
             return Ok(());
-        } else if source == Some(coordinator) || local_participant == coordinator {
+        } else {
+            // The preceding arm is the negation of this one: the prepare is
+            // either coordinator-sourced or this endpoint is the coordinator.
             self.coordinated_drop.fallback_prepare = None;
         }
 
@@ -4224,13 +4225,11 @@ impl<T: Config> P2PSession<T> {
     fn drive_coordinator_fallback(&mut self) {
         let now = self.coordinated_drop_now();
         if let Some(candidate) = self.coordinated_drop.fallback_prepare.clone() {
-            let quorum = Self::coordinated_drop_quorum(candidate.prepare.participants.len());
             let acting =
                 Self::coordinated_drop_fallback_coordinator(&candidate.prepare.participants);
             if !candidate.coordinator_heard
                 && !self.coordinated_drop_coordinator_was_heard(candidate.prepare.operation)
                 && candidate.prepare.participants.len() >= 3
-                && quorum < candidate.prepare.participants.len()
                 && acting.is_some()
                 && now.saturating_duration_since(candidate.first_seen_at)
                     >= COORDINATED_DROP_FALLBACK_GRACE
@@ -23499,6 +23498,599 @@ mod tests {
             active.cut.is_none(),
             "the fallback cut must not be installed"
         );
+    }
+
+    fn fallback_targets(handle: u16) -> Vec<DropTarget> {
+        vec![DropTarget {
+            handle,
+            generation: 0,
+        }]
+    }
+
+    fn fallback_operation(target: u16, sequence: u32) -> DropOperationId {
+        let targets = fallback_targets(target);
+        DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        }
+    }
+
+    fn fallback_prepare(target: u16) -> DropPrepare {
+        DropPrepare {
+            operation: fallback_operation(target, 1),
+            targets: fallback_targets(target),
+            participants: vec![0, 1, 2, 3],
+        }
+    }
+
+    fn age_active_grace(session: &mut P2PSession<TestConfig>) {
+        let now = session.coordinated_drop_now();
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            active.started_at =
+                now - COORDINATED_DROP_FALLBACK_GRACE - web_time::Duration::from_millis(1);
+        }
+    }
+
+    fn inventory_cut_report(operation: DropOperationId, participant: u16, cut: i32) -> DropReport {
+        DropReport {
+            operation,
+            participant,
+            stage: DropReportStage::Inventory,
+            exposed_confirmed: Frame::NULL,
+            cut: Frame::new(cut),
+            cut_digest: 0,
+            receipts: Vec::new(),
+        }
+    }
+
+    fn ready_report(
+        operation: DropOperationId,
+        participant: u16,
+        cut: i32,
+        digest: u64,
+    ) -> DropReport {
+        DropReport {
+            operation,
+            participant,
+            stage: DropReportStage::Ready,
+            exposed_confirmed: Frame::NULL,
+            cut: Frame::new(cut),
+            cut_digest: digest,
+            receipts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn coordinator_heard_journal_stays_bounded() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        for sequence in 0..7 {
+            session.coordinated_drop_record_coordinator_heard(DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence,
+                target_set_digest: 0,
+            });
+        }
+        assert_eq!(
+            session.coordinated_drop.coordinator_heard_operations.len(),
+            5
+        );
+        assert!(
+            !session.coordinated_drop_coordinator_was_heard(DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence: 0,
+                target_set_digest: 0,
+            })
+        );
+        assert!(
+            session.coordinated_drop_coordinator_was_heard(DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence: 6,
+                target_set_digest: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn fallback_prepare_keeps_the_lowest_operation() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        let low = fallback_prepare(4);
+        let mut high = low.clone();
+        high.operation.sequence = 2;
+        session.coordinated_drop_note_fallback_prepare(high.clone());
+        assert_eq!(
+            session
+                .coordinated_drop
+                .fallback_prepare
+                .as_ref()
+                .map(|candidate| candidate.prepare.operation),
+            Some(high.operation)
+        );
+        session.coordinated_drop_note_fallback_prepare(low.clone());
+        assert_eq!(
+            session
+                .coordinated_drop
+                .fallback_prepare
+                .as_ref()
+                .map(|candidate| candidate.prepare.operation),
+            Some(low.operation),
+            "a lower-sorting operation replaces the retained candidate"
+        );
+        session.coordinated_drop_note_fallback_prepare(high);
+        assert_eq!(
+            session
+                .coordinated_drop
+                .fallback_prepare
+                .as_ref()
+                .map(|candidate| candidate.prepare.operation),
+            Some(low.operation),
+            "a higher-sorting operation does not replace the retained candidate"
+        );
+    }
+
+    #[test]
+    fn fallback_promotion_waits_for_grace_and_skips_two_survivors() {
+        let mut session = five_player_majority_session(PlayerHandle::new(1));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        session.drive_coordinator_fallback();
+        assert!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .is_some_and(|active| active.acting_coordinator.is_none()),
+            "the fallback must not promote before the grace"
+        );
+        age_active_grace(&mut session);
+        session.drive_coordinator_fallback();
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.acting_coordinator),
+            Some(1),
+            "the lowest remaining participant promotes after the grace"
+        );
+
+        // A strict majority of two survivors cannot fail over without one of
+        // them, so promotion must stay disabled at quorum == participants.
+        let mut builder = SessionBuilder::<TestConfig>::new()
+            .with_num_players(3)
+            .expect("three players")
+            .add_player(PlayerType::Local, PlayerHandle::new(1))
+            .expect("local player");
+        for handle in [0_usize, 2] {
+            builder = builder
+                .add_player(
+                    PlayerType::Remote(test_addr(9500 + u16::try_from(handle).unwrap_or(0))),
+                    PlayerHandle::new(handle),
+                )
+                .expect("remote player");
+        }
+        let mut three = builder
+            .start_p2p_session(DummySocket)
+            .expect("three-player session");
+        for endpoint in three.player_reg.remotes.values_mut() {
+            endpoint.force_running_for_tests();
+        }
+        for status in three.local_connect_status.iter_mut().take(3) {
+            *status = ConnectionStatus {
+                disconnected: false,
+                last_frame: Frame::new(10),
+                epoch: 0,
+            };
+        }
+        three.state = SessionState::Running;
+        three
+            .begin_coordinated_drop(PlayerHandle::new(2))
+            .expect("two-survivor drop");
+        age_active_grace(&mut three);
+        three.drive_coordinator_fallback();
+        assert!(
+            three
+                .coordinated_drop
+                .active
+                .as_ref()
+                .is_some_and(|active| active.acting_coordinator.is_none()),
+            "a two-survivor quorum cannot promote a fallback"
+        );
+    }
+
+    #[test]
+    fn fallback_admission_rejects_invalid_acting_identity() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        let prepare = fallback_prepare(4);
+        assert_eq!(
+            session.coordinated_drop_accept_prepare_with_act(prepare.clone(), Some(3), Some(3)),
+            Err(DropAbortReason::GenerationChanged)
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_prepare_with_act(prepare.clone(), Some(3), Some(1)),
+            Err(DropAbortReason::GenerationChanged)
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_prepare_with_act(prepare.clone(), Some(0), Some(0)),
+            Err(DropAbortReason::GenerationChanged)
+        );
+        session
+            .coordinated_drop_accept_prepare_with_act(prepare, Some(1), Some(1))
+            .expect("the valid fallback identity admits");
+    }
+
+    #[test]
+    fn deterministic_coordinator_never_adopts_fallback() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut session);
+        let prepare = fallback_prepare(4);
+        session
+            .coordinated_drop_accept_prepare_with_act(prepare, Some(1), Some(1))
+            .expect("the coordinator ignores the fallback authority");
+        assert!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .is_some_and(|active| active.acting_coordinator.is_none()),
+            "the deterministic coordinator never yields its active attempt"
+        );
+    }
+
+    #[test]
+    fn prepare_from_non_fallback_does_not_adopt_acting() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut session);
+        session
+            .coordinated_drop_accept_prepare(fallback_prepare(4), Some(3))
+            .expect("a non-fallback prepare is a no-op for an active attempt");
+        assert!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .is_some_and(|active| active.acting_coordinator.is_none()),
+            "only the deterministic fallback may become acting coordinator"
+        );
+    }
+
+    #[test]
+    fn coordinator_report_for_another_operation_does_not_suppress_failover() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        let active_operation = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        let candidate = fallback_prepare(3);
+        session.coordinated_drop.fallback_prepare = Some(FallbackDropPrepare {
+            prepare: candidate.clone(),
+            first_seen_at: session.coordinated_drop_now(),
+            coordinator_heard: false,
+        });
+        let unrelated = fallback_operation(2, 2);
+        session
+            .coordinated_drop_accept_report_from(inventory_cut_report(unrelated, 0, 0), Some(0))
+            .expect("the unrelated report is ignored");
+        assert_eq!(
+            session
+                .coordinated_drop
+                .fallback_prepare
+                .as_ref()
+                .map(|pending| pending.prepare.operation),
+            Some(candidate.operation),
+            "an unrelated coordinator report must not clear the candidate"
+        );
+        assert!(
+            !session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .expect("active")
+                .coordinator_heard,
+            "an unrelated coordinator report must not mark the active attempt heard"
+        );
+        let _ = active_operation;
+    }
+
+    #[test]
+    fn matching_coordinator_report_marks_active_heard() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        let operation = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        session
+            .coordinated_drop_accept_report_from(inventory_cut_report(operation, 0, 0), Some(0))
+            .expect("the matching report is processed");
+        assert!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .expect("active")
+                .coordinator_heard,
+            "a matching coordinator report marks the active attempt heard"
+        );
+    }
+
+    #[test]
+    fn fallback_cut_adoption_requires_grace_fallback_sender_and_quiet_coordinator() {
+        // After the grace, the fallback sender is adopted.
+        let mut adopted = five_player_majority_session(PlayerHandle::new(2));
+        adopted
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut adopted);
+        let operation = adopted
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        adopted
+            .coordinated_drop_accept_report_from(inventory_cut_report(operation, 1, 10), Some(1))
+            .expect("the fallback cut is adopted");
+        let active = adopted.coordinated_drop.active.as_ref().expect("active");
+        assert_eq!(active.acting_coordinator, Some(1));
+        assert_eq!(active.cut, Some(Frame::new(10)));
+
+        // Before the grace the cut is rejected.
+        let mut early = five_player_majority_session(PlayerHandle::new(2));
+        early
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        let operation = early
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        assert_eq!(
+            early.coordinated_drop_accept_report_from(
+                inventory_cut_report(operation, 1, 10),
+                Some(1)
+            ),
+            Err(DropAbortReason::GenerationChanged)
+        );
+
+        // A non-fallback sender is rejected.
+        let mut stranger = five_player_majority_session(PlayerHandle::new(2));
+        stranger
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut stranger);
+        let operation = stranger
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        assert_eq!(
+            stranger.coordinated_drop_accept_report_from(
+                inventory_cut_report(operation, 3, 10),
+                Some(3)
+            ),
+            Err(DropAbortReason::GenerationChanged)
+        );
+
+        // The deterministic coordinator never adopts a fallback cut.
+        let mut coordinator = five_player_majority_session(PlayerHandle::new(0));
+        coordinator
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut coordinator);
+        let operation = coordinator
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        assert_eq!(
+            coordinator.coordinated_drop_accept_report_from(
+                inventory_cut_report(operation, 1, 10),
+                Some(1)
+            ),
+            Err(DropAbortReason::GenerationChanged)
+        );
+
+        // A heard coordinator blocks the fallback cut.
+        let mut heard = five_player_majority_session(PlayerHandle::new(2));
+        heard
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut heard);
+        let operation = heard
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        heard
+            .coordinated_drop_accept_report_from(inventory_cut_report(operation, 0, 0), Some(0))
+            .expect("coordinator report");
+        assert_eq!(
+            heard.coordinated_drop_accept_report_from(
+                inventory_cut_report(operation, 1, 10),
+                Some(1)
+            ),
+            Err(DropAbortReason::GenerationChanged)
+        );
+
+        // The active flag alone blocks the fallback cut, without a cut or
+        // journal entry.
+        let mut flagged = five_player_majority_session(PlayerHandle::new(2));
+        flagged
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut flagged);
+        let operation = flagged
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        flagged
+            .coordinated_drop
+            .active
+            .as_mut()
+            .expect("active")
+            .coordinator_heard = true;
+        assert_eq!(
+            flagged.coordinated_drop_accept_report_from(
+                inventory_cut_report(operation, 1, 10),
+                Some(1)
+            ),
+            Err(DropAbortReason::GenerationChanged)
+        );
+
+        // A recorded coordinator operation blocks the fallback cut even when
+        // the active attempt's flag was reset.
+        let mut recorded = five_player_majority_session(PlayerHandle::new(2));
+        recorded
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut recorded);
+        let operation = recorded
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        recorded.coordinated_drop_record_coordinator_heard(operation);
+        assert_eq!(
+            recorded.coordinated_drop_accept_report_from(
+                inventory_cut_report(operation, 1, 10),
+                Some(1)
+            ),
+            Err(DropAbortReason::GenerationChanged)
+        );
+    }
+
+    #[test]
+    fn fallback_ready_adoption_requires_grace_fallback_sender_and_quiet_coordinator() {
+        // After the grace, the fallback Ready is adopted.
+        let mut adopted = five_player_majority_session(PlayerHandle::new(2));
+        adopted
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut adopted);
+        let operation = adopted
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        adopted
+            .coordinated_drop_accept_report_from(ready_report(operation, 1, 10, 42), Some(1))
+            .expect("the fallback Ready is accepted");
+        let active = adopted.coordinated_drop.active.as_ref().expect("active");
+        assert_eq!(active.acting_coordinator, Some(1));
+        assert_eq!(active.cut, Some(Frame::new(10)));
+        assert_eq!(active.cut_digest, Some(42));
+
+        // Before the grace the Ready is ignored.
+        let mut early = five_player_majority_session(PlayerHandle::new(2));
+        early
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        let operation = early
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        early
+            .coordinated_drop_accept_report_from(ready_report(operation, 1, 10, 42), Some(1))
+            .expect("the early Ready is ignored");
+        assert!(early
+            .coordinated_drop
+            .active
+            .as_ref()
+            .is_some_and(|active| active.acting_coordinator.is_none() && active.cut.is_none()));
+
+        // A non-fallback sender, the coordinator itself, a heard coordinator,
+        // and a recorded coordinator operation are all ignored.
+        for (local, sender, heard) in [(2_u16, 3_u16, false), (0, 1, false), (2, 1, true)] {
+            let mut session = five_player_majority_session(PlayerHandle::new(usize::from(local)));
+            session
+                .begin_coordinated_drop(PlayerHandle::new(4))
+                .expect("begin drop");
+            age_active_grace(&mut session);
+            let operation = session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .expect("active")
+                .operation;
+            if heard {
+                session.coordinated_drop_record_coordinator_heard(operation);
+            }
+            session
+                .coordinated_drop_accept_report_from(
+                    ready_report(operation, sender, 10, 42),
+                    Some(sender),
+                )
+                .expect("the non-adopting Ready is ignored");
+            assert!(
+                session
+                    .coordinated_drop
+                    .active
+                    .as_ref()
+                    .is_some_and(
+                        |active| active.acting_coordinator.is_none() && active.cut.is_none()
+                    ),
+                "local={local} sender={sender} heard={heard} must not adopt"
+            );
+        }
+
+        // The active flag alone blocks the fallback Ready, without a cut or
+        // journal entry.
+        let mut flagged = five_player_majority_session(PlayerHandle::new(2));
+        flagged
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut flagged);
+        let operation = flagged
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        flagged
+            .coordinated_drop
+            .active
+            .as_mut()
+            .expect("active")
+            .coordinator_heard = true;
+        flagged
+            .coordinated_drop_accept_report_from(ready_report(operation, 1, 10, 42), Some(1))
+            .expect("the flagged Ready is ignored");
+        assert!(flagged
+            .coordinated_drop
+            .active
+            .as_ref()
+            .is_some_and(|active| active.acting_coordinator.is_none() && active.cut.is_none()));
     }
 
     #[test]
