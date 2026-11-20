@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795126596716,
+  "lastUpdate": 1795133602775,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "caa243eb42e7ace805f284fec2e9ef6e5b7fbec7",
-          "message": "test(simulation): make rare-state census non-vacuous (P2) (#404)\n\n## Description\n\nThe nightly sometimes-state census was stable but non-vacuous for only\n2/5 IDs. Ten consecutive hosted windows (2026-11-03 through 2026-11-12)\nreported the floor and nudge rows at stable rates (620-630 and 893-902\nper 1,000 schedules) while prediction-limit, sparse-earlier, and\ninput-ring stayed at zero. The default nightly session uses a 128-slot\nring, `max_prediction = 8`, `input_delay = 1`, and\n`SaveMode::EveryFrame`, so two of those rows were structurally\nunreachable. Issue #316 requires at least 3/5 eligible IDs, so the\noriginal organic presence ratchet is rejected.\n\nThis change makes the census non-vacuous without changing the fault mix\nfor the existing 96% of rows:\n\n- Add an optional, serde-defaulted `SimConfig::input_queue_length` axis\nand wire it into the normal and hot-join replacement builders.\n- Reserve 40/1,000 nightly rows for a two-slot ring with `max_prediction\n= 1` and `input_delay = 0`, using `seed % 100` residues that are\nhistorically `Clean`, never `Swarm`, and span 2- through 16-player\nmeshes.\n- Validate the effective ring (including the 128-slot default) against\n`input_delay + max_prediction`, reject every `SetInputDelay` that would\nexceed it, and require schema 20 for an explicit override.\n- Fix the shrink regression fixture that combined a 127-frame delay with\nan eight-frame prediction window, which session construction rightly\nrejects.\n- Update `PLAN.md` to the next P2 step: collect seven post-redesign\nwindows and add the presence ratchet if at least 3/5 IDs remain stable.\n\nA local 1,000-schedule window reports `prediction=40`, `floor=617`,\n`nudge=897`, `sparse-earlier=0`, `input-ring=40` over 5,000,000 steps\nand 9,025 peer sessions (4/5 eligible). The remaining sparse-earlier gap\nis tracked in #402; the ratchet scope is #403.\n\n## Type of Change\n\n- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [ ] ✨ New feature (non-breaking change that adds functionality)\n- [ ] 💥 Breaking change (fix or feature that would cause existing\nfunctionality to change)\n- [ ] 📚 Documentation (changes to documentation only)\n- [ ] ♻️ Refactor (code change that neither fixes a bug nor adds a\nfeature)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**:\n  - No `unwrap()` in production code\n  - No `expect()` in production code\n  - No `panic!()` or `todo!()`\n  - All fallible operations return `Result`\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [ ] I have added an entry to `CHANGELOG.md` for user-facing changes\n- [ ] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n-\n`nightly_rare_state_coverage_cell_is_present_and_exercises_ring_and_prediction_states`\nchecks the 40-row share, per-shard presence, 2- and 16-player edges,\nschedule shape, full-oracle pass, both state hits, and exact replay\nidentity.\n- Schedule validation tests cover ring bounds, retained-window overflow\non explicit and default rings, `SetInputDelay` overflow, schema floor,\nand legacy serialization omission.\n- Full nightly window locally: 8/8 shards, 1,000 schedules / 5,000,000\nsteps; targeted probes 4/4.\n\n**Manual testing performed:**\n\n- `cargo nextest run --features tokio,json --no-capture` — 3,124 passed,\n74 skipped.\n- `cargo nextest run --features hot-join,tokio,json --no-capture` —\n3,388 passed, 75 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings` — clean.\n- `cargo test --release --test simulation --features hot-join\n'simulation::fleet::'` — 76 passed.\n- `cargo test --release --test simulation --features hot-join\n'simulation::harness::schedule::tests::'` — 39 passed.\n- `python3 scripts/ci/agent-preflight.py --auto-fix`, plan hygiene,\nmarkdownlint, typos, link checks, and version sync — clean.\n\n## Related Issues\n\nRelates to #316 (original census contract), #402 (sparse-earlier organic\ngap), and #403 (seven-window ratchet scope).",
-          "timestamp": "2026-11-12T09:05:00-08:00",
-          "tree_id": "ba92c7150ff8cde3273ac2c8fde829241e648ba6",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/caa243eb42e7ace805f284fec2e9ef6e5b7fbec7"
-        },
-        "date": 1794503561493,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 39506,
-            "range": "± 688",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 25505,
-            "range": "± 726",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1091,
-            "range": "± 17",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1245,
-            "range": "± 4",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2952,
-            "range": "± 406",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2766,
             "range": "± 161",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "74741dcfdf6bff55825afd9a668b322ef38aaf2d",
+          "message": "test: pin isolated-coordinator CAP progress and correct closed residual docs (#498)\n\n## Description\n\nFollow-up to the coordinated-graceful-drop work from #458 through #496.\n\n- The `P2PSession::remote_slot_confirmed_bound` rustdoc still described\nthe N≥4 double-failure-relay residual as a deferred S41 fix and cited a\nconvergence test that no longer exists. The sequence-numbered\n`FloorRequest`/`FloorReply` round has closed the residual since S55, so\nthe docs now point at the current hold/release unit guards and the\npartitioned-certificate choreographies. The matching test/TLA-index\nnarratives are corrected too.\n- Adds the missing CAP matrix row\n`isolated_coordinator_removal_still_commits_on_reachable_majority`: N=5\n`3/1/1` partition, removal requested by a reachable survivor, the\ndeterministic coordinator isolated. With the default 2-second disconnect\ntimeout the coordinator endpoint times out inside the bounded attempt,\nthe majority reconciles membership, certifies both the requested target\nand the departed coordinator slot, keeps confirming, and does not\ndiverge.\n- The variant where a longer configured `disconnect_timeout` keeps the\nisolated coordinator \"Running\" past the two-second operation deadline\nstill fail-closes the reachable majority. That is a real liveness\nlimitation, now tracked in #497 with a deterministic reproduction and\ncandidate designs, and queued in `PLAN.md` with the TLA-modeled failover\nexit criterion.\n\nReview feedback on the last five days of PRs was triaged\nthread-by-thread against current `main`: all 48 unresolved threads were\nanswered with the current code/test evidence and resolved. No\nuncorrected production finding remained.\n\n## Type of Change\n\n- [x] 📚 Documentation (changes to documentation only)\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [ ] I have added an entry to `CHANGELOG.md` (test/docs only; no\nuser-facing change)\n- [ ] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n-\n`simulation::partition_sweep::isolated_coordinator_removal_still_commits_on_reachable_majority`\n(new)\n- Existing guards re-run:\n`p2p_n4_double_failure_certificate_partition_fails_closed`,\n`p2p_n5_double_failure_certificate_partition_fails_closed`,\n`confirmed_frame_post_prune_unreplied_relay_holds_at_last_confirmed`,\n`remote_slot_confirmed_bound_consumes_relay_floor_round_after_prune`\n- Full `cargo nextest run --workspace --all-targets --features\ntokio,json,hot-join,violation-census`: 3709 passed, 77 skipped\n(pre-change baseline)\n- `python3 scripts/ci/agent-preflight.py --full --auto-fix`: all checks\npassed\n\n**Manual testing performed:**\n\n- Deterministic probe of the 5-second `disconnect_timeout` variant\n(documented in #497): all four majority peers end `Synchronizing` with\n`report_count=3, ready_count=0` timeouts.\n\n## Related Issues\n\nRelates to #445, #473, #497.",
+          "timestamp": "2026-11-20T00:01:06Z",
+          "tree_id": "0f5d949b73d6a10a586bc65e25dd42cae36a63ff",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/74741dcfdf6bff55825afd9a668b322ef38aaf2d"
+        },
+        "date": 1795133601639,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 25588,
+            "range": "± 249",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 15846,
+            "range": "± 364",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 470,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 582,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 5337,
+            "range": "± 263",
             "unit": "ns/iter"
           }
         ]
