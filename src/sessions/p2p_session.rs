@@ -2580,7 +2580,9 @@ impl<T: Config> P2PSession<T> {
             // relay cannot open a conflicting attempt.
             self.coordinated_drop_send_prepare_direct(prepare, coordinator);
             return Ok(());
-        } else if source == Some(coordinator) || local_participant == coordinator {
+        } else {
+            // The preceding arm is the negation of this one: the prepare is
+            // either coordinator-sourced or this endpoint is the coordinator.
             self.coordinated_drop.fallback_prepare = None;
         }
 
