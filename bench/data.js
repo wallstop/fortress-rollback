@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795156071025,
+  "lastUpdate": 1795205304633,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "3db1458d59ae7fe18431e1192f16820bc10ec94a",
-          "message": "test(simulation): make violation-site exercise census exact (#413)\n\n## Summary\n\nCloses #411.\n\nThe nightly violation-site exercise census joined the content-addressed\nproduction\n`report_violation!` baseline with Cobertura line coverage and fleet\nshards. Coverage is only a\nconservative lower bound for macro invocations: LLVM can attribute an\nexpansion to surrounding\nlines, so genuinely executed assertions stayed in the unexercised set.\nThis change adds an exact\nruntime source and folds it into the nightly report.\n\n## Changes\n\n- **Opt-in `violation-census` feature.** `SpecViolation::new` calls a\ncold-path hook that records\neach new `file:line` location in a `parking_lot`-guarded `BTreeSet` (256\nlocations per process).\nWhen `FORTRESS_VIOLATION_CENSUS_DIR` is set, each new location rewrites\na bounded\n`observations-<pid>.json` snapshot with sorted unique entries, an\noptional workflow `run_id`, and\na `truncated` marker when the 256-location or 32 KiB limit drops\nentries. The hook compiles out\nof normal builds and Loom builds, never panics, and treats every\nfilesystem error as diagnostic.\n- **Exact observations job.** The nightly workflow runs the full suite\nwith\n`--features tokio,json,hot-join,violation-census` and uploads the\nbounded artifacts.\n- **Census join.** `violation_census.py` gained `--observations-dir`,\n`--expected-run-id`, and\n`--partial` with artifact-count, per-artifact size, per-artifact\nlocation, and processed-location\ncaps plus schema, run-id, process-id, filename, and order validation.\nAbsolute and Windows paths\nnormalize without promoting test-local `src/` labels. Test-only labels\ncount as unmatched;\nmalformed `src/` locations still fail loudly; unmatched source and\nignored entries are surfaced\n  in the report. Empty fleet or observation inputs are rejected.\n- **Failure behavior.** The census runs with `if: always()`, tolerant\nartifact downloads, and marks\nthe report `partial` when a producer job or either artifact download\nfails.\n- Documented the feature in `Cargo.toml`, the user guide, migration\nguide, wiki mirrors, and\nchangelog, and added it to the cargo-geiger and strict-clippy feature\ncensuses.\n- Fixed a pre-existing non-line `SpecViolation` location on the\nscoped-observer drop path so\n  diagnostic consumers and the census can parse it.\n- Updated the P2 plan item to the exact-source next step.\n\n## Evidence\n\n- Full suite with the hook: **3,399 passed, 76 skipped**; 297 artifacts,\n163 observed locations,\n  max 5 per artifact, 0 over 64 KiB, one run id.\n- Census against those observations: **109/268 exercised** (vs. 25/268\nfrom coverage alone),\n109 matched, 54 unmatched (41 under `src/` surfaced for review), 0\ntruncated.\n  `src/network/compression.rs` no longer appears in the unexercised set.\n- Downloaded the latest main coverage artifact (`fe0b935`, run\n43380911481): coverage-derived IDs\n`0`, exact-observation IDs `109`; the exact source is currently a strict\nsuperset.\n- `cargo clippy --workspace --all-targets --features\ntokio,json,violation-census -- -D warnings`:\nclean. `cargo check --no-default-features --features violation-census`:\nclean. Both census tests\n  pass, including snapshot replacement and byte-budget truncation.\n- `python3 -m pytest scripts/tests/ -q`: **2,227 passed**; `mypy`:\nclean.\n- `ruff check`/`ruff format --check`, `actionlint`,\n`check-plan-hygiene`,\n`check-changelog-unreleased`, `sync-version --check`, `check-links`,\n`check-doc-claims`,\n  `check-unbounded-alloc`, and `agent-preflight.py --auto-fix`: clean.\n\nNo public API change; the hook is feature-gated and absent from normal\nbuilds.",
-          "timestamp": "2026-11-13T19:59:28-08:00",
-          "tree_id": "5a95a3c37f2b3175435b146422036faa597e0b1b",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/3db1458d59ae7fe18431e1192f16820bc10ec94a"
-        },
-        "date": 1794629215530,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 39491,
-            "range": "± 393",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 25607,
-            "range": "± 154",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1091,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1245,
-            "range": "± 2",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2789,
-            "range": "± 170",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 3140,
             "range": "± 182",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "e9ca590788b03bb312bbc6c808a048dcf008c72f",
+          "message": "fix: bind coordinated-drop participants to the agreed membership epoch (#509)\n\n## Description\n\nCloses #504, #505, #506, and #507, and carries the three unresolved\nreview\nfindings from merged PR #508.\n\n### 1. Split-view participant sets (#504)\n\n`CoordinatedDropState` now derives the participant set from the **agreed\nmembership epoch** (every configured `Local`/`Remote` slot that has not\nbeen\ncertified dropped; reserved hot-join slots only while a\nserve/reactivation is\nin flight), independent of local endpoint reachability. A\nparticipant-set\ndigest is bound into `DropOperationId`. Two disjoint split-view groups\ncan no\nlonger each hold a strict-majority certificate for one target:\n\n- The epoch uses one canonical voter per endpoint (the lowest local\nhandle;\nthe lowest handle of each remote endpoint) and excludes\ncertified-dropped\n  slots plus slots whose serve/reactivation is still in flight.\n- `StateSnapshot` now carries the era's certified-dropped handle list,\nso a\nfresh N-peer joiner derives the same participant set as existing\nsurvivors;\n  the lifecycle commit clears the exclusion on every peer.\n- `begin_coordinated_drop`, deferred-prepare revalidation, and prepare\n  validation all use the same epoch-derived set.\n- The automatic-drop admission denominator keeps the target slot, so a\nsymmetric 2/2 split cannot become 2/3, and the target's endpoint never\ncounts\n  as one of its own survivors.\n- The removal queue records whether an intent came from the automatic\ntimeout\npath: an explicit request queued behind another operation is not gated\nby the\nautomatic survivor-majority pre-check, and an intent whose target\nalready\n  committed is dropped instead of minting a redundant operation.\n- Operation ordering and the closed-commit-cut watermark include the\n  participant digest.\n- Protocol version is now 4 (`wire_golden_v4.rs` is the active suite; v3\nis a\nrejection suite). The `DropOperationId` wire layout grows by eight\nbytes.\n- `CoordinatorSplitView.tla` models two disjoint groups: the shipped\nepoch\npolicy proves `AtMostOneCommittedCut` and liveness non-vacuously\n(GROUP_B 5\ncommits, GROUP_F 3 cannot); the local-view cfg is a manual demo-fail\n(not\n  auto-run).\n- Deterministic two-requester split-view CAP row plus\nparticipant-derivation\n  and identity-binding unit guards.\n\n**CAP trade-off:** in a `Running` session an explicit removal from a\nminority\nof a larger membership now fails closed; a two-player session keeps its\none-survivor certificate. `Synchronizing` sessions retain the documented\nlocal-reachable behavior because no confirmed history can fork yet. An\nexplicit\nremoval racing an in-flight join now excludes the joining slot and\ncommits a\none-survivor certificate; the N-peer survivor-drop battery pins that the\ncoordinator continues and the joiner activates.\n\n### 2. Peer artifacts no longer halt the receiver (#505)\n\nMalformed/stale prepares, malformed inventory/donor reports, conflicting\ncut/digest claims from non-authority participants, and malformed or\nduplicate\nbackfill chunks are discarded with a `NetworkProtocol` violation\ndiagnostic.\nA deterministic coordinator or acting fallback that conflicts with a\nlocked\ncut/digest still fails closed, as do local invariant/allocation\nfailures,\nconflicts with a locally committed certificate, and failed local\nbackfill\ninstalls. Backfill grid locks are installed only after all shape checks\npass.\n\n### 3. Per-advance performance (#507)\n\n- `UdpProtocol` carries a monotone `peer_connect_status_has_disconnect`\nlatch\nset by gossiped status merges, test seeds, and the joiner-bootstrap\nseeder.\n- `update_player_disconnects` skips the full-mesh fold while every local\nstatus\nis connected, no running non-reserved endpoint latched a disconnect, no\n  hot-join attempt is in flight, and no coordinated-drop state exists.\n- `on_input` classifies the piggybacked ack once and applies it through\nthe\nnew `apply_classified_ack_frame`; `apply_ack_frame` keeps the\nclassifying\nwrapper. A test-only counter pins one classification per accepted\npacket.\n\nBenchmark (`cargo bench --bench h16p_mesh -- 'H-16P advance_frame'` vs\nmain):\nN=8 32.6µs (-14.6%), N=16 155.4µs (-2.2%). The healthy early-out also\nstays\ndisabled while any non-reserved remote endpoint is stopped.\n\n### 4. Cross-platform runtime coverage (#506)\n\n- `codec::wire_codec_digest()` encodes/decodes every coordinated-drop\nbody\nshape plus a sync request. The replay fixture pins the digest; a native\nfixture test, the browser smoke test, and the Godot/Emscripten probe\nassert\nit. The Godot `MemorySocket` now transfers encoded bytes and decodes on\n  receive, so the codec runs under Emscripten.\n- The i686 and aarch64 cross-arch lanes now run the feature-gated\nhot-join\n  session suite in addition to the simulation trace.\n- A new `wasip1-replay-probe` binary runs machine-width parity,\ncompression\nparity, wire-codec digest, and the 4,096-frame replay under wasmtime in\nthe\n  `wasm32-wasip1` lane.\n- Platform notes in `docs/specs/determinism-model.md` corrected.\n\n### 5. PR #508 review follow-ups\n\n- A fallback cut announcement that matches an already-staged commit cut\nis\naccepted and adopts the acting role; a genuinely different cut from the\n  authority still fails closed.\n- The rough-loss row installs an explicit Rough `LinkPolicy` on every\ndirected\nlink (it previously used clean links because hand-built schedules do not\n  sample `config.noise`) and runs 1,800 steps; a 4.5s prefix asserts the\n  removal commits before the five-second socket timeout.\n- Former-joiner seam tests no longer use a quorum-less `remove_player`\nagainst\n  an unpolled coordinator endpoint.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n- [x] 💥 Breaking change (wire protocol v4 + explicit-removal CAP\nbehavior)\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n- [x] I have followed the zero-panic policy\n- [x] I have added tests that prove the fixes are effective\n- [x] `cargo fmt` and `cargo clippy --workspace --all-targets --features\ntokio,json,hot-join` are clean\n- [x] `cargo nextest run --workspace --all-targets --features\ntokio,json,hot-join,violation-census`: 3746 passed, 77 skipped\n- [x] Documentation and `CHANGELOG.md` updated (breaking wire/protocol +\nCAP behavior)\n- [x] `agent-preflight.py --full --auto-fix` passes\n- [x] Cross-target `cargo check` for wasm32-unknown-unknown / wasip1 /\nemscripten, i686, aarch64\n- [x] TLA `CoordinatorSplitView` passes; local-view cfg is an enforced\ndemo-fail\n\n## Related Issues\n\nCloses #504\nCloses #505\nCloses #506\nCloses #507\nAddresses the unresolved review threads on #508",
+          "timestamp": "2026-11-20T19:56:16Z",
+          "tree_id": "2e69a57f7aa46867e8746f640410ed69cbcf1616",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/e9ca590788b03bb312bbc6c808a048dcf008c72f"
+        },
+        "date": 1795205302979,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 38537,
+            "range": "± 320",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25890,
+            "range": "± 763",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1247,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2761,
+            "range": "± 160",
             "unit": "ns/iter"
           }
         ]
