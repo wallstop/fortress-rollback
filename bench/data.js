@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795133602775,
+  "lastUpdate": 1795140006625,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "ec9ac03fbe84acca7ea79bd727302ce4ef3a3c7a",
-          "message": "test(simulation): add seven-window organic presence ratchet (P2) (#405)\n\nRecord the sparse-earlier sometimes-state as targeted-only and add the checked-in seven-window evaluator required by #403. Validated against seven scheduled-main artifacts: pre-redesign baseline rejects at 2/3 required eligible IDs.",
-          "timestamp": "2026-11-12T10:27:50-08:00",
-          "tree_id": "ef3e9f081e05b8b2bfc628c35278597e9dc6ed6c",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/ec9ac03fbe84acca7ea79bd727302ce4ef3a3c7a"
-        },
-        "date": 1794508628185,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 39297,
-            "range": "± 1961",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 24613,
-            "range": "± 580",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1091,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1246,
-            "range": "± 6",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2789,
-            "range": "± 226",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 5337,
             "range": "± 263",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "444dee34b1cbc2c87841039627ee9e93793ed888",
+          "message": "fix: let a reachable majority fail over an isolated drop coordinator (#499)\n\n## Description\n\nFixes #497. A coordinated graceful removal could fail closed a reachable\nstrict majority when the deterministic coordinator was partitioned away\nand the configured `disconnect_timeout` exceeded the two-second\noperation deadline. The failure reproduced as `final_confirmed=[74,...]`\nwith every majority peer `Synchronizing` and `phase=Inventory,\nreport_count=3, ready_count=0`.\n\nThis adds a bounded coordinator failover:\n\n- A non-coordinator prepare is retained for a one-second grace (half the\ntwo-second operation deadline). Any drop-control message from the real\ncoordinator cancels the pending candidate.\n- After the grace, the deterministic lowest remaining participant may\nadmit the retained prepare as acting coordinator and drive the unchanged\nquorum/cut/backfill/ready/commit path.\n- The real coordinator never yields an active attempt. A later\nconflicting cut still fails closed.\n- The acting role only excuses the replaced coordinator from the\nmissing-witness rules; quorum, participant-set validation, cut digests,\nand ready transcripts are unchanged.\n- Requester adoption is handled both from the fallback prepare and from\na cut/Ready that arrives first.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly\n- [x] I have added an entry to `CHANGELOG.md` (`**Pre-existing:**`\nFixed)\n- [ ] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `isolated_coordinator_removal_commits_under_long_disconnect_timeout`:\nN=5 `3/1/1`, 5s timeout, both coordinator and target isolated. Majority\nstays `Running`, confirms past 400, certifies the requested target, no\ndivergence, exact replay.\n- `fallback_coordinator_takes_over_a_different_requesters_prepare`:\nrequester is not the fallback; peer 1 adopts peer 2's prepare.\n- `fallback_prepare_requires_a_participant_source_and_waits_for_grace`,\n`coordinator_prepare_cancels_a_pending_fallback`,\n`requester_adopts_the_fallback_after_the_grace`,\n`acting_coordinator_excuses_only_the_replaced_coordinator`.\n- Updated the N=4/N=5 double-failure guards to distinguish the pre-heal\nheld frontier from legitimate post-heal certification.\n- Red/green: the 5s row fails with the failover grace set to 10s\n(`majority survivor 1 must stay Running`), and passes with the 1s grace.\n\n**TLA+:**\n\n- `specs/tla/CoordinatorFailover.tla` + `CoordinatorFailover.cfg`:\ncoordinator partitioned, fallback liveness (`EventuallyFailoverCommits`)\n+ safety (`SafetyInvariant`).\n- `CoordinatorFailoverCompeting.tla` + cfg: real coordinator may choose\na competing cut; safety proves at most one cut commits.\n- Both run in `scripts/verification/verify-tla.sh`.\n\n**Manual/CI evidence:**\n\n- Full `cargo nextest run --workspace --all-targets --features\ntokio,json,hot-join,violation-census`: 3716 passed, 77 skipped.\n- `cargo clippy ... -D warnings`: clean.\n- Both rustdoc lanes pass.\n- Cross-platform `cargo check` for `wasm32-unknown-unknown`,\n`wasm32-wasip1`, `aarch64-unknown-linux-gnu`, and\n`i686-unknown-linux-gnu` with no-default-features and each isolated\nfeature (`sync-send`, `paranoid`, `json`, `hot-join`, `tokio`) passes.\n- `python3 scripts/ci/agent-preflight.py --full --auto-fix`: all checks\npassed.\n\n## Related Issues\n\nFixes #497.",
+          "timestamp": "2026-11-20T01:48:13Z",
+          "tree_id": "c770845b7311b6dbe6ea0bff58727094526ee84f",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/444dee34b1cbc2c87841039627ee9e93793ed888"
+        },
+        "date": 1795140005672,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 40367,
+            "range": "± 285",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25460,
+            "range": "± 101",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1244,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2768,
+            "range": "± 184",
             "unit": "ns/iter"
           }
         ]
