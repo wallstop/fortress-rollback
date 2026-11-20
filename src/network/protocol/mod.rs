@@ -344,6 +344,15 @@ where
     peer_addr: T::Address,
     remote_conn_id: u32,
     peer_connect_status: Vec<ConnectionStatus>,
+    /// Monotone latch: true once any cached peer view ever reported a slot
+    /// disconnected. Reset only when the endpoint is rebuilt (`rearm_for_rejoin`
+    /// constructs a fresh endpoint). The session's per-advance disconnect fold
+    /// uses it to skip the full-mesh scan while every view is healthy.
+    peer_connect_status_has_disconnect: bool,
+    /// Test-only: number of `classify_ack_frame` calls, proving `on_input`
+    /// classifies a piggybacked ack exactly once.
+    #[cfg(test)]
+    ack_classifications: std::sync::atomic::AtomicU64,
     /// Last per-packet connect-status snapshot shared with decoded `Event::Input`s.
     ///
     /// Every input frame decoded from one packet observes the same immutable
@@ -1001,6 +1010,9 @@ impl<T: Config> UdpProtocol<T> {
             peer_addr,
             remote_conn_id: 0,
             peer_connect_status,
+            peer_connect_status_has_disconnect: false,
+            #[cfg(test)]
+            ack_classifications: std::sync::atomic::AtomicU64::new(0),
             peer_connect_status_snapshot: None,
 
             // floor-round (double-failure-relay connected-relay reorder fix)
@@ -1380,7 +1392,20 @@ impl<T: Config> UdpProtocol<T> {
     ) {
         if let Some(slot) = self.peer_connect_status.get_mut(handle.as_usize()) {
             *slot = status;
+            if status.disconnected {
+                self.peer_connect_status_has_disconnect = true;
+            }
         }
+    }
+
+    /// Whether any cached peer view has ever reported a slot disconnected.
+    ///
+    /// Monotone for one endpoint era (the peer reports freeze frames, so a
+    /// disconnected observation never becomes stale enough to clear safely).
+    /// The session uses it as a healthy-path early-out for the full-mesh
+    /// disconnect fold; an endpoint rebuild resets it with a fresh cache.
+    pub(crate) fn peer_connect_status_has_disconnect(&self) -> bool {
+        self.peer_connect_status_has_disconnect
     }
 
     /// Test-only: seeds this endpoint's [`round_floor`](Self::round_floor) reply
@@ -1420,6 +1445,13 @@ impl<T: Config> UdpProtocol<T> {
 
     pub(crate) fn is_handling_message(&self, addr: &T::Address) -> bool {
         self.peer_addr == *addr
+    }
+
+    /// Test-only: number of ack classifications performed by this endpoint.
+    #[cfg(test)]
+    pub(crate) fn ack_classifications(&self) -> u64 {
+        self.ack_classifications
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn peer_connect_status(&self, handle: PlayerHandle) -> ConnectionStatus {
@@ -1767,6 +1799,16 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     fn classify_ack_frame(&self, ack_frame: Frame) -> AckDisposition {
+        #[cfg(test)]
+        {
+            let previous = self
+                .ack_classifications
+                .load(std::sync::atomic::Ordering::Relaxed);
+            self.ack_classifications.store(
+                previous.saturating_add(1),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         if ack_frame == Frame::NULL {
             return AckDisposition::Ignore;
         }
@@ -1815,7 +1857,17 @@ impl<T: Config> UdpProtocol<T> {
     }
 
     fn apply_ack_frame(&mut self, ack_frame: Frame) {
-        if self.classify_ack_frame(ack_frame) != AckDisposition::Apply {
+        let disposition = self.classify_ack_frame(ack_frame);
+        self.apply_classified_ack_frame(ack_frame, disposition);
+    }
+
+    /// Applies an ack whose disposition was already computed.
+    ///
+    /// `on_input` classifies the piggybacked ack once and may apply it on two
+    /// paths; re-classifying there would repeat the same O(1) checks and the
+    /// violation diagnostics for one packet (issue #507).
+    fn apply_classified_ack_frame(&mut self, ack_frame: Frame, disposition: AckDisposition) {
+        if disposition != AckDisposition::Apply {
             return;
         }
 
@@ -2792,6 +2844,7 @@ impl<T: Config> UdpProtocol<T> {
     fn merge_peer_connect_status(&mut self, body: &Input) {
         #[cfg(feature = "hot-join")]
         let floors = &self.reactivation_floor;
+        let mut has_disconnect = self.peer_connect_status_has_disconnect;
         for (slot, (local, remote)) in self
             .peer_connect_status
             .iter_mut()
@@ -2841,7 +2894,9 @@ impl<T: Config> UdpProtocol<T> {
                 // Both connected: monotone forward progress.
                 local.last_frame = std::cmp::max(local.last_frame, remote.last_frame);
             }
+            has_disconnect |= local.disconnected;
         }
+        self.peer_connect_status_has_disconnect = has_disconnect;
     }
 
     /// Returns the immutable snapshot shared by every input event decoded from
@@ -3023,7 +3078,7 @@ impl<T: Config> UdpProtocol<T> {
             }
 
             if ack_disposition == AckDisposition::Apply {
-                self.apply_ack_frame(body.ack_frame);
+                self.apply_classified_ack_frame(body.ack_frame, ack_disposition);
             }
 
             // The connect-status merge ran earlier (before the decode-skip paths)
@@ -3087,7 +3142,7 @@ impl<T: Config> UdpProtocol<T> {
             // contiguous high-water and consume the independent piggyback ACK;
             // neither operation depends on the missing input reference.
             if ack_disposition == AckDisposition::Apply {
-                self.apply_ack_frame(body.ack_frame);
+                self.apply_classified_ack_frame(body.ack_frame, ack_disposition);
             }
             self.send_input_ack();
         }
@@ -3768,6 +3823,9 @@ impl<T: Config> UdpProtocol<T> {
     ) {
         if let Some(slot) = self.peer_connect_status.get_mut(handle.as_usize()) {
             *slot = status;
+            if status.disconnected {
+                self.peer_connect_status_has_disconnect = true;
+            }
         }
     }
 
@@ -4865,6 +4923,7 @@ mod tests {
                     coordinator_generation: 0,
                     sequence: 1,
                     target_set_digest: 0,
+                    participant_set_digest: 0,
                 },
                 participant: 1,
                 stage,
@@ -4896,6 +4955,7 @@ mod tests {
                     coordinator_generation: 0,
                     sequence: 1,
                     target_set_digest: 0,
+                    participant_set_digest: 0,
                 },
                 participant: 1,
                 stage: DropReportStage::TargetAck,
@@ -6986,6 +7046,7 @@ mod tests {
             state_bytes: vec![0; IPV4_UDP_PAYLOAD_FRAGMENTATION_THRESHOLD],
             bridge_inputs: Vec::new(),
             bridge_statuses: Vec::new(),
+            certified_dropped: Vec::new(),
             checksum: None,
         };
 
@@ -8386,6 +8447,50 @@ mod tests {
         assert!(
             protocol.recv_inputs.contains_key(&Frame::new(0)),
             "First input (frame 0) should be accepted when last_recv_frame is NULL"
+        );
+    }
+
+    #[test]
+    fn on_input_classifies_the_piggybacked_ack_exactly_once() {
+        let mut protocol: UdpProtocol<TestConfig> =
+            create_protocol(vec![PlayerHandle::new(0)], 2, 1, 8);
+        protocol.synchronize().unwrap();
+        for _ in 0..TEST_NUM_SYNC_PACKETS {
+            let random = *protocol.sync_random_requests.iter().next().unwrap();
+            let header = MessageHeader::new(999);
+            protocol.on_sync_reply(header, matching_sync_reply(&protocol, random));
+        }
+        let zeroed_bytes = protocol
+            .recv_inputs
+            .get(&Frame::NULL)
+            .expect("NULL reference input")
+            .bytes
+            .clone();
+        let test_bytes =
+            crate::network::codec::encode(&TestInput { inp: 42 }).expect("test input encodes");
+        let encoded =
+            crate::network::compression::encode(&zeroed_bytes, std::iter::once(&test_bytes));
+        protocol.pending_output.push_back(InputBytes {
+            frame: Frame::new(0),
+            bytes: vec![0; zeroed_bytes.len()],
+        });
+        let input = Input {
+            start_frame: Frame::new(0),
+            ack_frame: Frame::new(0),
+            bytes: encoded,
+            peer_connect_status: vec![ConnectionStatus::default(); 2],
+        };
+        let before = protocol.ack_classifications();
+        protocol.on_input(&input);
+        assert_eq!(
+            protocol.ack_classifications().saturating_sub(before),
+            1,
+            "one accepted packet must classify its piggybacked ack once"
+        );
+        assert_eq!(
+            protocol.last_acked_input.frame,
+            Frame::new(0),
+            "the classified ack is still applied"
         );
     }
 
@@ -10075,6 +10180,7 @@ mod tests {
             coordinator_generation: 3,
             sequence: 4,
             target_set_digest: 5,
+            participant_set_digest: 0,
         };
         [
             DropControlMessage::Prepare(DropPrepare {
@@ -10399,6 +10505,7 @@ mod tests {
             state_bytes: vec![1, 2, 3, 4],
             bridge_inputs: Vec::new(),
             bridge_statuses: Vec::new(),
+            certified_dropped: Vec::new(),
             checksum: Some(0xABCD),
         };
 
@@ -10465,6 +10572,7 @@ mod tests {
             state_bytes: vec![9, 9, 9],
             bridge_inputs: Vec::new(),
             bridge_statuses: Vec::new(),
+            certified_dropped: Vec::new(),
             checksum: None,
         };
 
@@ -10505,6 +10613,7 @@ mod tests {
             state_bytes: vec![1],
             bridge_inputs: Vec::new(),
             bridge_statuses: Vec::new(),
+            certified_dropped: Vec::new(),
             checksum: None,
         });
         protocol.send_state_snapshot_ack(Frame::new(1));
@@ -10541,6 +10650,7 @@ mod tests {
                 state_bytes: vec![1, 2, 3, 4],
                 bridge_inputs: Vec::new(),
                 bridge_statuses: Vec::new(),
+                certified_dropped: Vec::new(),
                 checksum: Some(0xABCD),
             }),
         );

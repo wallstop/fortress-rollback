@@ -342,6 +342,12 @@ pub(crate) struct StateSnapshot {
     ///
     /// [`InputStatus`]: crate::InputStatus
     pub bridge_statuses: Vec<ConnectionStatus>,
+    /// Certified-dropped slots in the snapshot's membership era (sorted,
+    /// unique handles). A fresh joiner imports these exclusions so its
+    /// coordinated-drop participant set matches the existing survivors'
+    /// certified membership. A locally observed disconnected status is not
+    /// authoritative membership and is not used for this purpose.
+    pub certified_dropped: Vec<u16>,
     /// Optional checksum of the saved state at `frame`.
     pub checksum: Option<u128>,
 }
@@ -413,6 +419,14 @@ pub(crate) struct DropOperationId {
     pub sequence: u32,
     /// Digest of the canonical sorted [`DropTarget`] list.
     pub target_set_digest: u64,
+    /// Digest of the canonical sorted participant set.
+    ///
+    /// The participant set is the agreed membership epoch minus the targets.
+    /// Binding it into the identity keeps two split-view requesters that derive
+    /// different quorums for one target from minting the same operation, and
+    /// keeps artifacts from an earlier membership era from colliding with a
+    /// retry that names a different participant set.
+    pub participant_set_digest: u64,
 }
 
 /// One player slot owned by the endpoint being gracefully dropped.
@@ -654,6 +668,8 @@ impl MessageBody {
                     + snapshot.bridge_inputs.len()
                     + LEN_PREFIX
                     + snapshot.bridge_statuses.len() * ConnectionStatus::WIRE_LEN
+                    + LEN_PREFIX
+                    + snapshot.certified_dropped.len() * 2 // u16 handles
                     + 1 // Option tag
                     + snapshot.checksum.map_or(0, |_| 16) // Some(u128)
             },
@@ -664,14 +680,14 @@ impl MessageBody {
             Self::JoinAborted(_) => 8 + FRAME,       // handle: usize, frame
             Self::Goodbye(_) => 1,                   // reason: u8
             Self::DropPrepare(prepare) => {
-                16 // DropOperationId
+                24 // DropOperationId
                     + LEN_PREFIX
                     + prepare.targets.len() * 4 // DropTarget
                     + LEN_PREFIX
                     + prepare.participants.len() * 2 // u16 handles
             },
             Self::DropReport(report) => {
-                16 // DropOperationId
+                24 // DropOperationId
                     + 2 // participant
                     + 4 // DropReportStage discriminant
                     + FRAME // exposed_confirmed
@@ -681,7 +697,7 @@ impl MessageBody {
                     + report.receipts.len() * (2 + FRAME + FRAME)
             },
             Self::DropBackfill(backfill) => {
-                16 // DropOperationId
+                24 // DropOperationId
                     + 2 // donor
                     + FRAME // range_start
                     + 2 // chunk_index
@@ -691,8 +707,8 @@ impl MessageBody {
                     + LEN_PREFIX
                     + backfill.bytes.len()
             },
-            Self::DropCommit(_) => 16 + FRAME + 8,
-            Self::DropAbort(_) => 16 + 4, // operation + DropAbortReason discriminant
+            Self::DropCommit(_) => 24 + FRAME + 8,
+            Self::DropAbort(_) => 24 + 4, // operation + DropAbortReason discriminant
         };
 
         DISCRIMINANT + payload
@@ -1171,6 +1187,7 @@ mod tests {
                         bridge_inputs: vec![],
                         bridge_statuses: vec![],
                         checksum: None,
+                        certified_dropped: Vec::new(),
                     }),
                     MessageKind::StateSnapshot,
                 ),

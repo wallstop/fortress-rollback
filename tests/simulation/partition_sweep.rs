@@ -4298,11 +4298,26 @@ fn fallback_coordinator_takes_over_a_different_requesters_prepare() {
 #[test]
 fn fallback_coordinator_commits_through_rough_loss() {
     const N: usize = 5;
+    // Hand-built schedules do not sample `config.noise`, so the documented
+    // Rough profile (2-10% loss, 20-80ms delay, <=30ms jitter, <=3% dup, short
+    // bursts) must be installed on every directed survivor link explicitly.
+    const ROUGH: LinkPolicy = LinkPolicy {
+        drop_rate: 0.02,
+        dup_rate: 0.01,
+        base_delay: Duration::from_millis(20),
+        jitter: Duration::from_millis(5),
+        burst_rate: 0.001,
+        burst_len: 2,
+        retransmit_delay: Duration::ZERO,
+        gilbert_elliott: None,
+        fragmentation: None,
+        bandwidth: None,
+    };
     let mut initial_links = Vec::new();
     for from in 0..N {
         for to in 0..N {
             if from != to {
-                initial_links.push((from, to, LinkPolicy::clean()));
+                initial_links.push((from, to, ROUGH));
             }
         }
     }
@@ -4344,14 +4359,17 @@ fn fallback_coordinator_commits_through_rough_loss() {
         link_seed: SEED ^ 0x00ff_00ff_1234_5678,
         config: SimConfig {
             n_players: N,
-            steps: STEPS,
+            // A real Rough link set confirms at roughly one third of the clean
+            // cadence; the extra drain keeps the post-failover liveness
+            // threshold meaningful without weakening the loss profile.
+            steps: 1_800,
             noise: BackgroundNoise::Rough,
             disconnect_behavior: DropPolicy::ContinueWithout,
             ..SimConfig::smoke(N)
         },
         initial_links,
         events,
-        heal_at: STEPS,
+        heal_at: 1_800,
     };
     let options = RunOptions {
         disconnect_timeout: Some(Duration::from_secs(5)),
@@ -4397,10 +4415,156 @@ fn fallback_coordinator_commits_through_rough_loss() {
         "the lossy failover must not fork or diverge: {:?}",
         report.verdict.failures
     );
+    // The five-second socket timeout makes an isolated target reachable for
+    // its own removal; a full-run `PeerDropped` could otherwise arrive only
+    // after that timeout. A 4.5s prefix proves bounded fallback takeover.
+    let mut prefix = schedule.clone();
+    prefix.config.steps = CUT_STEP + 280;
+    prefix.heal_at = prefix.config.steps;
+    let prefix_report = run_with_input::<StubInput>(&prefix, &options);
+    for survivor in [1_usize, 2, 3] {
+        assert!(
+            prefix_report.peer_dropped_order_by_peer[survivor]
+                .contains(&(N as u16 - 1)),
+            "survivor {survivor} must certify the removal before the five-second socket timeout: {:?}",
+            prefix_report.peer_dropped_order_by_peer
+        );
+    }
     let replay = run_with_input::<StubInput>(&schedule, &options);
     assert_eq!(
         report.trace_hash, replay.trace_hash,
         "the lossy failover row must reproduce its exact trace"
+    );
+}
+
+/// CAP matrix row: two requesters in a split view must not each mint a
+/// strict-majority certificate for the same target (issue #504).
+///
+/// Peer 0 is the deterministic coordinator and is isolated from both
+/// requesting groups. Group B `{1,2,3}` and group F `{4,5,6}` are isolated from
+/// each other; peer 7 is isolated from both; the target 8 stays reachable to
+/// everyone. Every participant derives the same participant set from the
+/// agreed membership epoch (all of handles 0..=7), so each group holds only
+/// three of the eight members: neither can reach the five-member strict
+/// majority, and neither may certify a cut. Before the fix each group derived
+/// its own `{0,1,2,3}` / `{0,4,5,6}` view and could commit a different cut for
+/// the same operation identity.
+#[test]
+fn split_view_requesters_cannot_mint_disjoint_certificates() {
+    const N: usize = 9;
+    const TARGET: usize = 8;
+    const GROUPS: [&[usize]; 4] = [&[0], &[1, 2, 3], &[4, 5, 6], &[7]];
+    let mut initial_links = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let mut events = Vec::new();
+    for (index, group) in GROUPS.iter().enumerate() {
+        for other in &GROUPS[index + 1..] {
+            for &from in *group {
+                for &to in *other {
+                    events.push((
+                        CUT_STEP,
+                        ScheduleEvent::Block {
+                            from,
+                            to,
+                            blocked: true,
+                        },
+                    ));
+                    events.push((
+                        CUT_STEP,
+                        ScheduleEvent::Block {
+                            from: to,
+                            to: from,
+                            blocked: true,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    events.push((
+        CUT_STEP,
+        ScheduleEvent::GracefulRemove {
+            by: 1,
+            target: TARGET,
+        },
+    ));
+    events.push((
+        CUT_STEP,
+        ScheduleEvent::GracefulRemove {
+            by: 4,
+            target: TARGET,
+        },
+    ));
+    events.sort_by_key(|(step, _)| *step);
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x0504_0011_2233_4455,
+        config: SimConfig {
+            n_players: N,
+            steps: STEPS,
+            noise: BackgroundNoise::Clean,
+            disconnect_behavior: DropPolicy::ContinueWithout,
+            ..SimConfig::smoke(N)
+        },
+        initial_links,
+        events,
+        heal_at: STEPS,
+    };
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(5)),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    for (peer, dropped) in report.peer_dropped_order_by_peer.iter().enumerate() {
+        assert!(
+            !dropped.contains(&u16::try_from(TARGET).unwrap_or(u16::MAX)),
+            "peer {peer} must not observe a split-view certificate for target {TARGET}: \
+             {dropped:?}"
+        );
+    }
+    assert_eq!(
+        report
+            .peer_event_counts
+            .get(&EventKind::DesyncDetected)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "a split-view removal must not present a desync: {:?}",
+        report.peer_event_counts
+    );
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+                | OracleFailure::FreezeFrameDivergence { .. }
+        )),
+        "the split-view row must not fork or diverge: {:?}",
+        report.verdict.failures
+    );
+    let final_snapshot = report.trace_tail.last().expect("non-empty trace");
+    for requester in [1_usize, 4] {
+        assert_eq!(
+            final_snapshot.session_states.get(requester),
+            Some(&TraceSessionState::Synchronizing),
+            "split-view requester {requester} must fail closed rather than certify a minority cut"
+        );
+    }
+    let replay = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the split-view row must reproduce its exact trace"
     );
 }
 

@@ -44,6 +44,21 @@ pub const EXPECTED_REQUEST_DIGEST: u128 = 0xb195_35aa_fcc4_16fe_df10_56f7_8eca_c
 /// Emscripten lanes assert the same value.
 pub const EXPECTED_DIGEST: u128 = 0x56cc_01bd_3e28_a54e_0956_a2fc_e302_6d0b;
 
+/// Digest of the coordinated-drop wire codec, identical on every runtime
+/// target.
+///
+/// Pinned by the native fixture test and asserted by the browser
+/// `wasm32-unknown-unknown` and Godot `wasm32-unknown-emscripten` probes, so a
+/// width, layout, or endianness change in the message codec fails where the
+/// target actually executes it.
+pub const EXPECTED_WIRE_CODEC_DIGEST: u64 = 16_544_470_270_034_666_878;
+
+/// Returns whether this target's wire codec matches the pinned digest.
+#[must_use]
+pub fn check_wire_codec_digest() -> bool {
+    fortress_rollback::network::codec::wire_codec_digest() == EXPECTED_WIRE_CODEC_DIGEST
+}
+
 /// Fixed-width input used by the captured schedule.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

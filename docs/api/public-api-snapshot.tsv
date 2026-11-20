@@ -2,8 +2,8 @@
 # rustdoc-toolchain=nightly-2026-08-26
 # all-features-excludes=z3-verification,z3-verification-bundled (test/build-only)
 # generated-by=scripts/api/public_api_census.py
-# symbols=2765
-# textual-paths=2759
+# symbols=2766
+# textual-paths=2760
 path	kind	availability	documented	owner	usage-evidence	risk	disposition	alias-of	source
 fortress_rollback	module	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/lib.rs
 fortress_rollback::BlankPrediction	struct	no-default+all-features	yes	core	rustdoc-contract	supported-public-contract	keep-supported	-	src/input_queue/prediction.rs
@@ -1612,6 +1612,7 @@ fortress_rollback::network::codec::encode	function	no-default+all-features	no	tr
 fortress_rollback::network::codec::encode_append	function	no-default+all-features	no	transport	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/network/codec.rs
 fortress_rollback::network::codec::encode_framed	function	no-default+all-features	no	transport	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/network/codec.rs
 fortress_rollback::network::codec::encode_into	function	no-default+all-features	no	transport	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/network/codec.rs
+fortress_rollback::network::codec::wire_codec_digest	function	no-default+all-features	no	transport	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/network/codec.rs
 fortress_rollback::network::compression	module	no-default+all-features	no	transport	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/network/compression.rs
 fortress_rollback::network::compression::CompressionError	enum	no-default+all-features	no	transport	rustdoc-contract	hidden-semver-surface	keep-compatibility	-	src/network/compression.rs
 fortress_rollback::network::compression::CompressionError::DeltaDecode	variant	no-default+all-features	no	transport	public-data-shape	hidden-semver-surface	keep-compatibility	-	src/network/compression.rs

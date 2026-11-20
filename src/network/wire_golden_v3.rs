@@ -124,6 +124,7 @@ fn operation() -> DropOperationId {
         coordinator_generation: 7,
         sequence: 0x1020_3040,
         target_set_digest: 0x0102_0304_0506_0708,
+        participant_set_digest: 0x1112_1314_1516_1718,
     }
 }
 
@@ -199,6 +200,7 @@ pub(super) fn fixtures() -> Vec<(&'static str, Message)> {
                 epoch: 9,
             }],
             checksum: Some(0x3132_3334_3536_3738_393A_3B3C_3D3E_3F40),
+            certified_dropped: Vec::new(),
         }),
         MessageBody::StateSnapshotAck(StateSnapshotAck {
             frame: Frame::new(40),
@@ -345,13 +347,47 @@ pub(super) fn expected(body: &MessageBody) -> &'static [u8] {
 }
 
 #[test]
-fn every_protocol_v3_variant_has_immutable_exact_bytes() {
-    super::assert_wire_golden_suite(WIRE_GOLDEN_VERSION, fixtures(), expected);
+fn every_protocol_v3_variant_is_rejected_after_the_v4_bump() {
+    const {
+        assert!(
+            crate::PROTOCOL_VERSION > WIRE_GOLDEN_VERSION,
+            "released v3 fixtures become a rejection suite after a version bump"
+        );
+    }
+    for (variant, message) in fixtures() {
+        let expected_bytes = expected(&message.body);
+        // Every drop body gained the participant-set digest in v4, so the frozen
+        // v3 body can no longer decode under the current generic struct. The
+        // version gate must still reject it before body decoding.
+        if !matches!(
+            &message.body,
+            MessageBody::DropPrepare(_)
+                | MessageBody::DropReport(_)
+                | MessageBody::DropBackfill(_)
+                | MessageBody::DropCommit(_)
+                | MessageBody::DropAbort(_)
+                | MessageBody::StateSnapshot(_)
+        ) {
+            let generic: Message =
+                super::decode_value(expected_bytes).expect("fixture must generically decode");
+            assert_eq!(
+                generic.body, message.body,
+                "generic body decode for {variant}"
+            );
+            assert_eq!(generic.header.protocol_version, WIRE_GOLDEN_VERSION);
+        }
+        let error =
+            super::decode_message(expected_bytes).expect_err("released v3 packet must reject");
+        assert!(
+            error.to_string().contains("unsupported protocol version 3"),
+            "v3 rejection for {variant}: {error}"
+        );
+    }
 }
 
 #[cfg(not(feature = "hot-join"))]
 #[test]
-fn hot_join_v3_goldens_are_recognized_when_feature_is_disabled() {
+fn hot_join_v3_goldens_reject_at_the_version_before_feature_dispatch() {
     for (_, message) in fixtures().into_iter().filter(|(_, message)| {
         matches!(
             &message.body,
@@ -365,9 +401,7 @@ fn hot_join_v3_goldens_are_recognized_when_feature_is_disabled() {
         )
     }) {
         let error = super::decode_message(expected(&message.body))
-            .expect_err("disabled hot-join fixture must reject");
-        assert!(error
-            .to_string()
-            .contains("requires the disabled hot-join feature"));
+            .expect_err("released v3 hot-join fixture must reject");
+        assert!(error.to_string().contains("unsupported protocol version 3"));
     }
 }

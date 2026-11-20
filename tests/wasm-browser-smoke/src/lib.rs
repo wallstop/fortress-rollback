@@ -39,6 +39,14 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn coordinated_drop_wire_codec_matches_native_in_browser() {
+        assert!(
+            fortress_replay_fixture::check_wire_codec_digest(),
+            "the coordinated-drop wire codec digest differs in the browser"
+        );
+    }
+
+    #[wasm_bindgen_test]
     fn captured_native_replay_replays_identically_in_browser() {
         let evidence = fortress_replay_fixture::replay_fixture()
             .expect("checked-in captured schedule must replay in the browser");

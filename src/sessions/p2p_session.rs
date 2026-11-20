@@ -415,6 +415,10 @@ struct UnseenCommitEvidence {
 struct CoordinatedDropState<A> {
     active: Option<CoordinatedDropAttempt<A>>,
     queued: std::collections::BTreeSet<PlayerHandle>,
+    /// Queued handles whose request came from the automatic timeout path.
+    /// Explicit `remove_player` requests in the same queue must not be gated
+    /// by the automatic survivor-majority pre-check.
+    queued_automatic: std::collections::BTreeSet<PlayerHandle>,
     deferred_prepares: VecDeque<DeferredDropPrepare>,
     /// At most one non-coordinator prepare waiting for the failover grace.
     fallback_prepare: Option<FallbackDropPrepare>,
@@ -428,6 +432,11 @@ struct CoordinatedDropState<A> {
     /// successfully rejoins. Unlike spectator epochs, this advances exactly
     /// once per committed drop and once per committed reactivation.
     membership_generations: BTreeMap<PlayerHandle, u16>,
+    /// Slots certified dropped in the current era that have not reactivated.
+    /// Bounded by `num_players`. A fresh hot-join snapshot imports this set so
+    /// its membership epoch matches the existing survivors' (a locally
+    /// observed disconnect status is not authoritative membership).
+    certified_dropped: std::collections::BTreeSet<PlayerHandle>,
     closed: VecDeque<DropOperationId>,
     /// Recently rejected superseded prepares, bounded to one per player.
     rejected: VecDeque<RejectedDropOperation>,
@@ -443,10 +452,11 @@ struct CoordinatedDropState<A> {
     /// from another. Bounded by `num_players`.
     unseen_commits: VecDeque<UnseenCommitEvidence>,
     /// Highest cut already applied for one (coordinator, coordinator
-    /// generation, target-set digest) identity. Retained after the operation
-    /// leaves the bounded closed journal so a delayed duplicate cannot be
-    /// mistaken for a new removal certificate. Bounded by `num_players`.
-    closed_commit_cuts: VecDeque<((u16, u16, u64), Frame)>,
+    /// generation, target-set digest, participant-set digest) identity.
+    /// Retained after the operation leaves the bounded closed journal so a
+    /// delayed duplicate cannot be mistaken for a new removal certificate.
+    /// Bounded by `num_players`.
+    closed_commit_cuts: VecDeque<((u16, u16, u64, u64), Frame)>,
     /// Most recent applied certificates. A participant that missed the commit
     /// burst retries its Ready report after the active attempt is gone; a
     /// closed participant answers that retry with the stored certificate so
@@ -460,11 +470,13 @@ impl<A> Default for CoordinatedDropState<A> {
         Self {
             active: None,
             queued: std::collections::BTreeSet::new(),
+            queued_automatic: std::collections::BTreeSet::new(),
             deferred_prepares: VecDeque::new(),
             fallback_prepare: None,
             coordinator_heard_operations: VecDeque::new(),
             committed: BTreeMap::new(),
             membership_generations: BTreeMap::new(),
+            certified_dropped: std::collections::BTreeSet::new(),
             closed: VecDeque::new(),
             rejected: VecDeque::new(),
             halted_targets: std::collections::BTreeSet::new(),
@@ -1322,6 +1334,142 @@ impl<T: Config> P2PSession<T> {
         hasher.finish()
     }
 
+    fn coordinated_drop_participant_digest(participants: &[u16]) -> u64 {
+        let mut hasher = crate::hash::DeterministicHasher::new();
+        for participant in participants {
+            hasher.write(&participant.to_le_bytes());
+        }
+        hasher.finish()
+    }
+
+    /// Certified-dropped handles in the wire form carried by a hot-join
+    /// snapshot. Bounded by `num_players`.
+    #[cfg(feature = "hot-join")]
+    fn certified_dropped_wire(&self) -> Vec<u16> {
+        // alloc-bound: the exclusion set is bounded by `num_players`.
+        self.coordinated_drop
+            .certified_dropped
+            .iter()
+            .filter_map(|handle| u16::try_from(handle.as_usize()).ok())
+            .collect()
+    }
+
+    /// The agreed membership epoch for coordinated drops.
+    ///
+    /// The epoch is the configured roster reduced to one canonical voter per
+    /// endpoint (the lowest local handle and the lowest handle of each remote
+    /// endpoint), minus certified-dropped slots. Connectivity is deliberately
+    /// **not** consulted: a merely unreachable slot keeps the denominator
+    /// fixed, so two views cannot derive different quorums after a partition
+    /// (issue #504). Reachability only decides whether the operation can reach
+    /// quorum in time; it never changes the participant set. The certified
+    /// exclusion is a shared fact: it travels in the hot-join snapshot and is
+    /// cleared by the lifecycle commit on every peer. Local serve/pending
+    /// state is never consulted here.
+    fn coordinated_drop_membership_epoch(&self) -> Vec<u16> {
+        // alloc-bound: at most one entry per configured player slot.
+        let mut epoch = Vec::new();
+        // One canonical local participant, matching the report identity used by
+        // every drop message. A multi-handle local endpoint reports once.
+        if let Some(local_participant) = self
+            .player_reg
+            .local_player_handles_iter()
+            .filter_map(|handle| u16::try_from(handle.as_usize()).ok())
+            .min()
+        {
+            epoch.push(local_participant);
+        }
+        // One representative (the lowest handle) per remote endpoint. Report
+        // identities are endpoint-scoped, so counting every handle would create
+        // voters that can never report and make quorum unreachable (PR #508
+        // review).
+        for endpoint in self.player_reg.remotes.values() {
+            // A certified-dropped slot is not part of the era.
+            if endpoint
+                .handles()
+                .iter()
+                .any(|handle| self.coordinated_drop.certified_dropped.contains(handle))
+            {
+                continue;
+            }
+            if let Some(representative) = endpoint
+                .handles()
+                .iter()
+                .filter_map(|handle| u16::try_from(handle.as_usize()).ok())
+                .min()
+            {
+                epoch.push(representative);
+            }
+        }
+        epoch.sort_unstable();
+        epoch
+    }
+
+    /// Whether a hot-join serve/reactivation is in flight for `handle`.
+    #[cfg(feature = "hot-join")]
+    fn coordinated_drop_slot_join_in_flight(&self, handle: PlayerHandle) -> bool {
+        self.hot_join.joining.contains_key(&handle)
+            || self
+                .hot_join
+                .npeer
+                .as_ref()
+                .is_some_and(|serve| serve.handle == handle)
+            || self
+                .hot_join
+                .pending_reactivation
+                .as_ref()
+                .is_some_and(|pending| pending.handle == handle)
+    }
+
+    /// Canonical participant set for dropping `targets`.
+    ///
+    /// Once the session is `Running` this is the agreed membership epoch minus
+    /// every target handle: every endpoint computes the same set for the same
+    /// epoch, independent of its local endpoint reachability. Before the first
+    /// `Running` transition no confirmed history exists, so a one-survivor
+    /// certificate cannot fork anything; the documented
+    /// `remove_player`-during-`Synchronizing` behavior therefore keeps the
+    /// local reachable view.
+    fn coordinated_drop_participants(&self, targets: &[DropTarget]) -> Vec<u16> {
+        let mut participants = if self.state == SessionState::Running {
+            self.coordinated_drop_membership_epoch()
+        } else {
+            // alloc-bound: at most one entry per configured player slot.
+            let mut reachable = Vec::new();
+            if let Some(local_participant) = self
+                .player_reg
+                .local_player_handles_iter()
+                .filter_map(|handle| u16::try_from(handle.as_usize()).ok())
+                .min()
+            {
+                reachable.push(local_participant);
+            }
+            for endpoint in self.player_reg.remotes.values() {
+                if !endpoint.is_running() {
+                    continue;
+                }
+                if let Some(representative) = endpoint
+                    .handles()
+                    .iter()
+                    .filter_map(|handle| u16::try_from(handle.as_usize()).ok())
+                    .min()
+                {
+                    reachable.push(representative);
+                }
+            }
+            reachable
+        };
+        participants.retain(|participant| {
+            let handle = usize::from(*participant);
+            !targets
+                .iter()
+                .any(|target| usize::from(target.handle) == handle)
+        });
+        participants.sort_unstable();
+        participants.dedup();
+        participants
+    }
+
     /// Returns the generation used by D14's drop certificate for one slot.
     ///
     /// A successful rejoin can include survivor-local reopen/abort retries,
@@ -1389,6 +1537,10 @@ impl<T: Config> P2PSession<T> {
 
     #[cfg(feature = "hot-join")]
     fn record_committed_reactivation(&mut self, handle: PlayerHandle) {
+        // A reactivated slot is live again: discard any stale automatic-timeout
+        // intent queued for its previous generation.
+        self.coordinated_drop.queued.remove(&handle);
+        self.coordinated_drop.queued_automatic.remove(&handle);
         let generation = self
             .coordinated_drop
             .committed
@@ -1593,12 +1745,14 @@ impl<T: Config> P2PSession<T> {
             left.coordinator,
             left.coordinator_generation,
             left.sequence,
+            left.participant_set_digest,
         )
             .cmp(&(
                 right.target_set_digest,
                 right.coordinator,
                 right.coordinator_generation,
                 right.sequence,
+                right.participant_set_digest,
             ))
     }
 
@@ -2006,9 +2160,13 @@ impl<T: Config> P2PSession<T> {
     /// Whether another live endpoint can independently witness an automatic
     /// graceful-drop certificate for `target_addr`.
     ///
-    /// Explicit application removal deliberately supports a one-member survivor
-    /// certificate. An automatic timeout does not: without another witness,
-    /// isolated endpoints could each certify a different successor history.
+    /// Explicit application removal admits the operation with the agreed
+    /// membership epoch's participant set (targets excluded), so a two-player
+    /// session still has a one-member survivor certificate while a larger
+    /// session's isolated minority fails closed instead of certifying a
+    /// split-view cut. An automatic timeout additionally requires another live
+    /// witness: without one, isolated endpoints could each certify a different
+    /// successor history.
     fn coordinated_drop_has_independent_witness(&self, target_addr: &T::Address) -> bool {
         self.player_reg
             .remotes
@@ -2036,34 +2194,40 @@ impl<T: Config> P2PSession<T> {
     /// deliver `NetworkResumed`, but it could not have answered the
     /// certificate that is being judged now, so it must not count as a
     /// witness.
-    fn automatic_drop_survivor_quorum_met(&self) -> bool {
-        let mut epoch = 0_u32;
-        let mut survivors = 0_u32;
-        for handle_idx in 0..self.num_players {
-            let Some(status) = self.local_connect_status.get(handle_idx) else {
-                continue;
-            };
-            let handle = PlayerHandle::new(handle_idx);
-            let player_type = self.player_reg.handles.get(&handle);
-            if !matches!(player_type, Some(PlayerType::Local)) && status.disconnected {
-                continue;
-            }
-            epoch = epoch.saturating_add(1);
-            match player_type {
-                Some(PlayerType::Local) => {
-                    survivors = survivors.saturating_add(1);
-                },
-                Some(PlayerType::Remote(addr)) => {
-                    if self.player_reg.remotes.get(addr).is_some_and(|endpoint| {
-                        endpoint.is_running() && !endpoint.has_reported_disconnect()
-                    }) {
-                        survivors = survivors.saturating_add(1);
-                    }
-                },
-                Some(PlayerType::Spectator(_)) | None => {},
-            }
+    fn automatic_drop_survivor_quorum_met(&self, target: PlayerHandle) -> bool {
+        if u16::try_from(target.as_usize()).is_err() {
+            return false;
         }
-        survivors.saturating_mul(2) > epoch
+        // A remote endpoint can own several handles. The target endpoint's
+        // canonical voter may be a different handle than the target itself, so
+        // exclude the whole target address, not just the timed-out handle.
+        let target_addr = match self.player_reg.handles.get(&target) {
+            Some(PlayerType::Remote(addr)) => Some(addr),
+            Some(PlayerType::Local) | Some(PlayerType::Spectator(_)) | None => None,
+        };
+        // The target stays in the denominator: a symmetric 2/2 split must not
+        // become "2 of 3" and certify itself. Only a component holding a strict
+        // majority of the whole agreed membership may start an automatic drop.
+        let epoch = self.coordinated_drop_membership_epoch();
+        let survivors = epoch
+            .iter()
+            .filter(|participant| {
+                let handle = PlayerHandle::new(usize::from(**participant));
+                match self.player_reg.handles.get(&handle) {
+                    Some(PlayerType::Local) => true,
+                    Some(PlayerType::Remote(addr)) => {
+                        if Some(addr) == target_addr {
+                            return false;
+                        }
+                        self.player_reg.remotes.get(addr).is_some_and(|endpoint| {
+                            endpoint.is_running() && !endpoint.has_reported_disconnect()
+                        })
+                    },
+                    Some(PlayerType::Spectator(_)) | None => false,
+                }
+            })
+            .count();
+        survivors.saturating_mul(2) > epoch.len()
     }
 
     /// Strict-majority threshold over the shared participant set. At least one
@@ -2127,6 +2291,16 @@ impl<T: Config> P2PSession<T> {
     }
 
     fn begin_coordinated_drop(&mut self, player_handle: PlayerHandle) -> Result<(), FortressError> {
+        self.begin_coordinated_drop_with_origin(player_handle, false)
+    }
+
+    /// Starts a coordinated drop and records whether it came from the
+    /// automatic timeout path.
+    fn begin_coordinated_drop_with_origin(
+        &mut self,
+        player_handle: PlayerHandle,
+        automatic: bool,
+    ) -> Result<(), FortressError> {
         if let Some(active) = self.coordinated_drop.active.as_ref() {
             if active
                 .targets
@@ -2141,6 +2315,15 @@ impl<T: Config> P2PSession<T> {
                         "coordinated drop intent queue reached the player bound",
                     ),
                 });
+            }
+            if !automatic {
+                // An explicit request supersedes an earlier automatic intent
+                // for the same handle.
+                self.coordinated_drop
+                    .queued_automatic
+                    .remove(&player_handle);
+            } else if !self.coordinated_drop.queued.contains(&player_handle) {
+                self.coordinated_drop.queued_automatic.insert(player_handle);
             }
             self.coordinated_drop.queued.insert(player_handle);
             return Ok(());
@@ -2205,31 +2388,7 @@ impl<T: Config> P2PSession<T> {
                     "coordinated drop requires a local participant handle",
                 ),
             })?;
-        let mut participants = Vec::new();
-        participants
-            .try_reserve_exact(self.player_reg.remotes.len().saturating_add(1))
-            .map_err(|_error| {
-                allocation_failed(
-                    "p2p.coordinated_drop.participants",
-                    self.player_reg.remotes.len().saturating_add(1),
-                )
-            })?;
-        participants.push(local_participant);
-        for (addr, endpoint) in &self.player_reg.remotes {
-            if *addr == target_addr || !endpoint.is_running() {
-                continue;
-            }
-            if let Some(representative) = endpoint
-                .handles()
-                .iter()
-                .filter_map(|handle| u16::try_from(handle.as_usize()).ok())
-                .min()
-            {
-                participants.push(representative);
-            }
-        }
-        participants.sort_unstable();
-        participants.dedup();
+        let participants = self.coordinated_drop_participants(&targets);
 
         let coordinator =
             participants
@@ -2255,6 +2414,7 @@ impl<T: Config> P2PSession<T> {
             .local_coordinated_drop_generation(PlayerHandle::new(usize::from(coordinator)))
             .unwrap_or(0);
         let target_set_digest = Self::coordinated_drop_target_digest(&targets);
+        let participant_set_digest = Self::coordinated_drop_participant_digest(&participants);
         // A retry of the same target after an abort/supersede re-derives the
         // generation-local sequence, i.e. the identity of the CLOSED attempt.
         // Peers ignore a closed identity's `Prepare`, and a stale artifact from
@@ -2268,6 +2428,7 @@ impl<T: Config> P2PSession<T> {
                 coordinator_generation,
                 sequence,
                 target_set_digest,
+                participant_set_digest,
             };
             if !self
                 .coordinated_drop
@@ -2363,6 +2524,26 @@ impl<T: Config> P2PSession<T> {
         Ok(())
     }
 
+    /// Drops one peer-controlled coordinated-drop artifact.
+    ///
+    /// A syntactically valid but stale or conflicting artifact is a peer-scoped
+    /// problem. Safety never depends on accepting it: the strict-majority ready
+    /// quorum and the shared participant set decide the certificate, so a bad
+    /// message can only decline to contribute. Failing the whole session closed
+    /// on it would let one faulty or hostile peer halt a live match (issue
+    /// #505); only local invariant or allocation failures, or a cut/digest
+    /// conflict from the deterministic coordinator or acting fallback, take
+    /// that path.
+    fn coordinated_drop_discard_artifact(artifact: &str, reason: DropAbortReason) {
+        report_violation!(
+            ViolationSeverity::Warning,
+            ViolationKind::NetworkProtocol,
+            "Discarding peer-controlled coordinated-drop {} artifact: {:?}; the session keeps its local state",
+            artifact,
+            reason
+        );
+    }
+
     fn coordinated_drop_fail_closed(&mut self, reason: DropAbortReason, relay: bool) {
         let Some(attempt) = self.coordinated_drop.active.take() else {
             return;
@@ -2419,39 +2600,10 @@ impl<T: Config> P2PSession<T> {
         }) {
             return false;
         }
-
-        let Some(local_participant) = self
-            .player_reg
-            .local_player_handles_iter()
-            .filter_map(|handle| u16::try_from(handle.as_usize()).ok())
-            .min()
-        else {
-            return false;
-        };
-        let mut current = Vec::new();
-        if current
-            .try_reserve_exact(self.player_reg.remotes.len().saturating_add(1))
-            .is_err()
-        {
-            return false;
-        }
-        current.push(local_participant);
-        for (addr, endpoint) in &self.player_reg.remotes {
-            if addr == target_addr || !endpoint.is_running() {
-                continue;
-            }
-            if let Some(representative) = endpoint
-                .handles()
-                .iter()
-                .filter_map(|handle| u16::try_from(handle.as_usize()).ok())
-                .min()
-            {
-                current.push(representative);
-            }
-        }
-        current.sort_unstable();
-        current.dedup();
-        current == prepare.participants
+        // The participant set is the agreed membership epoch minus the target
+        // handles. It deliberately ignores which endpoints look reachable right
+        // now: a split view must not shrink the quorum denominator (issue #504).
+        self.coordinated_drop_participants(&prepare.targets) == prepare.participants
     }
 
     fn coordinated_drop_validate_prepare(&self, prepare: &DropPrepare) -> bool {
@@ -2461,6 +2613,8 @@ impl<T: Config> P2PSession<T> {
             || prepare.participants.len() > self.num_players
             || prepare.operation.target_set_digest
                 != Self::coordinated_drop_target_digest(&prepare.targets)
+            || prepare.operation.participant_set_digest
+                != Self::coordinated_drop_participant_digest(&prepare.participants)
         {
             return false;
         }
@@ -2564,7 +2718,13 @@ impl<T: Config> P2PSession<T> {
             return Ok(());
         }
         if !self.coordinated_drop_validate_prepare(&prepare) {
-            return Err(DropAbortReason::GenerationChanged);
+            // A peer-scoped artifact: a stale membership view, target
+            // generation, or participant digest. Ignoring it can only stop
+            // this endpoint from participating; it cannot fork history, and a
+            // single faulty peer must not be able to halt the session (issue
+            // #505).
+            Self::coordinated_drop_discard_artifact("prepare", DropAbortReason::GenerationChanged);
+            return Ok(());
         }
         if prepare.targets.iter().any(|target| {
             self.player_reg
@@ -2584,7 +2744,8 @@ impl<T: Config> P2PSession<T> {
                 .iter()
                 .any(|target| prepare.participants.contains(&target.handle))
         {
-            return Err(DropAbortReason::GenerationChanged);
+            Self::coordinated_drop_discard_artifact("prepare", DropAbortReason::GenerationChanged);
+            return Ok(());
         }
         // Only the deterministic coordinator admits an operation. Non-target
         // participants ignore a prepare that did not come from that coordinator
@@ -2592,8 +2753,10 @@ impl<T: Config> P2PSession<T> {
         // attempt before the coordinator has ordered it. Without this, lossy
         // delivery lets disjoint removals win on different subsets and a
         // superseded attempt can reach `Ready` before its abort arrives.
-        let coordinator = Self::coordinated_drop_coordinator(&prepare.participants)
-            .ok_or(DropAbortReason::GenerationChanged)?;
+        let Some(coordinator) = Self::coordinated_drop_coordinator(&prepare.participants) else {
+            Self::coordinated_drop_discard_artifact("prepare", DropAbortReason::GenerationChanged);
+            return Ok(());
+        };
         if let Some(acting) = acting {
             // The fallback is deterministic and may only replace the
             // deterministic coordinator; it never grants a participant
@@ -2607,7 +2770,11 @@ impl<T: Config> P2PSession<T> {
                     != Some(acting)
                 || source != Some(acting)
             {
-                return Err(DropAbortReason::GenerationChanged);
+                Self::coordinated_drop_discard_artifact(
+                    "acting prepare",
+                    DropAbortReason::GenerationChanged,
+                );
+                return Ok(());
             }
         } else if local_participant != coordinator && source != Some(coordinator) {
             // Retain the prepare for the failover silence window. The requester
@@ -2707,14 +2874,20 @@ impl<T: Config> P2PSession<T> {
             self.coordinated_drop_close_operation(superseded.operation);
         }
 
-        let first_target = prepare
-            .targets
-            .first()
-            .ok_or(DropAbortReason::GenerationChanged)?;
+        let Some(first_target) = prepare.targets.first() else {
+            Self::coordinated_drop_discard_artifact("prepare", DropAbortReason::GenerationChanged);
+            return Ok(());
+        };
         let target_handle = PlayerHandle::new(usize::from(first_target.handle));
         let target_addr = match self.player_reg.handles.get(&target_handle) {
             Some(PlayerType::Remote(addr)) => addr.clone(),
-            _ => return Err(DropAbortReason::GenerationChanged),
+            _ => {
+                Self::coordinated_drop_discard_artifact(
+                    "prepare",
+                    DropAbortReason::GenerationChanged,
+                );
+                return Ok(());
+            },
         };
         if prepare.targets.iter().any(|target| {
             !matches!(
@@ -2724,7 +2897,8 @@ impl<T: Config> P2PSession<T> {
                 Some(PlayerType::Remote(addr)) if *addr == target_addr
             )
         }) {
-            return Err(DropAbortReason::GenerationChanged);
+            Self::coordinated_drop_discard_artifact("prepare", DropAbortReason::GenerationChanged);
+            return Ok(());
         }
 
         let held_at = self.confirmed_frame();
@@ -2875,7 +3049,8 @@ impl<T: Config> P2PSession<T> {
         let coordinator_silent =
             Self::coordinated_drop_silent_since(active.coordinator_heard_at, now);
         if !active.participants.contains(&report.participant) {
-            return Err(DropAbortReason::GenerationChanged);
+            Self::coordinated_drop_discard_artifact("report", DropAbortReason::GenerationChanged);
+            return Ok(());
         }
         let targets = active.targets.clone();
         let mut relay = false;
@@ -2891,27 +3066,60 @@ impl<T: Config> P2PSession<T> {
                     && report.receipts.is_empty()
                     && report.exposed_confirmed.is_null();
                 if coordinator_cut_announcement {
-                    let mut coordinator = Self::coordinated_drop_effective_coordinator(active);
+                    let deterministic = active.participants.first().copied();
+                    let effective = Self::coordinated_drop_effective_coordinator(active);
+                    // A conflicting cut from either coordinator authority is a
+                    // genuine conflict, even when the other authority currently
+                    // owns the locked cut. Check it before any discard branch.
+                    if active.cut.is_some_and(|cut| cut != report.cut)
+                        && (Some(report.participant) == deterministic
+                            || Some(report.participant) == effective)
+                    {
+                        return Err(DropAbortReason::ConflictingHistory);
+                    }
+                    let mut coordinator = effective;
                     if Some(report.participant) != coordinator {
                         let fallback =
                             Self::coordinated_drop_fallback_coordinator(&active.participants);
+                        // A commit can overtake the cut announcement and stage
+                        // the certified cut before the fallback announces it.
+                        // Matching that already-staged cut is not a competing
+                        // cut; adopt the fallback role so the late announcement
+                        // is accepted instead of failing the session closed.
+                        let matching_staged_cut = active.cut == Some(report.cut);
                         let may_adopt = active.acting_coordinator.is_none()
-                            && active.cut.is_none()
-                            && coordinator_silent
                             && Some(report.participant) == fallback
                             && active.participants.first().copied()
                                 != Some(active.local_participant)
-                            && now.saturating_duration_since(active.started_at)
-                                >= COORDINATED_DROP_FALLBACK_GRACE;
+                            && (matching_staged_cut
+                                || (active.cut.is_none()
+                                    && coordinator_silent
+                                    && now.saturating_duration_since(active.started_at)
+                                        >= COORDINATED_DROP_FALLBACK_GRACE));
                         if may_adopt {
                             active.acting_coordinator = fallback;
                             coordinator = fallback;
                         } else {
-                            return Err(DropAbortReason::GenerationChanged);
+                            Self::coordinated_drop_discard_artifact(
+                                "report",
+                                DropAbortReason::GenerationChanged,
+                            );
+                            return Ok(());
                         }
                     }
                     if active.cut.is_some_and(|cut| cut != report.cut) {
-                        return Err(DropAbortReason::ConflictingHistory);
+                        // A real coordinator that comes back with a different
+                        // cut still fails closed: the two cuts can never both
+                        // be canonical. Any other participant is a peer
+                        // artifact and is discarded.
+                        if active.participants.first().copied() == Some(report.participant) {
+                            return Err(DropAbortReason::ConflictingHistory);
+                        }
+                        Self::coordinated_drop_discard_artifact(
+                            "report",
+                            DropAbortReason::ConflictingHistory,
+                        );
+                        return Ok(());
                     }
                     let first_cut = active.cut.is_none();
                     if first_cut {
@@ -2947,11 +3155,19 @@ impl<T: Config> P2PSession<T> {
                                     || exposed_beyond_receipt
                             })
                     {
-                        return Err(DropAbortReason::MissingHistory);
+                        Self::coordinated_drop_discard_artifact(
+                            "report",
+                            DropAbortReason::MissingHistory,
+                        );
+                        return Ok(());
                     }
                     if let Some(existing) = active.reports.get(&report.participant) {
                         if existing != &report {
-                            return Err(DropAbortReason::ConflictingHistory);
+                            Self::coordinated_drop_discard_artifact(
+                                "report",
+                                DropAbortReason::ConflictingHistory,
+                            );
+                            return Ok(());
                         }
                     } else {
                         active.reports.insert(report.participant, report);
@@ -2961,7 +3177,11 @@ impl<T: Config> P2PSession<T> {
             },
             DropReportStage::Ready => {
                 if !report.cut.is_valid() || !report.receipts.is_empty() {
-                    return Err(DropAbortReason::ConflictingHistory);
+                    Self::coordinated_drop_discard_artifact(
+                        "report",
+                        DropAbortReason::ConflictingHistory,
+                    );
+                    return Ok(());
                 }
                 let coordinator = Self::coordinated_drop_effective_coordinator(active);
                 // Only the effective coordinator may originate the cut. Other
@@ -2994,18 +3214,35 @@ impl<T: Config> P2PSession<T> {
                     active.phase = CoordinatedDropPhase::Backfill;
                     relay = true;
                 } else {
-                    if active.cut != Some(report.cut) {
-                        return Err(DropAbortReason::ConflictingHistory);
-                    }
-                    if active
-                        .cut_digest
-                        .is_some_and(|digest| digest != report.cut_digest)
+                    let conflicting_authority = Some(report.participant)
+                        == active.participants.first().copied()
+                        || Self::coordinated_drop_effective_coordinator(active)
+                            == Some(report.participant);
+                    if active.cut != Some(report.cut)
+                        || active
+                            .cut_digest
+                            .is_some_and(|digest| digest != report.cut_digest)
                     {
+                        // The deterministic coordinator or the acting
+                        // fallback disagreeing with the locked certificate is
+                        // a genuine cut conflict; a stray participant's claim
+                        // is a peer artifact.
+                        if !conflicting_authority {
+                            Self::coordinated_drop_discard_artifact(
+                                "report",
+                                DropAbortReason::ConflictingHistory,
+                            );
+                            return Ok(());
+                        }
                         return Err(DropAbortReason::ConflictingHistory);
                     }
                     if let Some(existing) = active.ready_transcripts.get(&report.participant) {
                         if *existing != (report.cut, report.cut_digest) {
-                            return Err(DropAbortReason::ConflictingHistory);
+                            Self::coordinated_drop_discard_artifact(
+                                "report",
+                                DropAbortReason::ConflictingHistory,
+                            );
+                            return Ok(());
                         }
                     } else {
                         active
@@ -3019,9 +3256,17 @@ impl<T: Config> P2PSession<T> {
             },
             DropReportStage::Committed => {
                 if !report.receipts.is_empty() {
-                    return Err(DropAbortReason::ConflictingHistory);
+                    Self::coordinated_drop_discard_artifact(
+                        "report",
+                        DropAbortReason::ConflictingHistory,
+                    );
+                    return Ok(());
                 }
-                relay |= Self::coordinated_drop_stage_commit_locked(
+                let conflicting_authority = Some(report.participant)
+                    == active.participants.first().copied()
+                    || Self::coordinated_drop_effective_coordinator(active)
+                        == Some(report.participant);
+                match Self::coordinated_drop_stage_commit_locked(
                     active,
                     DropCommit {
                         operation: report.operation,
@@ -3029,7 +3274,14 @@ impl<T: Config> P2PSession<T> {
                         cut_digest: report.cut_digest,
                     },
                     Some(report.participant),
-                )?;
+                ) {
+                    Ok(relayed) => relay |= relayed,
+                    Err(reason) if conflicting_authority => return Err(reason),
+                    Err(reason) => {
+                        Self::coordinated_drop_discard_artifact("committed report", reason);
+                        return Ok(());
+                    },
+                }
                 relay |= active.committed_acks.insert(report.participant);
             },
             DropReportStage::TargetAck => {
@@ -3048,19 +3300,45 @@ impl<T: Config> P2PSession<T> {
                     return Ok(());
                 };
                 if !report.receipts.is_empty() || !report.exposed_confirmed.is_null() {
-                    return Err(DropAbortReason::ConflictingHistory);
+                    Self::coordinated_drop_discard_artifact(
+                        "report",
+                        DropAbortReason::ConflictingHistory,
+                    );
+                    return Ok(());
                 }
                 if !report.cut.is_valid() || report.cut > cut {
-                    return Err(DropAbortReason::ConflictingHistory);
+                    Self::coordinated_drop_discard_artifact(
+                        "report",
+                        DropAbortReason::ConflictingHistory,
+                    );
+                    return Ok(());
                 }
                 if active
                     .cut_digest
                     .is_some_and(|digest| digest != report.cut_digest)
                 {
-                    return Err(DropAbortReason::ConflictingHistory);
+                    Self::coordinated_drop_discard_artifact(
+                        "report",
+                        DropAbortReason::ConflictingHistory,
+                    );
+                    return Ok(());
                 }
-                let plan =
-                    Self::coordinated_drop_backfill_plan(active.targets.len(), report.cut, cut)?;
+                let donor_authority = Some(report.participant)
+                    == active.participants.first().copied()
+                    || Self::coordinated_drop_effective_coordinator(active)
+                        == Some(report.participant);
+                let plan = match Self::coordinated_drop_backfill_plan(
+                    active.targets.len(),
+                    report.cut,
+                    cut,
+                ) {
+                    Ok(plan) => plan,
+                    Err(reason) if donor_authority => return Err(reason),
+                    Err(reason) => {
+                        Self::coordinated_drop_discard_artifact("report", reason);
+                        return Ok(());
+                    },
+                };
                 let announcement = DonorAnnouncement {
                     start_frame: report.cut,
                     chunk_count: plan.chunk_count,
@@ -3072,7 +3350,11 @@ impl<T: Config> P2PSession<T> {
                         // announced range; a changed digest is real
                         // equivocation.
                         if report.cut_digest != existing.cut_digest {
-                            return Err(DropAbortReason::ConflictingHistory);
+                            Self::coordinated_drop_discard_artifact(
+                                "report",
+                                DropAbortReason::ConflictingHistory,
+                            );
+                            return Ok(());
                         }
                         if report.cut < existing.start_frame {
                             // A delayed inventory report lowered the required
@@ -3392,16 +3674,6 @@ impl<T: Config> P2PSession<T> {
         let Some(start) = required_start else {
             return Ok(());
         };
-        // A delayed inventory report can lower the required start below the
-        // grid this receiver already locked. Discard the buffered chunks and
-        // locks so the donor's retry from the new start can proceed; installed
-        // values stay subject to the normal overlap check.
-        if active
-            .expected_backfill_start
-            .is_some_and(|locked| locked > start)
-        {
-            Self::reset_coordinated_drop_backfill_grid(active);
-        }
         // Every chunk names the donor that produced it and the start of that
         // donor's whole range. Attribution therefore survives relaying and does
         // not depend on the chunk layout alone: two donors can share a layout
@@ -3439,6 +3711,80 @@ impl<T: Config> P2PSession<T> {
             // Only an operation participant can donate its history.
             return Ok(());
         }
+
+        // Validate the whole chunk BEFORE any grid reset or donor change. A
+        // malformed chunk from the wrong donor must not erase chunks this
+        // receiver already accepted from a valid donor (PR #508 review).
+        if backfill.chunk_count == 0 || plan.chunk_count != backfill.chunk_count {
+            Self::coordinated_drop_discard_artifact(
+                "backfill",
+                DropAbortReason::ConflictingHistory,
+            );
+            return Ok(());
+        }
+        if backfill.frame_count == 0 || backfill.start_frame > cut {
+            Self::coordinated_drop_discard_artifact(
+                "backfill",
+                DropAbortReason::ConflictingHistory,
+            );
+            return Ok(());
+        }
+        let expected_frames = std::cmp::min(
+            plan.frames_per_chunk,
+            plan.frame_count.saturating_sub(chunk_offset),
+        );
+        if usize::from(backfill.frame_count) != expected_frames {
+            Self::coordinated_drop_discard_artifact(
+                "backfill",
+                DropAbortReason::ConflictingHistory,
+            );
+            return Ok(());
+        }
+        let input_width = crate::network::codec::encoded_len(&T::Input::default())
+            .map_err(|_error| DropAbortReason::ResourceLimit)?;
+        let frame_width = input_width
+            .checked_mul(active.targets.len())
+            .filter(|width| *width > 0)
+            .ok_or(DropAbortReason::ResourceLimit)?;
+        let expected_bytes = frame_width
+            .checked_mul(usize::from(backfill.frame_count))
+            .ok_or(DropAbortReason::ResourceLimit)?;
+        if backfill.bytes.len() != expected_bytes {
+            Self::coordinated_drop_discard_artifact(
+                "backfill",
+                DropAbortReason::ConflictingHistory,
+            );
+            return Ok(());
+        }
+        for frame_offset in 0..usize::from(backfill.frame_count) {
+            for target_index in 0..active.targets.len() {
+                let offset = frame_offset
+                    .checked_mul(frame_width)
+                    .and_then(|base| {
+                        target_index
+                            .checked_mul(input_width)
+                            .and_then(|target_offset| base.checked_add(target_offset))
+                    })
+                    .ok_or(DropAbortReason::ResourceLimit)?;
+                let end = offset
+                    .checked_add(input_width)
+                    .ok_or(DropAbortReason::ResourceLimit)?;
+                let Some(encoded) = backfill.bytes.get(offset..end) else {
+                    Self::coordinated_drop_discard_artifact(
+                        "backfill",
+                        DropAbortReason::ConflictingHistory,
+                    );
+                    return Ok(());
+                };
+                if let Err(reason) =
+                    decode_coordinated_drop_backfill_input::<T::Input>(encoded, input_width)
+                {
+                    Self::coordinated_drop_discard_artifact("backfill", reason);
+                    return Ok(());
+                }
+            }
+        }
+
         // The donor must be the deterministic choice: the inventory-selected
         // donor when it is still reachable, otherwise the lowest participant
         // that announced a range covering the required start. An inventory
@@ -3508,67 +3854,41 @@ impl<T: Config> P2PSession<T> {
             // retirement).
             return Ok(());
         };
-        // Inventory selection takes precedence over a current-history
-        // announcement. A late inventory report can therefore switch the
-        // source after an announced grid was locked; reset the uninstalled grid
-        // so the inventory donor's canonical layout can be accepted.
+
+        // The chunk is fully valid. Now a delayed inventory report that lowered
+        // the required start, a different grid source, or a different donor may
+        // replace the uninstalled grid; installed values stay subject to the
+        // normal overlap check.
         if active
-            .backfill_grid_source
-            .is_some_and(|existing| existing != grid_source)
+            .expected_backfill_start
+            .is_some_and(|locked| locked > start)
+            || active
+                .backfill_grid_source
+                .is_some_and(|existing| existing != grid_source)
+            || active
+                .backfill_donor
+                .is_some_and(|locked| locked != backfill.donor)
         {
             Self::reset_coordinated_drop_backfill_grid(active);
         }
-        // One donor owns the locked grid: mixing chunks from two donors that
-        // share a layout could splice different earlier inputs into one range.
-        // `backfill.donor` has already been matched to the current selection
-        // (inventory or announced), so a different lock means the selection
-        // changed (a delayed inventory report, a lower-handle announcement, or
-        // an unresponsive donor being replaced). Drop the abandoned donor's
-        // uninstalled grid so the new donor's canonical layout can be accepted;
-        // installed values remain subject to the normal overlap validation.
         if active
-            .backfill_donor
-            .is_some_and(|locked| locked != backfill.donor)
+            .expected_backfill_chunks
+            .is_some_and(|expected| expected != backfill.chunk_count)
         {
-            Self::reset_coordinated_drop_backfill_grid(active);
+            // A chunk from a different grid than the one this receiver already
+            // locked belongs to a racing donor; discard it instead of failing
+            // the certificate. The selected donor's chunks still arrive.
+            return Ok(());
         }
+        if active
+            .expected_backfill_start
+            .is_some_and(|expected| expected != range_start)
+        {
+            return Ok(());
+        }
+        // Install the donor/grid locks only after every shape check passed, so
+        // a discarded malformed chunk cannot pin the receiver to that donor.
         active.backfill_donor = Some(backfill.donor);
-        if backfill.chunk_count == 0 {
-            return Err(DropAbortReason::ConflictingHistory);
-        }
-        if backfill.frame_count == 0 {
-            return Err(DropAbortReason::ConflictingHistory);
-        }
-        // An out-of-range chunk index is rejected by the frame-count check
-        // below: its implied slice is empty (`expected_frames == 0`) while the
-        // payload is non-empty.
-        if backfill.start_frame > cut {
-            return Err(DropAbortReason::ConflictingHistory);
-        }
-        let expected_frames = std::cmp::min(
-            plan.frames_per_chunk,
-            plan.frame_count.saturating_sub(chunk_offset),
-        );
-        if plan.chunk_count != backfill.chunk_count {
-            return Err(DropAbortReason::ConflictingHistory);
-        }
-        if usize::from(backfill.frame_count) != expected_frames {
-            return Err(DropAbortReason::ConflictingHistory);
-        }
-        if let Some(expected) = active.expected_backfill_chunks {
-            if expected != backfill.chunk_count {
-                // A chunk from a different grid than the one this receiver
-                // already locked belongs to a racing donor; discard it instead
-                // of failing the certificate. The selected donor's chunks still
-                // arrive.
-                return Ok(());
-            }
-        }
-        if let Some(expected) = active.expected_backfill_start {
-            if expected != range_start {
-                return Ok(());
-            }
-        }
         active
             .expected_backfill_chunks
             .get_or_insert(backfill.chunk_count);
@@ -3576,7 +3896,11 @@ impl<T: Config> P2PSession<T> {
         active.backfill_grid_source = Some(grid_source);
         if let Some(existing) = active.backfill_chunks.get(&backfill.chunk_index) {
             if existing != &backfill {
-                return Err(DropAbortReason::ConflictingHistory);
+                Self::coordinated_drop_discard_artifact(
+                    "backfill",
+                    DropAbortReason::ConflictingHistory,
+                );
+                return Ok(());
             }
             return Ok(());
         }
@@ -3586,7 +3910,11 @@ impl<T: Config> P2PSession<T> {
         let relay_message = backfill.clone();
         let relay = match active.relayed_backfill.get(&backfill.chunk_index) {
             Some(existing) if existing != &backfill => {
-                return Err(DropAbortReason::ConflictingHistory);
+                Self::coordinated_drop_discard_artifact(
+                    "backfill",
+                    DropAbortReason::ConflictingHistory,
+                );
+                return Ok(());
             },
             Some(_) => false,
             None => {
@@ -3631,7 +3959,11 @@ impl<T: Config> P2PSession<T> {
                 .checked_mul(usize::from(chunk.frame_count))
                 .ok_or(DropAbortReason::ResourceLimit)?;
             if chunk.bytes.len() != expected_bytes {
-                return Err(DropAbortReason::ConflictingHistory);
+                Self::coordinated_drop_discard_artifact(
+                    "backfill",
+                    DropAbortReason::ConflictingHistory,
+                );
+                return Ok(());
             }
             for (target_index, target) in targets.iter().enumerate() {
                 let mut inputs = Vec::new();
@@ -3653,12 +3985,23 @@ impl<T: Config> P2PSession<T> {
                     let end = offset
                         .checked_add(input_width)
                         .ok_or(DropAbortReason::ResourceLimit)?;
-                    let encoded = chunk
-                        .bytes
-                        .get(offset..end)
-                        .ok_or(DropAbortReason::ConflictingHistory)?;
-                    let input =
-                        decode_coordinated_drop_backfill_input::<T::Input>(encoded, input_width)?;
+                    let Some(encoded) = chunk.bytes.get(offset..end) else {
+                        Self::coordinated_drop_discard_artifact(
+                            "backfill",
+                            DropAbortReason::ConflictingHistory,
+                        );
+                        return Ok(());
+                    };
+                    let input = match decode_coordinated_drop_backfill_input::<T::Input>(
+                        encoded,
+                        input_width,
+                    ) {
+                        Ok(input) => input,
+                        Err(reason) => {
+                            Self::coordinated_drop_discard_artifact("backfill", reason);
+                            return Ok(());
+                        },
+                    };
                     let frame_offset = i32::try_from(frame_offset)
                         .map_err(|_error| DropAbortReason::ResourceLimit)?;
                     let frame = Frame::new(
@@ -3763,6 +4106,7 @@ impl<T: Config> P2PSession<T> {
             commit.operation.coordinator,
             commit.operation.coordinator_generation,
             commit.operation.target_set_digest,
+            commit.operation.participant_set_digest,
         );
         if let Some((_, cut)) = self
             .coordinated_drop
@@ -3810,6 +4154,7 @@ impl<T: Config> P2PSession<T> {
             commit.operation.coordinator,
             commit.operation.coordinator_generation,
             commit.operation.target_set_digest,
+            commit.operation.participant_set_digest,
         );
         self.coordinated_drop
             .closed_commit_cuts
@@ -4011,14 +4356,28 @@ impl<T: Config> P2PSession<T> {
             // window before borrowing the attempt mutably.
             self.coordinated_drop_record_coordinator_heard(commit.operation);
         }
-        let Some(active) = self.coordinated_drop.active.as_mut() else {
-            return Ok(());
-        };
         // The transport source may be a relay rather than the committer, so it
         // is not counted as a ready witness here. Ready/Committed *reports*
         // carry their participant identity and supply the quorum evidence.
-        let _relay = Self::coordinated_drop_stage_commit_locked(active, commit, None)?;
-        Ok(())
+        let effective_authority = self
+            .coordinated_drop
+            .active
+            .as_ref()
+            .filter(|active| active.operation == commit.operation)
+            .and_then(Self::coordinated_drop_effective_coordinator);
+        let conflicting_authority =
+            source == Some(commit.operation.coordinator) || source == effective_authority;
+        let Some(active) = self.coordinated_drop.active.as_mut() else {
+            return Ok(());
+        };
+        match Self::coordinated_drop_stage_commit_locked(active, commit, None) {
+            Ok(_relay) => Ok(()),
+            Err(reason) if conflicting_authority => Err(reason),
+            Err(reason) => {
+                Self::coordinated_drop_discard_artifact("commit", reason);
+                Ok(())
+            },
+        }
     }
 
     fn coordinated_drop_accept_abort(&mut self, abort: DropAbort) {
@@ -4241,6 +4600,7 @@ impl<T: Config> P2PSession<T> {
             self.coordinated_drop
                 .membership_generations
                 .insert(handle, target.generation);
+            self.coordinated_drop.certified_dropped.insert(handle);
             self.coordinated_drop.committed.insert(
                 handle,
                 CoordinatedDropFence {
@@ -4438,22 +4798,40 @@ impl<T: Config> P2PSession<T> {
         if self.coordinated_drop.active.is_none() {
             let next = self.coordinated_drop.queued.pop_first();
             if let Some(handle) = next {
-                if self
-                    .local_connect_status
-                    .get(handle.as_usize())
-                    .is_some_and(|status| status.disconnected)
-                {
+                // The certificate may already have committed while this intent
+                // was queued (another survivor's request won). The removal is
+                // satisfied; do not mint a redundant operation.
+                if self.coordinated_drop.certified_dropped.contains(&handle) {
                     return;
                 }
-                // The queue only holds automatic-timeout intents. The mesh may
-                // have lost reachability while the previous certificate was in
-                // flight, so re-check the survivor quorum at start time rather
-                // than trusting the check made when the intent was queued.
-                if !self.automatic_drop_survivor_quorum_met() {
-                    self.enter_fail_closed_disconnect_state_at(self.confirmed_frame());
-                    return;
+                let automatic = self.coordinated_drop.queued_automatic.remove(&handle);
+                if automatic {
+                    if self
+                        .local_connect_status
+                        .get(handle.as_usize())
+                        .is_some_and(|status| status.disconnected)
+                    {
+                        return;
+                    }
+                    // A slot whose hot-join reactivation is in flight is not
+                    // currently a removals target: a stale timeout intent must
+                    // not fail the session closed while the join barrier runs.
+                    #[cfg(feature = "hot-join")]
+                    if self.coordinated_drop_slot_join_in_flight(handle)
+                        || self.hot_join.reserved_slots.contains(&handle)
+                    {
+                        return;
+                    }
+                    // The mesh may have lost reachability while the previous
+                    // certificate was in flight, so re-check the survivor
+                    // quorum at start time rather than trusting the check made
+                    // when the intent was queued.
+                    if !self.automatic_drop_survivor_quorum_met(handle) {
+                        self.enter_fail_closed_disconnect_state_at(self.confirmed_frame());
+                        return;
+                    }
                 }
-                if let Err(error) = self.begin_coordinated_drop(handle) {
+                if let Err(error) = self.begin_coordinated_drop_with_origin(handle, automatic) {
                     report_violation!(
                         ViolationSeverity::Error,
                         ViolationKind::InternalError,
@@ -5966,11 +6344,12 @@ impl<T: Config> P2PSession<T> {
                 continue;
             }
 
-            let snapshot = match crate::sessions::hot_join::capture_snapshot_with_max_wire_bytes(
+            let snapshot = match crate::sessions::hot_join::capture_snapshot_with_exclusions(
                 &self.sync_layer,
                 activation_frame,
                 self.num_players,
                 self.hot_join.max_snapshot_wire_bytes,
+                &self.certified_dropped_wire(),
             ) {
                 Ok(Some(snapshot)) => snapshot,
                 Ok(None) => continue, // no valid saved state at F; retry next poll
@@ -6519,7 +6898,7 @@ impl<T: Config> P2PSession<T> {
             .sync_layer
             .confirmed_inputs(snapshot_frame, &self.local_connect_status)?;
         let bridge_bytes = crate::sessions::hot_join::encode_bridge_inputs::<T>(&bridge)?;
-        crate::sessions::hot_join::capture_npeer_snapshot_with_max_wire_bytes(
+        crate::sessions::hot_join::capture_npeer_snapshot_with_exclusions(
             &self.sync_layer,
             snapshot_frame,
             self.num_players,
@@ -6530,6 +6909,7 @@ impl<T: Config> P2PSession<T> {
             // converged (S34 fix round 1 — the joiner presents/stamps from
             // these instead of assuming every slot live).
             self.snapshot_connect_statuses(),
+            &self.certified_dropped_wire(),
         )
     }
 
@@ -6543,6 +6923,17 @@ impl<T: Config> P2PSession<T> {
         let Some(mut serve) = self.hot_join.npeer.take() else {
             return;
         };
+        // Certified membership can change after the snapshot is captured (a
+        // concurrent removal commits). The captured exclusion list would then
+        // disagree with the survivors', so abort the attempt and let a fresh
+        // one capture the current membership. Never replace the captured bytes
+        // at the same frame: the joiner acknowledges by frame.
+        if let Some(snapshot) = serve.snapshot.as_ref() {
+            if snapshot.certified_dropped != self.certified_dropped_wire() {
+                self.abort_npeer_serve(serve);
+                return;
+            }
+        }
         serve.polls_since_serve = serve.polls_since_serve.saturating_add(1);
 
         // Prune survivors that died mid-join (their endpoints left Running via
@@ -6819,6 +7210,7 @@ impl<T: Config> P2PSession<T> {
             );
         }
         self.record_committed_reactivation(handle);
+        self.coordinated_drop.certified_dropped.remove(&handle);
         // Anchor the reactivated slot's prediction at F, mirroring the 2-peer
         // Phase 3. Here `F == current_frame` (the pause pinned
         // current = S + 1 = F), so the next advance's `adjust_gamestate`
@@ -7616,6 +8008,9 @@ impl<T: Config> P2PSession<T> {
         self.record_closed_npeer_attempt(pending.handle, pending.frame);
         if committed {
             self.record_committed_reactivation(pending.handle);
+            self.coordinated_drop
+                .certified_dropped
+                .remove(&pending.handle);
             // The slot committed live; re-seed the cached views exactly like
             // the lifecycle commit close would have (between the reopen and
             // the commit, a not-yet-reopened survivor's stale disconnected
@@ -8564,6 +8959,7 @@ impl<T: Config> P2PSession<T> {
         let handle = pending_handle;
         let frame = pending_frame;
         self.record_committed_reactivation(handle);
+        self.coordinated_drop.certified_dropped.remove(&handle);
         self.reset_reactivated_slot_gossip(
             handle,
             frame,
@@ -8758,6 +9154,26 @@ impl<T: Config> P2PSession<T> {
             return;
         }
 
+        if snapshot.certified_dropped.len() > self.num_players
+            || snapshot
+                .certified_dropped
+                .iter()
+                .any(|handle| usize::from(*handle) >= self.num_players)
+            || snapshot
+                .certified_dropped
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left >= right))
+        {
+            report_violation!(
+                ViolationSeverity::Error,
+                ViolationKind::NetworkProtocol,
+                "2-peer hot-join snapshot at frame {} carries a malformed certified-dropped handle list ({:?} for {} players); rejecting it fail-closed",
+                snapshot.frame,
+                snapshot.certified_dropped,
+                self.num_players
+            );
+            return;
+        }
         let activation_frame = snapshot.frame;
         let load = match crate::sessions::hot_join::apply_snapshot(
             &mut self.sync_layer,
@@ -8776,6 +9192,24 @@ impl<T: Config> P2PSession<T> {
                 return;
             },
         };
+
+        // Import the snapshot's certified membership exclusions. The joining
+        // slot itself is live and is removed from the exclusion set.
+        self.coordinated_drop.certified_dropped = snapshot
+            .certified_dropped
+            .iter()
+            .map(|raw| PlayerHandle::new(usize::from(*raw)))
+            .collect();
+        if let Some(local_handle) = self
+            .hot_join
+            .joiner
+            .as_ref()
+            .map(|joiner| joiner.local_handle)
+        {
+            self.coordinated_drop
+                .certified_dropped
+                .remove(&local_handle);
+        }
 
         // Ack the loaded frame so the host reactivates + emits PeerJoined, and
         // resume input processing now that the activation frame is known: the
@@ -9274,6 +9708,26 @@ impl<T: Config> P2PSession<T> {
         // (the serve only ever covers a frozen slot — an honest coordinator
         // captures pre-commit); no slot may be frozen above S (its (S, f0]
         // ring history cannot be bridged).
+        if snapshot.certified_dropped.len() > self.num_players
+            || snapshot
+                .certified_dropped
+                .iter()
+                .any(|handle| usize::from(*handle) >= self.num_players)
+            || snapshot
+                .certified_dropped
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left >= right))
+        {
+            report_violation!(
+                ViolationSeverity::Warning,
+                ViolationKind::NetworkProtocol,
+                "Rejecting N-peer hot-join snapshot at frame {}: malformed certified-dropped handle list ({:?} for {} players)",
+                snapshot.frame,
+                snapshot.certified_dropped,
+                self.num_players
+            );
+            return;
+        }
         if snapshot.bridge_statuses.len() != self.num_players {
             report_violation!(
                 ViolationSeverity::Warning,
@@ -9723,6 +10177,17 @@ impl<T: Config> P2PSession<T> {
                 },
             }
         }
+        // Import the snapshot's certified membership exclusions. A fresh
+        // joiner must derive the same participant set as existing survivors;
+        // locally observed disconnected statuses are not authoritative
+        // membership. The joining slot itself is live and must not stay
+        // excluded.
+        self.coordinated_drop.certified_dropped = buffered
+            .snapshot
+            .certified_dropped
+            .iter()
+            .map(|raw| PlayerHandle::new(usize::from(*raw)))
+            .collect();
         for (idx, carried) in buffered.snapshot.bridge_statuses.iter().enumerate() {
             let generation = if idx == local_idx {
                 carried.epoch.wrapping_add(1)
@@ -9772,6 +10237,9 @@ impl<T: Config> P2PSession<T> {
         }
         self.state = SessionState::Running;
         self.record_hot_join_activation();
+        self.coordinated_drop
+            .certified_dropped
+            .remove(&local_handle);
     }
 
     /// Returns the configured [`DisconnectBehavior`] for this session.
@@ -14320,15 +14788,45 @@ impl<T: Config> P2PSession<T> {
     /// `confirmed_frame` was mutated, so the caller can invalidate a cached
     /// poll-time confirmation fold.
     fn update_player_disconnects(&mut self) -> bool {
-        // All-local (and all-remotes-gone) sessions have no peer gossip to fold
-        // and local slots can never be disconnected through this path. This is
-        // the only exact early-out: any live coordinated-drop state must still
-        // be driven.
-        if self.player_reg.remotes.is_empty()
+        // Healthy-path early-out. The fold can only mutate state when at least
+        // one slot is locally disconnected or a peer view has latched a
+        // disconnect, or while a hot-join reactivation can still converge a
+        // reserved slot. Every endpoint carries that observation as a monotone
+        // bit (`peer_connect_status_has_disconnect`), so a healthy N-peer mesh
+        // avoids the O(N^2) status read on every advance (issue #507). Any live
+        // coordinated-drop state still runs the fold.
+        let healthy_mesh_view = {
+            // A truncated status table must still run the fold so its
+            // invariant guards report the corruption.
+            let local_clean = self.local_connect_status.len() == self.num_players
+                && self
+                    .local_connect_status
+                    .iter()
+                    .all(|status| !status.disconnected);
+            let gossiped_disconnect = self.player_reg.remotes.values().any(|endpoint| {
+                #[cfg(feature = "hot-join")]
+                if self.hot_join.endpoint_is_reserved(endpoint) {
+                    return false;
+                }
+                // A stopped endpoint may not have latched a gossip disconnect
+                // yet; run the fold until it either restarts or its handles
+                // are locally disconnected.
+                !endpoint.is_running() || endpoint.peer_connect_status_has_disconnect()
+            });
+            #[cfg(feature = "hot-join")]
+            let no_join_in_flight = self.hot_join.pending_reactivation.is_none()
+                && self.hot_join.joining.is_empty()
+                && self.hot_join.npeer.is_none();
+            #[cfg(not(feature = "hot-join"))]
+            let no_join_in_flight = true;
+            local_clean && !gossiped_disconnect && no_join_in_flight
+        };
+        if healthy_mesh_view
             && self.coordinated_drop.active.is_none()
             && self.coordinated_drop.deferred_prepares.is_empty()
             && self.coordinated_drop.queued.is_empty()
             && self.coordinated_drop.committed.is_empty()
+            && self.coordinated_drop.halted_targets.is_empty()
         {
             return false;
         }
@@ -14981,14 +15479,17 @@ impl<T: Config> P2PSession<T> {
                         if self.disconnect_behavior == DisconnectBehavior::ContinueWithout {
                             if !peer_sent_goodbye
                                 && (!self.coordinated_drop_has_independent_witness(&addr)
-                                    || !self.automatic_drop_survivor_quorum_met())
+                                    || !self.automatic_drop_survivor_quorum_met(target_handle))
                             {
                                 self.enter_fail_closed_disconnect_state_at(
                                     confirmed_before_disconnect,
                                 );
                                 return;
                             }
-                            if let Err(error) = self.begin_coordinated_drop(target_handle) {
+                            if let Err(error) = self.begin_coordinated_drop_with_origin(
+                                target_handle,
+                                !peer_sent_goodbye,
+                            ) {
                                 report_violation!(
                                     ViolationSeverity::Error,
                                     ViolationKind::InternalError,
@@ -16577,6 +17078,7 @@ mod tests {
             bridge_inputs,
             bridge_statuses: Vec::new(),
             checksum: None,
+            certified_dropped: Vec::new(),
         };
         session.buffer_npeer_snapshot(snapshot(Frame::new(5), 2, vec![0; 6]));
         session.buffer_npeer_snapshot(snapshot(Frame::new(-1), 3, vec![0; 3]));
@@ -16806,6 +17308,7 @@ mod tests {
             bridge_inputs: Vec::new(),
             bridge_statuses: Vec::new(),
             checksum: None,
+            certified_dropped: Vec::new(),
         };
         let serve = |frame: Frame| JoinServe {
             addr,
@@ -16904,6 +17407,7 @@ mod tests {
             bridge_inputs: Vec::new(),
             bridge_statuses: Vec::new(),
             checksum: None,
+            certified_dropped: Vec::new(),
         };
         let serve = |handle: PlayerHandle, acked: bool| NPeerServe {
             handle,
@@ -16949,6 +17453,19 @@ mod tests {
         // or before the captured snapshot invalidates the in-flight bytes.
         host.hot_join.npeer = Some(serve(PlayerHandle::new(1), false));
         host.abort_npeer_serve_if_snapshot_invalidated(Frame::new(4));
+
+        // Certified membership changing after capture invalidates the
+        // captured exclusion list; the serve aborts rather than sending a
+        // stale snapshot.
+        host.hot_join.npeer = Some(serve(PlayerHandle::new(1), false));
+        host.coordinated_drop
+            .certified_dropped
+            .insert(PlayerHandle::new(2));
+        host.poll_npeer_host_serve();
+        assert!(
+            host.hot_join.npeer.is_none(),
+            "a post-capture certified-membership change aborts the serve"
+        );
 
         let messages: Vec<String> = observer
             .violations()
@@ -17418,6 +17935,7 @@ mod tests {
                 bridge_inputs: Vec::new(),
                 bridge_statuses: Vec::new(),
                 checksum: None,
+                certified_dropped: Vec::new(),
             });
 
         joiner.poll_remote_clients();
@@ -17431,11 +17949,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_coordinated_drop_reports_non_remote_target() {
-        let observer = Arc::new(crate::telemetry::CollectingObserver::new());
-        let _scope = crate::telemetry::push_violation_observer(
-            Arc::clone(&observer) as Arc<dyn ViolationObserver>
-        );
+    fn begin_coordinated_drop_rejects_a_non_remote_target() {
         let mut session = create_two_player_session();
         session
             .player_reg
@@ -17443,18 +17957,14 @@ mod tests {
             .get_mut(&test_addr(8080))
             .expect("remote endpoint")
             .force_running_for_tests();
-        // The automatic-timeout intent queue only ever holds remote handles;
-        // a local handle must fail to start and surface the invariant break.
-        session.coordinated_drop.queued.insert(PlayerHandle::new(0));
-
-        session.drive_coordinated_drop();
-
+        let error = session
+            .begin_coordinated_drop(PlayerHandle::new(0))
+            .expect_err("a local handle cannot be a coordinated-drop target");
         assert!(
-            observer.violations().iter().any(|violation| violation
-                .message
-                .contains("failed to start queued coordinated drop for PlayerHandle(0)")),
-            "the non-remote drop target must be reported"
+            error.to_string().contains("invalid handle") || error.to_string().contains("handle"),
+            "the non-remote target must be reported: {error}"
         );
+        assert!(session.coordinated_drop.active.is_none());
     }
 
     #[test]
@@ -17793,6 +18303,7 @@ mod tests {
             bridge_inputs: Vec::new(),
             bridge_statuses: Vec::new(),
             checksum: None,
+            certified_dropped: Vec::new(),
         };
 
         fn assert_detected(label: &str, seed: impl FnOnce(&mut HotJoinState<TestConfig>)) {
@@ -17936,12 +18447,15 @@ mod tests {
             handle: 1,
             generation: 0,
         }];
-        let operation = DropOperationId {
+        let mut operation = DropOperationId {
             coordinator: 0,
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
+        operation.participant_set_digest =
+            P2PSession::<TestConfig>::coordinated_drop_participant_digest(&[0]);
         let mut prepare = DropPrepare {
             operation,
             targets,
@@ -17953,14 +18467,258 @@ mod tests {
             "a certificate that omits the running survivor must be rejected"
         );
         prepare.participants = vec![0, 2];
+        prepare.operation.participant_set_digest =
+            P2PSession::<TestConfig>::coordinated_drop_participant_digest(&prepare.participants);
         assert!(
             session.coordinated_drop_validate_prepare(&prepare),
             "the exact current survivor set must be accepted"
         );
         prepare.participants = vec![0, 1];
+        prepare.operation.participant_set_digest =
+            P2PSession::<TestConfig>::coordinated_drop_participant_digest(&prepare.participants);
         assert!(
             !session.coordinated_drop_validate_prepare(&prepare),
             "the target slot cannot certify its own drop"
+        );
+    }
+
+    #[test]
+    fn coordinated_drop_participants_ignore_local_reachability() {
+        // The same agreed membership epoch must produce the same participant
+        // set no matter which endpoints this view currently considers running:
+        // a split view must not shrink the quorum denominator (issue #504).
+        let mut isolated = five_player_majority_session(PlayerHandle::new(1));
+        let connected = five_player_majority_session(PlayerHandle::new(4));
+        for endpoint in isolated.player_reg.remotes.values_mut() {
+            endpoint.disconnect_remote();
+        }
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        assert_eq!(
+            isolated.coordinated_drop_participants(&targets),
+            connected.coordinated_drop_participants(&targets),
+            "participant derivation must not depend on local endpoint reachability"
+        );
+        assert_eq!(
+            isolated.coordinated_drop_participants(&targets),
+            vec![0, 1, 2, 3],
+            "the target and certified-dropped slots are the only exclusions"
+        );
+    }
+
+    #[test]
+    fn malformed_prepare_from_one_peer_does_not_halt_the_session() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("the legitimate operation opens");
+        let active = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        let bad_targets = vec![DropTarget {
+            handle: 3,
+            generation: 0,
+        }];
+        let bad = DropPrepare {
+            operation: DropOperationId {
+                coordinator: 1,
+                coordinator_generation: 0,
+                sequence: 1,
+                target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
+                    &bad_targets,
+                ),
+                participant_set_digest: 0,
+            },
+            targets: bad_targets,
+            participants: vec![0, 1, 2],
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_prepare(bad, Some(1)),
+            Ok(()),
+            "a malformed peer prepare is discarded, never failed closed"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .map(|active| active.operation),
+            Some(active),
+            "the legitimate attempt is untouched"
+        );
+        // The legitimate operation still accepts its coordinator's cut and
+        // advances toward Ready.
+        session
+            .coordinated_drop_accept_report_from(inventory_cut_report(active, 0, 10), Some(0))
+            .expect("the legitimate cut announcement is accepted");
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.cut),
+            Some(Frame::new(10)),
+            "the legitimate operation keeps making progress"
+        );
+    }
+
+    #[test]
+    fn malformed_report_from_one_peer_does_not_halt_the_session() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("the legitimate operation opens");
+        let active = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        let bad = DropReport {
+            operation: active,
+            participant: 1,
+            stage: DropReportStage::Inventory,
+            exposed_confirmed: Frame::NULL,
+            cut: Frame::new(3),
+            cut_digest: 0,
+            receipts: Vec::new(),
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_report_from(bad, Some(1)),
+            Ok(()),
+            "a malformed peer report is discarded, never failed closed"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
+        let valid = DropReport {
+            operation: active,
+            participant: 1,
+            stage: DropReportStage::Inventory,
+            exposed_confirmed: Frame::new(2),
+            cut: Frame::NULL,
+            cut_digest: 0,
+            receipts: vec![DropReceipt {
+                target: 4,
+                available_from: Frame::new(0),
+                contiguous_through: Frame::new(2),
+            }],
+        };
+        session
+            .coordinated_drop_accept_report_from(valid, Some(1))
+            .expect("the legitimate inventory report is accepted");
+        assert!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .is_some_and(|active| active.reports.contains_key(&1)),
+            "the legitimate operation keeps collecting reports"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
+    }
+
+    #[test]
+    fn conflicting_locally_committed_cut_still_fails_closed() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &[0, 1, 2, 3],
+            ),
+        };
+        session.coordinated_drop.committed.insert(
+            PlayerHandle::new(4),
+            CoordinatedDropFence {
+                operation,
+                target_generation: 0,
+                cut: Frame::new(5),
+            },
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_commit(
+                DropCommit {
+                    operation,
+                    cut: Frame::new(6),
+                    cut_digest: 9,
+                },
+                None,
+            ),
+            Err(DropAbortReason::ConflictingHistory),
+            "a different cut for a locally committed certificate is unrecoverable"
+        );
+    }
+
+    #[test]
+    fn membership_epoch_uses_one_voter_per_endpoint() {
+        // A remote endpoint owning handles 1 and 2 reports under its
+        // representative handle only; counting both would make quorum
+        // unreachable (PR #508 review).
+        let multi_handle_remote = create_multi_handle_remote_session();
+        assert_eq!(
+            multi_handle_remote.coordinated_drop_membership_epoch(),
+            vec![0, 1],
+            "one local representative plus one remote endpoint representative"
+        );
+
+        // Multiple local handles likewise contribute one canonical voter.
+        let two_local = create_two_local_players_session();
+        assert_eq!(
+            two_local.coordinated_drop_membership_epoch(),
+            vec![0],
+            "a multi-handle local endpoint reports once"
+        );
+    }
+
+    #[test]
+    fn automatic_quorum_excludes_the_whole_target_endpoint() {
+        let mut session = create_multi_handle_remote_session();
+        for endpoint in session.player_reg.remotes.values_mut() {
+            endpoint.force_running_for_tests();
+        }
+        let target = PlayerHandle::new(2);
+        assert!(
+            !session.automatic_drop_survivor_quorum_met(target),
+            "the target endpoint's canonical voter (handle 1) must not count as a survivor"
+        );
+    }
+
+    #[test]
+    fn participant_set_digest_separates_split_view_operations() {
+        let targets = vec![DropTarget {
+            handle: 8,
+            generation: 0,
+        }];
+        let target_set_digest = P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets);
+        let group_b = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest,
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &[0, 1, 2, 3],
+            ),
+        };
+        let group_f = DropOperationId {
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &[0, 4, 5, 6],
+            ),
+            ..group_b
+        };
+        assert_ne!(
+            group_b, group_f,
+            "differing participant sets must not share one operation identity"
         );
     }
 
@@ -18165,6 +18923,7 @@ mod tests {
             coordinator_generation: generation,
             sequence,
             target_set_digest: 0xD1_70,
+            participant_set_digest: 0,
         };
         let mut canonical = 0_u16;
         for cycle in 1_u32..=21 {
@@ -18328,6 +19087,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let cut = Frame::new(0);
         let commit = DropCommit {
@@ -18389,6 +19149,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 2,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let cut = Frame::new(0);
         let commit = DropCommit {
@@ -18504,6 +19265,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let cut = Frame::new(0);
         let now = session.coordinated_drop_now();
@@ -18594,6 +19356,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let cut = Frame::new(5);
         let mut reports = BTreeMap::new();
@@ -18771,6 +19534,7 @@ mod tests {
             coordinator_generation: 0,
             sequence,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let closed_operation = operation(2);
         let rejected_operation = operation(3);
@@ -18877,7 +19641,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_donor_announcements_fail_closed() {
+    fn malformed_donor_announcements_are_discarded() {
         let cases: [(&str, fn(&mut DropReport)); 4] = [
             ("non-empty receipts", |report| {
                 report.receipts.push(DropReceipt {
@@ -18903,8 +19667,21 @@ mod tests {
             mutate(&mut report);
             assert_eq!(
                 session.coordinated_drop_accept_report(report),
-                Err(DropAbortReason::ConflictingHistory),
-                "{name} must fail closed"
+                Ok(()),
+                "{name} is a peer artifact and must be discarded"
+            );
+            assert!(
+                session
+                    .coordinated_drop
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| !active.donor_announcements.contains_key(&1)),
+                "{name} must not be retained"
+            );
+            assert_eq!(
+                session.current_state(),
+                SessionState::Running,
+                "{name} must not halt the receiver"
             );
         }
     }
@@ -19065,19 +19842,35 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_donor_announcements_fail_closed() {
+    fn conflicting_donor_announcements_are_discarded() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
         session
             .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
             .expect("first announcement accepted");
+        let retained = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .and_then(|active| active.donor_announcements.get(&1).copied())
+            .expect("first announcement retained");
         let mut conflicting = donor_report(operation, 1, Frame::new(3));
         conflicting.cut_digest = 0xDEAD_BEEF;
         assert_eq!(
             session.coordinated_drop_accept_report_from(conflicting, Some(1)),
-            Err(DropAbortReason::ConflictingHistory),
-            "one donor cannot announce two different digests for the same cut"
+            Ok(()),
+            "one donor cannot announce two different digests, but the artifact is discarded"
         );
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.donor_announcements.get(&1).copied()),
+            Some(retained),
+            "the first announcement stays authoritative"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
     }
 
     #[test]
@@ -19165,7 +19958,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_with_a_wrong_chunk_count_fails_closed() {
+    fn backfill_with_a_wrong_chunk_count_is_discarded() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
         if let Some(active) = session.coordinated_drop.active.as_mut() {
@@ -19176,12 +19969,19 @@ mod tests {
         chunk.chunk_count = 2;
         assert_eq!(
             session.coordinated_drop_accept_backfill(1, chunk),
-            Err(DropAbortReason::ConflictingHistory)
+            Ok(()),
+            "a chunk from a non-canonical layout is discarded"
         );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(2))),
+            "the malformed chunk must not install"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
     }
 
     #[test]
-    fn backfill_with_a_wrong_frame_count_fails_closed() {
+    fn backfill_with_a_wrong_frame_count_is_discarded() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
         if let Some(active) = session.coordinated_drop.active.as_mut() {
@@ -19192,7 +19992,115 @@ mod tests {
         chunk.frame_count = 2;
         assert_eq!(
             session.coordinated_drop_accept_backfill(1, chunk),
-            Err(DropAbortReason::ConflictingHistory)
+            Ok(()),
+            "a chunk with a wrong frame count is discarded"
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(2))),
+            "the malformed chunk must not install"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
+    }
+
+    #[test]
+    fn stale_malformed_backfill_does_not_erase_an_accepted_grid() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
+            .expect("announcement accepted");
+        session
+            .coordinated_drop_accept_backfill(
+                1,
+                backfill_chunk(operation, Frame::new(3), &[3, 4, 5]),
+            )
+            .expect("valid chunk installs");
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.expected_backfill_start),
+            Some(Frame::new(3))
+        );
+
+        // A delayed inventory report lowers the required start below the locked
+        // grid. The next chunk names the old (higher) start and is malformed:
+        // it must be discarded without erasing the accepted grid.
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            let report = active.reports.get_mut(&1).expect("participant 1 report");
+            report.receipts[0].contiguous_through = Frame::new(1);
+        }
+        let mut malformed = backfill_chunk(operation, Frame::new(3), &[3, 4, 5]);
+        malformed.frame_count = 1;
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(1, malformed),
+            Ok(()),
+            "the stale malformed chunk is a peer artifact"
+        );
+        let active = session.coordinated_drop.active.as_ref().expect("active");
+        assert_eq!(
+            active.expected_backfill_start,
+            Some(Frame::new(3)),
+            "the accepted grid must survive a malformed stale chunk"
+        );
+        assert_eq!(
+            active.backfill_donor,
+            Some(1),
+            "the accepted donor must stay locked"
+        );
+        assert_eq!(
+            active.expected_backfill_chunks,
+            Some(1),
+            "the accepted grid must stay locked"
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(5)))
+        );
+    }
+
+    #[test]
+    fn corrected_backfill_chunk_after_a_short_payload_installs() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
+            .expect("announcement accepted");
+
+        let mut short = backfill_chunk(operation, Frame::new(3), &[3, 4, 5]);
+        short.bytes.truncate(2);
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(1, short),
+            Ok(()),
+            "a short payload is discarded"
+        );
+        assert!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .is_some_and(|active| active.relayed_backfill.is_empty()),
+            "a rejected chunk must not be retained for relaying"
+        );
+
+        let corrected = backfill_chunk(operation, Frame::new(3), &[3, 4, 5]);
+        session
+            .coordinated_drop_accept_backfill(1, corrected)
+            .expect("the corrected chunk installs");
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(5))),
+            "the corrected chunk completes the range"
+        );
+        assert!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .is_some_and(|active| active.next_backfill_chunk == 1),
+            "the corrected chunk advances the ordered install cursor"
         );
     }
 
@@ -19375,6 +20283,7 @@ mod tests {
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
                 &other_targets,
             ),
+            participant_set_digest: 0,
         };
         let before = sent_message_count(&session, crate::metrics::MessageKind::DropReport);
         assert_eq!(
@@ -19462,6 +20371,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let commit = DropCommit {
             operation,
@@ -19603,6 +20513,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         session.coordinated_drop_close_operation(operation);
         let commit = DropCommit {
@@ -19626,7 +20537,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_commit_mismatch_fails_closed_and_stages_a_matching_commit() {
+    fn partial_commit_mismatch_is_discarded_and_a_matching_commit_stages() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let (operation, cut) = staged_post_inventory_backfill_attempt(&mut session);
         if let Some(active) = session.coordinated_drop.active.as_mut() {
@@ -19641,9 +20552,19 @@ mod tests {
                 },
                 None,
             ),
-            Err(DropAbortReason::ConflictingHistory),
-            "a differing cut alone is a conflict even when the digest matches"
+            Ok(()),
+            "a differing cut alone is a peer artifact; the locked cut stays authoritative"
         );
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.cut),
+            Some(cut),
+            "the discarded commit must not change the locked cut"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
         let matching = DropCommit {
             operation,
             cut,
@@ -19676,6 +20597,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let commit = DropCommit {
             operation,
@@ -19718,6 +20640,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let commit = DropCommit {
             operation,
@@ -19842,6 +20765,7 @@ mod tests {
             coordinator_generation: 2,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         assert_eq!(
             session.coordinated_drop_accept_commit(
@@ -19941,6 +20865,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         for target in &targets {
             let handle = PlayerHandle::new(usize::from(target.handle));
@@ -20064,6 +20989,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         for target in &targets {
             let handle = PlayerHandle::new(usize::from(target.handle));
@@ -20246,6 +21172,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         for target in &targets {
             let handle = PlayerHandle::new(usize::from(target.handle));
@@ -20425,6 +21352,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         for target in &targets {
             let handle = PlayerHandle::new(usize::from(target.handle));
@@ -20562,6 +21490,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let commit = DropCommit {
             operation,
@@ -20764,6 +21693,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let commit = DropCommit {
             operation,
@@ -20823,6 +21753,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let commit = DropCommit {
             operation,
@@ -20907,6 +21838,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let commit = DropCommit {
             operation,
@@ -21171,6 +22103,7 @@ mod tests {
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
                 &other_targets,
             ),
+            participant_set_digest: 0,
         };
         let prepare_targets = vec![DropTarget {
             handle: 3,
@@ -21184,6 +22117,8 @@ mod tests {
                 target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
                     &prepare_targets,
                 ),
+                participant_set_digest:
+                    P2PSession::<TestConfig>::coordinated_drop_participant_digest(&[0, 1, 2, 4]),
             },
             targets: prepare_targets,
             participants: vec![0, 1, 2, 4],
@@ -21355,6 +22290,8 @@ mod tests {
                 target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
                     &targets,
                 ),
+                participant_set_digest:
+                    P2PSession::<TestConfig>::coordinated_drop_participant_digest(&[0, 1, 2, 4]),
             },
             targets,
             participants: vec![0, 1, 2, 4],
@@ -21436,7 +22373,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_inventory_reports_fail_closed_without_mutation() {
+    fn malformed_inventory_reports_are_discarded_without_mutation() {
         let mut session = five_player_majority_session(PlayerHandle::new(1));
         let targets = vec![DropTarget {
             handle: 3,
@@ -21447,6 +22384,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let valid_receipt = DropReceipt {
             target: 3,
@@ -21519,8 +22457,8 @@ mod tests {
             mutate(&mut report);
             assert_eq!(
                 session.coordinated_drop_accept_report(report),
-                Err(DropAbortReason::MissingHistory),
-                "{name} must fail closed"
+                Ok(()),
+                "{name} is a peer artifact and must be discarded"
             );
             let active = session
                 .coordinated_drop
@@ -21528,10 +22466,14 @@ mod tests {
                 .as_ref()
                 .expect("attempt stays active");
             assert!(
-                active.reports.is_empty(),
-                "{name} must not store the malformed report"
+                active
+                    .reports
+                    .get(&0)
+                    .is_none_or(|stored| *stored == valid_report()),
+                "{name} must not replace an accepted report"
             );
             assert!(active.cut.is_none(), "{name} must not set a cut");
+            assert_eq!(session.current_state(), SessionState::Running);
         }
     }
 
@@ -21550,6 +22492,7 @@ mod tests {
                 target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
                     &targets,
                 ),
+                participant_set_digest: 0,
             },
             targets: targets.clone(),
             participants: vec![0, 1, 2],
@@ -21597,6 +22540,7 @@ mod tests {
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
                 &committed_targets,
             ),
+            participant_set_digest: 0,
         };
         seed_inventory_attempt(&mut session, committed_operation, &committed_targets);
         if let Some(active) = session.coordinated_drop.active.as_mut() {
@@ -21617,6 +22561,8 @@ mod tests {
                 target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
                     &next_targets,
                 ),
+                participant_set_digest:
+                    P2PSession::<TestConfig>::coordinated_drop_participant_digest(&[0, 1, 2, 3]),
             },
             targets: next_targets,
             participants: vec![0, 1, 2, 3],
@@ -21647,6 +22593,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let seed_active = |session: &mut P2PSession<TestConfig>| {
             let now = session.coordinated_drop_now();
@@ -21754,10 +22701,15 @@ mod tests {
             announcement(0, Frame::new(5), 0, Vec::new(), Frame::new(5)),
         ] {
             seed_active(&mut session);
-            assert!(
-                session.coordinated_drop_accept_report(report).is_err(),
-                "a non-coordinator or non-announcement shape must be rejected"
+            assert_eq!(
+                session.coordinated_drop_accept_report(report),
+                Ok(()),
+                "a non-coordinator or non-announcement shape is discarded"
             );
+            let active = session.coordinated_drop.active.as_ref().expect("active");
+            assert!(active.cut.is_none(), "the artifact must not install a cut");
+            assert_eq!(active.acting_coordinator, None);
+            assert_eq!(session.current_state(), SessionState::Running);
         }
     }
 
@@ -21823,6 +22775,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let cut = Frame::new(0);
         let commit = DropCommit {
@@ -21919,6 +22872,7 @@ mod tests {
             "the regression requires empty bounded mailboxes"
         );
         assert!(session.coordinated_drop.queued.insert(remote));
+        assert!(session.coordinated_drop.queued_automatic.insert(remote));
 
         session.poll_coordinated_drop();
 
@@ -21926,16 +22880,16 @@ mod tests {
             !session.coordinated_drop.queued.contains(&remote),
             "the empty-mailbox poll must consume the queued operation"
         );
+        // A two-player automatic timeout has no independent witness: the
+        // target cannot count as its own survivor, so the intent is consumed
+        // and the session fails closed instead of committing.
         assert!(
-            session.coordinated_drop.committed.contains_key(&remote),
-            "the single-survivor certificate must commit without inbound control messages"
+            session.halt_confirmed_ceiling.is_some(),
+            "an automatic drop without a survivor majority must fail closed"
         );
         assert!(
-            session
-                .local_connect_status
-                .get(remote.as_usize())
-                .is_some_and(|status| status.disconnected),
-            "the committed operation must freeze the remote slot"
+            !session.coordinated_drop.committed.contains_key(&remote),
+            "no certificate may commit without a survivor majority"
         );
     }
 
@@ -21948,6 +22902,7 @@ mod tests {
                 coordinator_generation: 0,
                 sequence,
                 target_set_digest: 0,
+                participant_set_digest: 0,
             });
         }
         assert_eq!(session.coordinated_drop.closed.len(), session.num_players);
@@ -21970,6 +22925,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: 0,
+            participant_set_digest: 0,
         };
         let cut = Frame::new(0);
         let cut_digest = 0_u64;
@@ -22071,6 +23027,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: 1,
+            participant_set_digest: 0,
         };
         session
             .coordinated_drop
@@ -22121,6 +23078,7 @@ mod tests {
                 coordinator_generation: 2,
                 sequence: 2,
                 target_set_digest: 2,
+                participant_set_digest: 0,
             },
             target_generation: 2,
             cut: Frame::new(2),
@@ -22212,6 +23170,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: 0,
         };
         let cut = Frame::new(1);
         let commit = DropCommit {
@@ -23113,6 +24072,8 @@ mod tests {
                 target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
                     &targets,
                 ),
+                participant_set_digest:
+                    P2PSession::<TestConfig>::coordinated_drop_participant_digest(&[0, 1, 2, 3]),
             },
             targets,
             participants: vec![0, 1, 2, 3],
@@ -23163,32 +24124,38 @@ mod tests {
             .as_ref()
             .map(|active| (active.operation, active.targets.clone()))
             .expect("op A is active");
-        let supersede = [2_usize, 3]
-            .into_iter()
-            .find_map(|handle| {
-                let targets = vec![DropTarget {
-                    handle: u16::try_from(handle).ok()?,
-                    generation: 0,
-                }];
-                let operation = DropOperationId {
-                    coordinator: 0,
-                    coordinator_generation: 0,
-                    sequence: 1,
-                    target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
-                        &targets,
-                    ),
-                };
-                (P2PSession::<TestConfig>::coordinated_drop_operation_cmp(operation, first)
-                    == std::cmp::Ordering::Less)
-                    .then(|| DropPrepare {
-                        operation,
-                        targets,
-                        participants: (0_u16..5)
-                            .filter(|participant| usize::from(*participant) != handle)
-                            .collect(),
-                    })
-            })
-            .expect("one different-target prepare sorts before op A");
+        let supersede =
+            [2_usize, 3]
+                .into_iter()
+                .find_map(|handle| {
+                    let targets = vec![DropTarget {
+                        handle: u16::try_from(handle).ok()?,
+                        generation: 0,
+                    }];
+                    let participants: Vec<u16> = (0_u16..5)
+                        .filter(|participant| usize::from(*participant) != handle)
+                        .collect();
+                    let operation = DropOperationId {
+                        coordinator: 0,
+                        coordinator_generation: 0,
+                        sequence: 1,
+                        target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
+                            &targets,
+                        ),
+                        participant_set_digest:
+                            P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                                &participants,
+                            ),
+                    };
+                    (P2PSession::<TestConfig>::coordinated_drop_operation_cmp(operation, first)
+                        == std::cmp::Ordering::Less)
+                        .then_some(DropPrepare {
+                            operation,
+                            targets,
+                            participants,
+                        })
+                })
+                .expect("one different-target prepare sorts before op A");
         session
             .coordinated_drop_accept_prepare(supersede, None)
             .expect("op B supersedes op A during Inventory");
@@ -23230,6 +24197,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 99,
             target_set_digest: 0,
+            participant_set_digest: 0,
         };
         session.coordinated_drop_close_operation(unknown);
         let before = drop_abort_sends(&session);
@@ -23264,32 +24232,38 @@ mod tests {
             .expect("winner active")
             .operation;
 
-        let loser = [2_usize, 3]
-            .into_iter()
-            .find_map(|handle| {
-                let targets = vec![DropTarget {
-                    handle: u16::try_from(handle).ok()?,
-                    generation: 0,
-                }];
-                let operation = DropOperationId {
-                    coordinator: 0,
-                    coordinator_generation: 0,
-                    sequence: 1,
-                    target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
-                        &targets,
-                    ),
-                };
-                (P2PSession::<TestConfig>::coordinated_drop_operation_cmp(operation, winner)
-                    == std::cmp::Ordering::Greater)
-                    .then(|| DropPrepare {
-                        operation,
-                        targets,
-                        participants: (0_u16..5)
-                            .filter(|participant| usize::from(*participant) != handle)
-                            .collect(),
-                    })
-            })
-            .expect("a losing prepare exists");
+        let loser =
+            [2_usize, 3]
+                .into_iter()
+                .find_map(|handle| {
+                    let targets = vec![DropTarget {
+                        handle: u16::try_from(handle).ok()?,
+                        generation: 0,
+                    }];
+                    let participants: Vec<u16> = (0_u16..5)
+                        .filter(|participant| usize::from(*participant) != handle)
+                        .collect();
+                    let operation = DropOperationId {
+                        coordinator: 0,
+                        coordinator_generation: 0,
+                        sequence: 1,
+                        target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
+                            &targets,
+                        ),
+                        participant_set_digest:
+                            P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                                &participants,
+                            ),
+                    };
+                    (P2PSession::<TestConfig>::coordinated_drop_operation_cmp(operation, winner)
+                        == std::cmp::Ordering::Greater)
+                        .then_some(DropPrepare {
+                            operation,
+                            targets,
+                            participants,
+                        })
+                })
+                .expect("a losing prepare exists");
 
         session
             .coordinated_drop_accept_prepare(loser.clone(), None)
@@ -23365,6 +24339,9 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &[0, 1, 2, 3],
+            ),
         };
         let prepare = DropPrepare {
             operation,
@@ -23435,6 +24412,9 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &[0, 1, 2, 3],
+            ),
         };
         let prepare = DropPrepare {
             operation,
@@ -23482,6 +24462,9 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &[0, 1, 2, 3],
+            ),
         };
         let prepare = DropPrepare {
             operation,
@@ -23552,6 +24535,9 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &[0, 1, 2, 3],
+            ),
         };
         let prepare = DropPrepare {
             operation,
@@ -23620,6 +24606,9 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &[0, 1, 2, 3],
+            ),
         };
         let first_seen_at = session.coordinated_drop_now()
             - COORDINATED_DROP_FALLBACK_GRACE
@@ -23656,6 +24645,9 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &[0, 1, 2, 3],
+            ),
         };
         // The coordinator is heard before the local attempt opens.
         session
@@ -23693,9 +24685,10 @@ mod tests {
             },
             Some(1),
         );
-        assert!(
-            result.is_err(),
-            "a fallback cut must not be adopted after a coordinator report"
+        assert_eq!(
+            result,
+            Ok(()),
+            "a fallback cut is discarded after a coordinator report"
         );
         let active = session.coordinated_drop.active.as_ref().expect("active");
         assert_eq!(active.acting_coordinator, None);
@@ -23719,6 +24712,9 @@ mod tests {
             coordinator_generation: 0,
             sequence,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &[0, 1, 2, 3],
+            ),
         }
     }
 
@@ -23776,6 +24772,7 @@ mod tests {
                 coordinator_generation: 0,
                 sequence,
                 target_set_digest: 0,
+                participant_set_digest: 0,
             });
         }
         assert_eq!(
@@ -23903,21 +24900,28 @@ mod tests {
     }
 
     #[test]
-    fn fallback_admission_rejects_invalid_acting_identity() {
+    fn fallback_admission_discards_invalid_acting_identity() {
         let mut session = five_player_majority_session(PlayerHandle::new(2));
         let prepare = fallback_prepare(4);
-        assert_eq!(
-            session.coordinated_drop_accept_prepare_with_act(prepare.clone(), Some(3), Some(3)),
-            Err(DropAbortReason::GenerationChanged)
-        );
-        assert_eq!(
-            session.coordinated_drop_accept_prepare_with_act(prepare.clone(), Some(3), Some(1)),
-            Err(DropAbortReason::GenerationChanged)
-        );
-        assert_eq!(
-            session.coordinated_drop_accept_prepare_with_act(prepare.clone(), Some(0), Some(0)),
-            Err(DropAbortReason::GenerationChanged)
-        );
+        for (source, acting) in [(3_u16, 3_u16), (3, 1), (0, 0)] {
+            assert_eq!(
+                session.coordinated_drop_accept_prepare_with_act(
+                    prepare.clone(),
+                    Some(source),
+                    Some(acting),
+                ),
+                Ok(()),
+                "an invalid acting identity is a peer artifact, not a local failure"
+            );
+            assert!(
+                session.coordinated_drop.active.is_none(),
+                "no attempt may open for an invalid acting authority"
+            );
+            assert!(
+                session.coordinated_drop.fallback_prepare.is_none(),
+                "the invalid acting artifact must not be retained"
+            );
+        }
         session
             .coordinated_drop_accept_prepare_with_act(prepare, Some(1), Some(1))
             .expect("the valid fallback identity admits");
@@ -24075,6 +25079,66 @@ mod tests {
     }
 
     #[test]
+    fn fallback_announcement_after_a_staged_commit_is_accepted() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        let operation = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        // The fallback's commit overtakes its own cut announcement.
+        session
+            .coordinated_drop_accept_commit(
+                DropCommit {
+                    operation,
+                    cut: Frame::new(10),
+                    cut_digest: 7,
+                },
+                Some(1),
+            )
+            .expect("the fallback certificate stages");
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.cut),
+            Some(Frame::new(10))
+        );
+
+        session
+            .coordinated_drop_accept_report_from(inventory_cut_report(operation, 1, 10), Some(1))
+            .expect("the matching fallback announcement must be accepted after staging");
+        let active = session.coordinated_drop.active.as_ref().expect("active");
+        assert_eq!(active.acting_coordinator, Some(1));
+        assert_eq!(active.cut, Some(Frame::new(10)));
+        assert_eq!(session.current_state(), SessionState::Running);
+
+        // A genuinely different cut from the acting fallback is an authority
+        // conflict and fails closed; the staged certificate is not replaced.
+        assert_eq!(
+            session.coordinated_drop_accept_report_from(
+                inventory_cut_report(operation, 1, 11),
+                Some(1)
+            ),
+            Err(DropAbortReason::ConflictingHistory)
+        );
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.cut),
+            Some(Frame::new(10)),
+            "the staged certificate keeps authority"
+        );
+    }
+
+    #[test]
     fn fallback_cut_adoption_requires_grace_fallback_sender_and_quiet_coordinator() {
         // After the grace, the fallback sender is adopted.
         let mut adopted = five_player_majority_session(PlayerHandle::new(2));
@@ -24111,7 +25175,16 @@ mod tests {
                 inventory_cut_report(operation, 1, 10),
                 Some(1)
             ),
-            Err(DropAbortReason::GenerationChanged)
+            Ok(()),
+            "a pre-grace fallback cut is a peer artifact"
+        );
+        assert_eq!(
+            early
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.cut),
+            None
         );
 
         // A non-fallback sender is rejected.
@@ -24131,7 +25204,16 @@ mod tests {
                 inventory_cut_report(operation, 3, 10),
                 Some(3)
             ),
-            Err(DropAbortReason::GenerationChanged)
+            Ok(()),
+            "a non-fallback sender's cut is discarded"
+        );
+        assert_eq!(
+            stranger
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.acting_coordinator),
+            None
         );
 
         // The deterministic coordinator never adopts a fallback cut.
@@ -24151,7 +25233,16 @@ mod tests {
                 inventory_cut_report(operation, 1, 10),
                 Some(1)
             ),
-            Err(DropAbortReason::GenerationChanged)
+            Ok(()),
+            "the deterministic coordinator discards a fallback cut"
+        );
+        assert_eq!(
+            coordinator
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.acting_coordinator),
+            None
         );
 
         // A heard coordinator blocks the fallback cut.
@@ -24174,7 +25265,16 @@ mod tests {
                 inventory_cut_report(operation, 1, 10),
                 Some(1)
             ),
-            Err(DropAbortReason::GenerationChanged)
+            Ok(()),
+            "a heard coordinator blocks adoption and the artifact is discarded"
+        );
+        assert_eq!(
+            heard
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.acting_coordinator),
+            None
         );
 
         // A coordinator heard once and then silent for the full grace no longer
@@ -24359,6 +25459,7 @@ mod tests {
             coordinator_generation: 0,
             sequence,
             target_set_digest: u64::from(sequence),
+            participant_set_digest: 0,
         };
 
         session.coordinated_drop_note_rejected(operation(1), &targets);
@@ -24410,42 +25511,47 @@ mod tests {
 
         // A concurrent different-target removal (op B) sorts before op A and
         // supersedes it, exactly as the real accept path does.
-        let supersede = [2_usize, 3]
-            .into_iter()
-            .find_map(|handle| {
-                let targets = vec![DropTarget {
-                    handle: u16::try_from(handle).ok()?,
-                    generation: 0,
-                }];
-                let participants = (0_u16..4)
-                    .filter(|participant| usize::from(*participant) != handle)
-                    .collect();
-                let operation = DropOperationId {
-                    coordinator: 0,
-                    coordinator_generation: 0,
-                    sequence: 1,
-                    target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
-                        &targets,
-                    ),
-                };
-                ((
-                    operation.target_set_digest,
-                    operation.coordinator,
-                    operation.coordinator_generation,
-                    operation.sequence,
-                ) < (
-                    first.target_set_digest,
-                    first.coordinator,
-                    first.coordinator_generation,
-                    first.sequence,
-                ))
-                    .then_some(DropPrepare {
-                        operation,
-                        targets,
-                        participants,
-                    })
-            })
-            .expect("one different-target prepare must sort before op A");
+        let supersede =
+            [2_usize, 3]
+                .into_iter()
+                .find_map(|handle| {
+                    let targets = vec![DropTarget {
+                        handle: u16::try_from(handle).ok()?,
+                        generation: 0,
+                    }];
+                    let participants: Vec<u16> = (0_u16..4)
+                        .filter(|participant| usize::from(*participant) != handle)
+                        .collect();
+                    let operation = DropOperationId {
+                        coordinator: 0,
+                        coordinator_generation: 0,
+                        sequence: 1,
+                        target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
+                            &targets,
+                        ),
+                        participant_set_digest:
+                            P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                                &participants,
+                            ),
+                    };
+                    ((
+                        operation.target_set_digest,
+                        operation.coordinator,
+                        operation.coordinator_generation,
+                        operation.sequence,
+                    ) < (
+                        first.target_set_digest,
+                        first.coordinator,
+                        first.coordinator_generation,
+                        first.sequence,
+                    ))
+                        .then_some(DropPrepare {
+                            operation,
+                            targets,
+                            participants,
+                        })
+                })
+                .expect("one different-target prepare must sort before op A");
         session
             .coordinated_drop_accept_prepare(supersede, None)
             .expect("op B supersedes op A");
@@ -24562,6 +25668,7 @@ mod tests {
             coordinator_generation: 0,
             sequence: 1,
             target_set_digest: 0,
+            participant_set_digest: 0,
         };
 
         assert!(!session.coordinated_drop_may_change_confirmation());
@@ -24641,6 +25748,43 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_fold_early_outs_until_a_peer_view_latches_a_disconnect() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        assert!(
+            !session.update_player_disconnects(),
+            "an all-connected mesh must take the healthy early-out"
+        );
+
+        // Three of four peer views report slot 2 disconnected: the fold runs
+        // and propagates the agreed view.
+        let disconnected = ConnectionStatus {
+            disconnected: true,
+            last_frame: Frame::new(5),
+            epoch: 0,
+        };
+        for participant in [1_u16, 3, 4] {
+            let endpoint = session
+                .player_reg
+                .remotes
+                .get_mut(&test_addr(9400 + participant))
+                .expect("survivor endpoint");
+            endpoint.set_peer_connect_status_for_tests(PlayerHandle::new(2), disconnected);
+            assert!(
+                endpoint.peer_connect_status_has_disconnect(),
+                "the gossip latch must record the disconnected observation"
+            );
+        }
+        assert!(
+            session.update_player_disconnects(),
+            "a latched gossip view must run the fold"
+        );
+        assert!(
+            session.local_connect_status[2].disconnected,
+            "the fold applies the agreed disconnect"
+        );
+    }
+
+    #[test]
     fn update_player_disconnects_reports_no_change_when_already_at_the_fence_cut() {
         let mut session = create_two_player_session();
         let handle = PlayerHandle::new(1);
@@ -24653,6 +25797,7 @@ mod tests {
                     coordinator_generation: 0,
                     sequence: 1,
                     target_set_digest: 0,
+                    participant_set_digest: 0,
                 },
                 target_generation: 0,
                 cut,
@@ -37365,6 +38510,7 @@ mod tests {
                 state_bytes,
                 bridge_inputs,
                 bridge_statuses,
+                certified_dropped: Vec::new(),
                 checksum: None,
             }
         }
@@ -37388,6 +38534,23 @@ mod tests {
                 .set_received_snapshot_for_test(seam_snapshot(snapshot_frame, 7, &[1, 2, 3]));
             c2.poll();
             (c2, snapshot_frame, activation_frame)
+        }
+
+        /// Applies the local shape of a committed graceful drop without running
+        /// the quorum barrier. These seam tests stage a lone session whose
+        /// coordinator endpoint is never polled, so a real `remove_player`
+        /// correctly fails closed now that every removal needs a strict
+        /// majority of the agreed membership; the slot's frozen/disconnected
+        /// state is all the lifecycle-routing assertions need.
+        fn seam_drop_slot_locally(session: &mut P2PSession<TestConfig>, handle: PlayerHandle) {
+            let cut = session.confirmed_frame();
+            session.disconnect_player_at_frames(handle, cut, None);
+            if let Err(error) = session.sync_layer.freeze_player(handle, cut) {
+                // test: a seam fixture with no confirmed slot inputs has
+                // nothing to freeze; the routing assertions only need the
+                // disconnected status.
+                let _ = error;
+            }
         }
 
         #[test]
@@ -37633,9 +38796,7 @@ mod tests {
             let _ = c2.session.advance_frame().expect("post-commit advance");
 
             // Slot 1 (survivor B) later drops on this (former-joiner) session...
-            c2.session
-                .remove_player(PlayerHandle::new(1))
-                .expect("graceful drop of slot 1");
+            seam_drop_slot_locally(&mut c2.session, PlayerHandle::new(1));
 
             // ...and rejoins: the coordinator's ReactivateSlot directive
             // arrives (never drained by the joiner arm) and goes pending.
@@ -37703,9 +38864,7 @@ mod tests {
             assert_eq!(c2.session.current_state(), SessionState::Running);
             let _ = c2.session.advance_frame().expect("post-commit advance");
 
-            c2.session
-                .remove_player(PlayerHandle::new(1))
-                .expect("graceful drop of slot 1");
+            seam_drop_slot_locally(&mut c2.session, PlayerHandle::new(1));
 
             let f2 = Frame::new(activation_frame.as_i32() + 20);
             c2.coordinator_proto_mut()
@@ -37768,6 +38927,7 @@ mod tests {
                     bridge_inputs: Vec::new(),
                     bridge_statuses: Vec::new(),
                     checksum: None,
+                    certified_dropped: Vec::new(),
                 });
 
             c2.poll();
@@ -37818,6 +38978,7 @@ mod tests {
                     bridge_inputs: vec![1, 2],
                     bridge_statuses: Vec::new(),
                     checksum: None,
+                    certified_dropped: Vec::new(),
                 });
 
             session.poll_remote_clients();
@@ -37877,6 +39038,7 @@ mod tests {
                     bridge_inputs: Vec::new(),
                     bridge_statuses: Vec::new(),
                     checksum: None,
+                    certified_dropped: Vec::new(),
                 });
 
             session.poll_remote_clients();
@@ -39086,9 +40248,7 @@ mod tests {
 
                 // A later attempt for ANOTHER slot goes pending (the
                 // timing-thin later-attempt window).
-                c2.session
-                    .remove_player(PlayerHandle::new(1))
-                    .expect("graceful drop of slot 1");
+                seam_drop_slot_locally(&mut c2.session, PlayerHandle::new(1));
                 let f2 = Frame::new(activation_frame.as_i32() + 20);
                 c2.coordinator_proto_mut()
                     .set_received_reactivate_slot_for_test(ReactivateSlot {
@@ -40243,6 +41403,7 @@ mod tests {
                     bridge_inputs: Vec::new(),
                     bridge_statuses: vec![ConnectionStatus::default(); 2],
                     checksum: None,
+                    certified_dropped: Vec::new(),
                 });
 
             session.poll_remote_clients();
@@ -41927,6 +43088,32 @@ mod tests {
                 Some(d_freeze),
                 "the joiner stamps the carried-dead slot's status verbatim"
             );
+            // Certified membership crosses the snapshot: the fresh joiner
+            // excludes the dead slot from its participant set exactly like the
+            // existing survivors (PR #509 review).
+            for session in [&duo.a, &duo.b, &c2.session] {
+                assert!(
+                    session
+                        .coordinated_drop
+                        .certified_dropped
+                        .contains(&PlayerHandle::new(3)),
+                    "the certified-dropped slot must stay excluded on every peer"
+                );
+            }
+            let future_targets = vec![DropTarget {
+                handle: 1,
+                generation: 0,
+            }];
+            assert_eq!(
+                duo.a.coordinated_drop_participants(&future_targets),
+                c2.session.coordinated_drop_participants(&future_targets),
+                "a fresh joiner must derive the same participant set as a survivor"
+            );
+            assert_eq!(
+                c2.session.coordinated_drop_participants(&future_targets),
+                vec![0, 2],
+                "the dead slot and the target are excluded"
+            );
 
             // All three live peers run real from F; everyone confirms past
             // the probe.
@@ -43026,18 +44213,29 @@ mod tests {
             if matches!(variant.disruption, Disruption::SurvivorBDropsAtServeOpen) {
                 let (a_held, c_held) = held_at_participant_loss
                     .expect("the survivor-drop disruption captured both held prefixes");
+                // The removal is an explicit one-survivor certificate (the
+                // joining slot is not yet a voter), so the coordinator removes
+                // the dying survivor and keeps running. The joiner cannot
+                // complete its attempt and stays out of Running.
                 assert_eq!(
                     duo.a.current_state(),
-                    SessionState::Synchronizing,
-                    "[{context}] the coordinator fails closed when declared survivor B disappears",
+                    SessionState::Running,
+                    "[{context}] the coordinator removes the dying survivor and continues",
                 );
                 assert_eq!(
                     c2.session.current_state(),
-                    SessionState::Synchronizing,
-                    "[{context}] the joiner cannot apply an incomplete certificate",
+                    SessionState::Running,
+                    "[{context}] the joiner activates after the dying survivor is removed",
                 );
-                assert!(duo.a.confirmed_frame() <= a_held);
-                assert!(c2.session.confirmed_frame() <= c_held);
+                assert!(duo.a.confirmed_frame() >= a_held);
+                assert!(duo.a_events[a_events_before_join..].iter().any(|event| {
+                    matches!(
+                        event,
+                        FortressEvent::PeerDropped { handle, .. }
+                            if *handle == PlayerHandle::new(1)
+                    )
+                }));
+                let _ = c_held;
                 assert!(
                     !duo.a_events[a_events_before_join..]
                         .iter()

@@ -76,6 +76,7 @@ SPECS=(
     "CoordinatedPeerDrop"
     "CoordinatorFailover"
     "CoordinatorFailoverCompeting"
+    "CoordinatorSplitView"
     "NPeerReactivation"
     "NPeerServeFreezeConvergence"
     "FreezeConvergence"
