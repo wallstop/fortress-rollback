@@ -10,4 +10,10 @@ _None._
 
 ## Future
 
-_None._
+- **Bind coordinated-drop participant sets to the operation identity
+  ([#504](https://github.com/Ambiguous-Interactive/fortress-rollback/issues/504)).**
+  Two requesters in a split view can currently mint the same `DropOperationId`
+  with different participant vectors, letting disjoint strict-majority groups
+  commit different cuts for one target. Exit: a deterministic two-requester
+  split-view row asserts at most one committed cut, and
+  `CoordinatorFailover.tla` models two disjoint participant groups.
