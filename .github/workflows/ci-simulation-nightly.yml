@@ -221,7 +221,7 @@ jobs:
       - name: Download fleet observations
         id: fleet-download
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: simulation-violation-sites-${{ github.run_id }}
           path: ${{ runner.temp }}/violation-sites
@@ -229,7 +229,7 @@ jobs:
       - name: Download exact test-suite observations
         id: observations-download
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: violation-site-observations-${{ github.run_id }}
           path: ${{ runner.temp }}/violation-observations
