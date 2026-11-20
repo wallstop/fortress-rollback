@@ -2195,8 +2195,15 @@ impl<T: Config> P2PSession<T> {
     /// certificate that is being judged now, so it must not count as a
     /// witness.
     fn automatic_drop_survivor_quorum_met(&self, target: PlayerHandle) -> bool {
-        let Ok(target_raw) = u16::try_from(target.as_usize()) else {
+        if u16::try_from(target.as_usize()).is_err() {
             return false;
+        }
+        // A remote endpoint can own several handles. The target endpoint's
+        // canonical voter may be a different handle than the target itself, so
+        // exclude the whole target address, not just the timed-out handle.
+        let target_addr = match self.player_reg.handles.get(&target) {
+            Some(PlayerType::Remote(addr)) => Some(addr),
+            Some(PlayerType::Local) | Some(PlayerType::Spectator(_)) | None => None,
         };
         // The target stays in the denominator: a symmetric 2/2 split must not
         // become "2 of 3" and certify itself. Only a component holding a strict
@@ -2205,13 +2212,13 @@ impl<T: Config> P2PSession<T> {
         let survivors = epoch
             .iter()
             .filter(|participant| {
-                if **participant == target_raw {
-                    return false;
-                }
                 let handle = PlayerHandle::new(usize::from(**participant));
                 match self.player_reg.handles.get(&handle) {
                     Some(PlayerType::Local) => true,
                     Some(PlayerType::Remote(addr)) => {
+                        if Some(addr) == target_addr {
+                            return false;
+                        }
                         self.player_reg.remotes.get(addr).is_some_and(|endpoint| {
                             endpoint.is_running() && !endpoint.has_reported_disconnect()
                         })
@@ -18671,6 +18678,19 @@ mod tests {
             two_local.coordinated_drop_membership_epoch(),
             vec![0],
             "a multi-handle local endpoint reports once"
+        );
+    }
+
+    #[test]
+    fn automatic_quorum_excludes_the_whole_target_endpoint() {
+        let mut session = create_multi_handle_remote_session();
+        for endpoint in session.player_reg.remotes.values_mut() {
+            endpoint.force_running_for_tests();
+        }
+        let target = PlayerHandle::new(2);
+        assert!(
+            !session.automatic_drop_survivor_quorum_met(target),
+            "the target endpoint's canonical voter (handle 1) must not count as a survivor"
         );
     }
 
