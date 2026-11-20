@@ -688,6 +688,17 @@ For every survivor `p`, committed cut `C`, and frame `f` already exposed by
 committed(p, C) ∧ f ≤ exposed_high_water(p) → reported_input(p, f) = input(f)
 ```
 
+`specs/tla/CoordinatorFailover.tla` models the bounded coordinator-failover
+transition for that barrier. With the deterministic coordinator partitioned
+away, the configuration proves the lowest remaining participant's fallback
+quorum eventually commits; the competing configuration also lets the real
+coordinator choose a different cut and proves that at most one cut can ever
+commit. Quorum intersection plus one stable ready transcript per peer is the
+load-bearing safety argument. The runtime retains a non-coordinator prepare for
+a one-second grace, admits it under the deterministic fallback identity, and
+then uses the unchanged quorum/cut/ready/commit path; message loss, backfill,
+and target acknowledgement remain Rust-level obligations.
+
 `specs/tla/CoordinatedPeerDrop.tla` models two serialized operation IDs over two
 membership/target eras with independent per-survivor commit. The runtime defers
 a prepare received while a prior commit closes, discards its stale participant
@@ -762,6 +773,7 @@ implementation/test obligations.
 | Spectator session             | TLA+ | ✅ Implemented (`specs/tla/SpectatorSession.tla`) |
 | Concurrency model             | TLA+ | ✅ Implemented (`specs/tla/Concurrency.tla`)      |
 | Graceful-drop barrier model | TLA+ | ✅ Implemented (`specs/tla/CoordinatedPeerDrop.tla`) |
+| Coordinated-drop coordinator failover | TLA+ | ✅ Implemented (`specs/tla/CoordinatorFailover.tla` + competing-cut safety companion) |
 
 ---
 
