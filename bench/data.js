@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795140006625,
+  "lastUpdate": 1795149989045,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "83013d983262e36ee568c9bf49efa8bf265ad183",
-          "message": "test: satisfy strict clippy 1.100 lints (#406)\n\nThe stable toolchain moved to 1.100.0 between the PR and main runs; fix every new redundant-clone and needless-range-loop hit in test code so the strict clippy gates stay green.",
-          "timestamp": "2026-11-12T11:22:08-08:00",
-          "tree_id": "b95d0e166195c42b230baa4150f1a3392532b102",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/83013d983262e36ee568c9bf49efa8bf265ad183"
-        },
-        "date": 1794511869262,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 63587,
-            "range": "± 1663",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 31148,
-            "range": "± 370",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1651,
-            "range": "± 112",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1554,
-            "range": "± 106",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3131,
-            "range": "± 178",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2768,
             "range": "± 184",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "57494b78761444facd5a5f4b0aaeceef66a5d3be",
+          "message": "test: close coordinator-failover mutation survivors (#503)\n\n## Description\n\nFollow-up to #499. The post-merge mutation job on `main` (`444dee34`)\nreported **30 missed mutants** in the new coordinator-failover state\nmachine. This adds targeted unit guards so each survivor is killed, and\nremoves one redundant condition plus one equivalent same-operation\nbranch so they no longer generate mutants.\n\nCovered classes:\n\n- bounded `coordinator_heard_operations` journal (oldest eviction at\n`num_players`);\n- retained fallback prepare ordering (lower operation wins, higher does\nnot replace, retransmissions do not reset the first-seen deadline);\n- fallback promotion boundaries (not before the grace; never when quorum\nequals the participant count, e.g. two survivors);\n- admission identity validation (`acting` must be the deterministic\nfallback and the source must match);\n- the deterministic coordinator never yields an active attempt;\n- non-fallback sends do not become acting;\n- unrelated coordinator reports do not clear a candidate or mark an\nactive attempt heard;\n- matching coordinator reports do mark the active attempt heard;\n- the full cut/Ready adoption matrices (grace, sender identity,\ncoordinator-heard, recorded-operation suppression,\ndeterministic-coordinator exclusion).\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🐛 Bug fix (small condition simplification only; no behavior\nchange)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [ ] I have updated the documentation accordingly\n- [ ] I have added an entry to `CHANGELOG.md` (test-only change)\n- [ ] I have updated relevant examples in the `examples/` directory\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n- Full `cargo nextest run --workspace --all-targets --features\ntokio,json,hot-join,violation-census`: 3719 passed, 77 skipped.\n- `cargo clippy --workspace --all-targets --features\ntokio,json,hot-join,violation-census -- -D warnings`: clean.\n- Targeted new tests: 10/10 pass.\n- Local `cargo mutants` run on the affected functions confirms the\npreviously reported survivors are killed (see conversation evidence).\n- `python3 scripts/ci/agent-preflight.py --full --auto-fix`: expected to\npass; CI will confirm.\n\n## Related Issues\n\nFollow-up to #499 and #497.",
+          "timestamp": "2026-11-20T04:35:25Z",
+          "tree_id": "6a6e4cc6792312ddd1ab1d525f6165f9028f69c5",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/57494b78761444facd5a5f4b0aaeceef66a5d3be"
+        },
+        "date": 1795149987885,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 24477,
+            "range": "± 493",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 14924,
+            "range": "± 155",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 449,
+            "range": "± 22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 559,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 5074,
+            "range": "± 178",
             "unit": "ns/iter"
           }
         ]
