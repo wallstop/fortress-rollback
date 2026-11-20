@@ -4041,3 +4041,231 @@ fn isolated_coordinator_removal_still_commits_on_reachable_majority() {
         "the isolated-coordinator row must reproduce its exact trace"
     );
 }
+
+/// CAP matrix row 8: the same isolated-coordinator removal, but with a
+/// `disconnect_timeout` (5s) longer than the two-second coordinated-drop
+/// deadline. The coordinator endpoint cannot time out before the operation
+/// deadline, so the reachable strict majority must use the bounded failover
+/// grace to select the lowest remaining participant as acting coordinator.
+/// Both the coordinator and the requested target are isolated; the majority
+/// must still certify the requested target and keep confirming on one history.
+#[test]
+fn isolated_coordinator_removal_commits_under_long_disconnect_timeout() {
+    const N: usize = 5;
+    let mut initial_links = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let mut events = Vec::new();
+    for other in 1..N {
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: 0,
+                to: other,
+                blocked: true,
+            },
+        ));
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: other,
+                to: 0,
+                blocked: true,
+            },
+        ));
+    }
+    for other in 0..(N - 1) {
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: N - 1,
+                to: other,
+                blocked: true,
+            },
+        ));
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: other,
+                to: N - 1,
+                blocked: true,
+            },
+        ));
+    }
+    events.push((
+        120,
+        ScheduleEvent::GracefulRemove {
+            by: 1,
+            target: N - 1,
+        },
+    ));
+    events.sort_by_key(|(step, _)| *step);
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x0fed_cba9_8765_4321,
+        config: SimConfig {
+            n_players: N,
+            steps: STEPS,
+            noise: BackgroundNoise::Clean,
+            disconnect_behavior: DropPolicy::ContinueWithout,
+            ..SimConfig::smoke(N)
+        },
+        initial_links,
+        events,
+        heal_at: STEPS,
+    };
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(5)),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let final_snapshot = report.trace_tail.last().expect("non-empty trace");
+    for survivor in [1_usize, 2, 3] {
+        assert_eq!(
+            final_snapshot.session_states.get(survivor),
+            Some(&TraceSessionState::Running),
+            "majority survivor {survivor} must stay Running after the bounded coordinator failover"
+        );
+        assert!(
+            report.final_confirmed[survivor] > 400,
+            "majority survivor {survivor} must keep confirming after the failover: {:?}",
+            report.final_confirmed
+        );
+        assert!(
+            report.peer_dropped_order_by_peer[survivor].contains(&(N as u16 - 1)),
+            "majority survivor {survivor} must certify the requested removal: {:?}",
+            report.peer_dropped_order_by_peer
+        );
+    }
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+                | OracleFailure::FreezeFrameDivergence { .. }
+        )),
+        "the failover certificate must not fork or diverge: {:?}",
+        report.verdict.failures
+    );
+    let replay = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the long-timeout failover row must reproduce its exact trace"
+    );
+}
+/// CAP matrix row 9: the fallback coordinator must also take over when the
+/// requester is not the fallback candidate. Peer 2 requests the removal while
+/// peer 0 (the deterministic coordinator) is isolated; peer 1 is the
+/// deterministic fallback and must adopt peer 2's prepare after the grace,
+/// collect the reachable quorum's reports, and certify the removal.
+#[test]
+fn fallback_coordinator_takes_over_a_different_requesters_prepare() {
+    const N: usize = 5;
+    let mut initial_links = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let mut events = Vec::new();
+    for other in 1..N {
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: 0,
+                to: other,
+                blocked: true,
+            },
+        ));
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: other,
+                to: 0,
+                blocked: true,
+            },
+        ));
+    }
+    events.push((
+        120,
+        ScheduleEvent::GracefulRemove {
+            by: 2,
+            target: N - 1,
+        },
+    ));
+    events.sort_by_key(|(step, _)| *step);
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x0ddc_ba98_7654_3210,
+        config: SimConfig {
+            n_players: N,
+            steps: STEPS,
+            noise: BackgroundNoise::Clean,
+            disconnect_behavior: DropPolicy::ContinueWithout,
+            ..SimConfig::smoke(N)
+        },
+        initial_links,
+        events,
+        heal_at: STEPS,
+    };
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(5)),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let final_snapshot = report.trace_tail.last().expect("non-empty trace");
+    for survivor in [1_usize, 2, 3] {
+        assert_eq!(
+            final_snapshot.session_states.get(survivor),
+            Some(&TraceSessionState::Running),
+            "majority survivor {survivor} must stay Running after the requester-driven failover"
+        );
+        assert!(
+            report.final_confirmed[survivor] > 400,
+            "majority survivor {survivor} must keep confirming after the failover: {:?}",
+            report.final_confirmed
+        );
+        assert!(
+            report.peer_dropped_order_by_peer[survivor].contains(&(N as u16 - 1)),
+            "majority survivor {survivor} must certify the requested removal: {:?}",
+            report.peer_dropped_order_by_peer
+        );
+    }
+    assert_eq!(
+        final_snapshot.session_states.first(),
+        Some(&TraceSessionState::Synchronizing),
+        "the isolated coordinator must fail closed"
+    );
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+                | OracleFailure::FreezeFrameDivergence { .. }
+        )),
+        "the requester-driven failover must not fork or diverge: {:?}",
+        report.verdict.failures
+    );
+    let replay = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the requester-driven failover row must reproduce its exact trace"
+    );
+}

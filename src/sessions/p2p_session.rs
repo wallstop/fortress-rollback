@@ -282,8 +282,28 @@ struct CoordinatedDropAttempt<A> {
     /// backfill range after the start-of-attempt inventory was taken. Bounded
     /// by `num_players`.
     donor_announcements: BTreeMap<u16, DonorAnnouncement>,
+    /// Acting coordinator after the deterministic coordinator has been silent
+    /// for [`COORDINATED_DROP_FALLBACK_GRACE`]. `None` means the deterministic
+    /// lowest participant still owns cut selection.
+    acting_coordinator: Option<u16>,
+    /// Whether any drop-control message for this operation has been received
+    /// from the deterministic coordinator. Once true, this endpoint never
+    /// promotes the fallback coordinator.
+    coordinator_heard: bool,
     started_at: web_time::Instant,
     last_broadcast_at: web_time::Instant,
+}
+
+/// A non-coordinator prepare retained while the deterministic coordinator is
+/// silent. After [`COORDINATED_DROP_FALLBACK_GRACE`] the lowest remaining
+/// participant may admit it as acting coordinator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FallbackDropPrepare {
+    prepare: DropPrepare,
+    first_seen_at: web_time::Instant,
+    /// Set when any drop-control message from the deterministic coordinator
+    /// arrives; the real coordinator is alive, so no fallback is admitted.
+    coordinator_heard: bool,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -321,6 +341,17 @@ struct PendingTargetCommit<A> {
 /// acknowledgement to freeze their own history. A target that never
 /// acknowledges is bounded by its own peer-disconnect timeout instead.
 const COORDINATED_DROP_COMMIT_RETRY_WINDOW: web_time::Duration = web_time::Duration::from_secs(1);
+
+/// How long a non-coordinator waits for the deterministic coordinator before
+/// the lowest remaining survivor may act as coordinator.
+///
+/// The operation deadline is two seconds, so this leaves one second for the
+/// fallback prepare/report/cut/ready/commit exchange. A reachable coordinator's
+/// first prepare or report normally arrives within one RTT; the grace is only a
+/// liveness fallback for a coordinator that is partitioned away from the
+/// reachable strict majority. It never bypasses quorum, and a later coordinator
+/// message still fails closed on a conflicting cut.
+const COORDINATED_DROP_FALLBACK_GRACE: web_time::Duration = web_time::Duration::from_secs(1);
 
 /// One participant's announcement that it can currently serve a drop backfill.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -382,6 +413,8 @@ struct CoordinatedDropState<A> {
     active: Option<CoordinatedDropAttempt<A>>,
     queued: std::collections::BTreeSet<PlayerHandle>,
     deferred_prepares: VecDeque<DeferredDropPrepare>,
+    /// At most one non-coordinator prepare waiting for the failover grace.
+    fallback_prepare: Option<FallbackDropPrepare>,
     committed: BTreeMap<PlayerHandle, CoordinatedDropFence>,
     /// Canonical connected-era generation retained after a dropped slot
     /// successfully rejoins. Unlike spectator epochs, this advances exactly
@@ -420,6 +453,7 @@ impl<A> Default for CoordinatedDropState<A> {
             active: None,
             queued: std::collections::BTreeSet::new(),
             deferred_prepares: VecDeque::new(),
+            fallback_prepare: None,
             committed: BTreeMap::new(),
             membership_generations: BTreeMap::new(),
             closed: VecDeque::new(),
@@ -1417,6 +1451,62 @@ impl<T: Config> P2PSession<T> {
         statuses
     }
 
+    /// The deterministic acting coordinator: the coordinator itself, or the
+    /// lowest remaining participant after the coordinator's failover grace.
+    fn coordinated_drop_fallback_coordinator(participants: &[u16]) -> Option<u16> {
+        participants.get(1).copied()
+    }
+
+    /// The coordinator that owns cut selection for `attempt`.
+    fn coordinated_drop_effective_coordinator<A>(
+        attempt: &CoordinatedDropAttempt<A>,
+    ) -> Option<u16> {
+        attempt
+            .acting_coordinator
+            .or_else(|| attempt.participants.first().copied())
+    }
+
+    /// Whether every participant missing from `have` is either the
+    /// deterministic coordinator replaced by an acting coordinator or a
+    /// participant whose endpoint is already unresponsive.
+    fn coordinated_drop_missing_witnesses_excused<A>(
+        &self,
+        attempt: &CoordinatedDropAttempt<A>,
+        missing: impl Fn(u16) -> bool,
+    ) -> bool {
+        let coordinator = attempt.participants.first().copied();
+        attempt.participants.iter().all(|participant| {
+            !missing(*participant)
+                || (attempt.acting_coordinator.is_some() && Some(*participant) == coordinator)
+                || Self::coordinated_drop_participant_unresponsive(&self.player_reg, *participant)
+        })
+    }
+
+    /// Retains a non-coordinator prepare for the failover grace. Only the
+    /// lowest-sorting operation is kept, and the first-seen time is never
+    /// reset, so a retransmission cannot indefinitely postpone the fallback.
+    fn coordinated_drop_note_fallback_prepare(&mut self, prepare: DropPrepare) {
+        if self.coordinated_drop.active.is_some() {
+            return;
+        }
+        let now = self.coordinated_drop_now();
+        if let Some(existing) = self.coordinated_drop.fallback_prepare.as_mut() {
+            if existing.prepare.operation == prepare.operation {
+                return;
+            }
+            if Self::coordinated_drop_operation_cmp(prepare.operation, existing.prepare.operation)
+                != std::cmp::Ordering::Less
+            {
+                return;
+            }
+        }
+        self.coordinated_drop.fallback_prepare = Some(FallbackDropPrepare {
+            prepare,
+            first_seen_at: now,
+            coordinator_heard: false,
+        });
+    }
+
     fn coordinated_drop_operation_cmp(
         left: DropOperationId,
         right: DropOperationId,
@@ -2138,6 +2228,7 @@ impl<T: Config> P2PSession<T> {
         let now = self.coordinated_drop_now();
         let mut reports = BTreeMap::new();
         reports.insert(local_participant, report.clone());
+        self.coordinated_drop.fallback_prepare = None;
         self.coordinated_drop.active = Some(CoordinatedDropAttempt {
             operation,
             target_addr,
@@ -2162,6 +2253,8 @@ impl<T: Config> P2PSession<T> {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -2314,6 +2407,21 @@ impl<T: Config> P2PSession<T> {
         prepare: DropPrepare,
         source: Option<u16>,
     ) -> Result<(), DropAbortReason> {
+        self.coordinated_drop_accept_prepare_with_act(prepare, source, None)
+    }
+
+    /// Admission with an optional acting coordinator.
+    ///
+    /// `acting` is set only by [`Self::drive_coordinator_fallback`] after the
+    /// deterministic coordinator has been silent for the failover grace. It
+    /// must name the deterministic lowest remaining participant and the sender
+    /// must be that participant's forwarded prepare.
+    fn coordinated_drop_accept_prepare_with_act(
+        &mut self,
+        prepare: DropPrepare,
+        source: Option<u16>,
+        acting: Option<u16>,
+    ) -> Result<(), DropAbortReason> {
         // The rejection journal must be consulted before the terminal-history
         // check: an operation that was superseded during Inventory lives in
         // BOTH collections, and only the journal can answer a retransmitted
@@ -2336,6 +2444,30 @@ impl<T: Config> P2PSession<T> {
             .as_ref()
             .is_some_and(|active| active.operation == prepare.operation)
         {
+            let now = self.coordinated_drop_now();
+            let mut coordinator_heard = false;
+            if let Some(active) = self.coordinated_drop.active.as_mut() {
+                let fallback = Self::coordinated_drop_fallback_coordinator(&active.participants);
+                let adopt_fallback = acting.is_none()
+                    && active.acting_coordinator.is_none()
+                    && !active.coordinator_heard
+                    && source == fallback
+                    && now.saturating_duration_since(active.started_at)
+                        >= COORDINATED_DROP_FALLBACK_GRACE;
+                let acting = acting.or_else(|| adopt_fallback.then_some(fallback).flatten());
+                let is_deterministic_coordinator =
+                    active.participants.first().copied() == Some(active.local_participant);
+                if acting.is_some() && !is_deterministic_coordinator && active.cut.is_none() {
+                    active.acting_coordinator = acting;
+                }
+                if source == active.participants.first().copied() {
+                    active.coordinator_heard = true;
+                    coordinator_heard = true;
+                }
+            }
+            if coordinator_heard {
+                self.coordinated_drop.fallback_prepare = None;
+            }
             return Ok(());
         }
         if !self.coordinated_drop_validate_prepare(&prepare) {
@@ -2369,7 +2501,29 @@ impl<T: Config> P2PSession<T> {
         // superseded attempt can reach `Ready` before its abort arrives.
         let coordinator = Self::coordinated_drop_coordinator(&prepare.participants)
             .ok_or(DropAbortReason::GenerationChanged)?;
-        if local_participant != coordinator && source != Some(coordinator) {
+        if let Some(acting) = acting {
+            // The fallback is deterministic and may only replace the
+            // deterministic coordinator; it never grants a participant
+            // authority above the coordinator it replaces, and the real
+            // coordinator never yields to it.
+            if local_participant == coordinator {
+                return Ok(());
+            }
+            if acting == coordinator
+                || Self::coordinated_drop_fallback_coordinator(&prepare.participants)
+                    != Some(acting)
+                || source != Some(acting)
+            {
+                return Err(DropAbortReason::GenerationChanged);
+            }
+        } else if local_participant != coordinator && source != Some(coordinator) {
+            // Retain the prepare for the failover grace. The requester or a
+            // relay may have sent it; the acting authority is the deterministic
+            // fallback, not the sender. A later coordinator message clears it;
+            // retransmissions keep the same first-seen deadline.
+            if source.is_some_and(|source| prepare.participants.contains(&source)) {
+                self.coordinated_drop_note_fallback_prepare(prepare.clone());
+            }
             // This participant cannot admit the operation, but it can relay it
             // to the coordinator. Forwarding preserves reachability through a
             // relay when the requester's direct link to the coordinator is
@@ -2377,6 +2531,8 @@ impl<T: Config> P2PSession<T> {
             // relay cannot open a conflicting attempt.
             self.coordinated_drop_send_prepare_direct(prepare, coordinator);
             return Ok(());
+        } else if source == Some(coordinator) || local_participant == coordinator {
+            self.coordinated_drop.fallback_prepare = None;
         }
 
         if let Some(active) = self.coordinated_drop.active.as_ref() {
@@ -2508,6 +2664,8 @@ impl<T: Config> P2PSession<T> {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: acting,
+            coordinator_heard: local_participant == coordinator || source == Some(coordinator),
             started_at: now,
             last_broadcast_at: now,
         });
@@ -2542,6 +2700,25 @@ impl<T: Config> P2PSession<T> {
         }
         if self.coordinated_drop_reject_retransmission(report.operation) {
             return Ok(());
+        }
+        // Any report from the deterministic coordinator proves it is alive:
+        // cancel a pending fallback and stop the local promotion gate.
+        let coordinator = self
+            .coordinated_drop
+            .active
+            .as_ref()
+            .and_then(|active| active.participants.first().copied())
+            .or_else(|| {
+                self.coordinated_drop
+                    .fallback_prepare
+                    .as_ref()
+                    .and_then(|candidate| candidate.prepare.participants.first().copied())
+            });
+        if source.is_some() && source == coordinator {
+            self.coordinated_drop.fallback_prepare = None;
+            if let Some(active) = self.coordinated_drop.active.as_mut() {
+                active.coordinator_heard = true;
+            }
         }
         let relay_message = report.clone();
         // A participant that missed the initial commit burst keeps
@@ -2583,6 +2760,7 @@ impl<T: Config> P2PSession<T> {
         if self.coordinated_drop.active.is_none() {
             return Ok(());
         }
+        let now = self.coordinated_drop_now();
         let Some(active) = self.coordinated_drop.active.as_mut() else {
             return Ok(());
         };
@@ -2606,9 +2784,24 @@ impl<T: Config> P2PSession<T> {
                     && report.receipts.is_empty()
                     && report.exposed_confirmed.is_null();
                 if coordinator_cut_announcement {
-                    let coordinator = Self::coordinated_drop_coordinator(&active.participants);
+                    let mut coordinator = Self::coordinated_drop_effective_coordinator(active);
                     if Some(report.participant) != coordinator {
-                        return Err(DropAbortReason::GenerationChanged);
+                        let fallback =
+                            Self::coordinated_drop_fallback_coordinator(&active.participants);
+                        let may_adopt = active.acting_coordinator.is_none()
+                            && active.cut.is_none()
+                            && !active.coordinator_heard
+                            && Some(report.participant) == fallback
+                            && active.participants.first().copied()
+                                != Some(active.local_participant)
+                            && now.saturating_duration_since(active.started_at)
+                                >= COORDINATED_DROP_FALLBACK_GRACE;
+                        if may_adopt {
+                            active.acting_coordinator = fallback;
+                            coordinator = fallback;
+                        } else {
+                            return Err(DropAbortReason::GenerationChanged);
+                        }
                     }
                     if active.cut.is_some_and(|cut| cut != report.cut) {
                         return Err(DropAbortReason::ConflictingHistory);
@@ -2663,13 +2856,26 @@ impl<T: Config> P2PSession<T> {
                 if !report.cut.is_valid() || !report.receipts.is_empty() {
                     return Err(DropAbortReason::ConflictingHistory);
                 }
-                let coordinator = Self::coordinated_drop_coordinator(&active.participants);
-                // Only the deterministic coordinator may originate the cut.
-                // Other participants wait for that Ready and then verify it, so
-                // two nodes can never lock different cuts for one operation.
+                let coordinator = Self::coordinated_drop_effective_coordinator(active);
+                // Only the effective coordinator may originate the cut. Other
+                // participants wait for that Ready and then verify it, so two
+                // nodes can never lock different cuts for one operation.
                 if active.cut.is_none() {
                     if Some(report.participant) != coordinator {
-                        return Ok(());
+                        let fallback =
+                            Self::coordinated_drop_fallback_coordinator(&active.participants);
+                        let may_adopt = active.acting_coordinator.is_none()
+                            && !active.coordinator_heard
+                            && Some(report.participant) == fallback
+                            && active.participants.first().copied()
+                                != Some(active.local_participant)
+                            && now.saturating_duration_since(active.started_at)
+                                >= COORDINATED_DROP_FALLBACK_GRACE;
+                        if may_adopt {
+                            active.acting_coordinator = fallback;
+                        } else {
+                            return Ok(());
+                        }
                     }
                     active.cut = Some(report.cut);
                     active.cut_digest = Some(report.cut_digest);
@@ -3946,6 +4152,62 @@ impl<T: Config> P2PSession<T> {
         true
     }
 
+    /// Admits a fallback prepare and promotes the local fallback coordinator
+    /// once the deterministic coordinator has been silent for the grace.
+    ///
+    /// The deterministic coordinator keeps priority: any drop-control message
+    /// from it clears the pending candidate or marks the active attempt as
+    /// coordinator-heard. The fallback is restricted to the deterministic
+    /// second-lowest participant, so all reachable participants compute the
+    /// same acting coordinator. Quorum, cut, transcript, and commit checks are
+    /// unchanged; the acting role only relaxes the coordinator-origin test and
+    /// excuses the replaced coordinator from the missing-witness rules.
+    fn drive_coordinator_fallback(&mut self) {
+        let now = self.coordinated_drop_now();
+        if let Some(candidate) = self.coordinated_drop.fallback_prepare.clone() {
+            let quorum = Self::coordinated_drop_quorum(candidate.prepare.participants.len());
+            let acting =
+                Self::coordinated_drop_fallback_coordinator(&candidate.prepare.participants);
+            if !candidate.coordinator_heard
+                && candidate.prepare.participants.len() >= 3
+                && quorum < candidate.prepare.participants.len()
+                && acting.is_some()
+                && now.saturating_duration_since(candidate.first_seen_at)
+                    >= COORDINATED_DROP_FALLBACK_GRACE
+            {
+                self.coordinated_drop.fallback_prepare = None;
+                // The prepare may have arrived from the requester or a relay;
+                // the acting authority is the deterministic fallback, so admit
+                // it under that identity. A rejected candidate must not fail
+                // the session closed; the deterministic coordinator path (or
+                // the operation deadline) still owns the ordinary outcome.
+                let _ = self.coordinated_drop_accept_prepare_with_act(
+                    candidate.prepare,
+                    acting,
+                    acting,
+                );
+            }
+        }
+        let promote = self.coordinated_drop.active.as_ref().is_some_and(|active| {
+            active.acting_coordinator.is_none()
+                && active.quorum < active.participants.len()
+                && !active.coordinator_heard
+                && Self::coordinated_drop_fallback_coordinator(&active.participants)
+                    == Some(active.local_participant)
+                && now.saturating_duration_since(active.started_at)
+                    >= COORDINATED_DROP_FALLBACK_GRACE
+        });
+        if promote {
+            if let Some(active) = self.coordinated_drop.active.as_mut() {
+                active.acting_coordinator = Some(active.local_participant);
+                trace!(
+                    "Taking over coordinated drop {} as acting coordinator after the deterministic coordinator was silent for the failover grace",
+                    active.operation.sequence
+                );
+            }
+        }
+    }
+
     fn drive_coordinated_drop(&mut self) {
         // Independent of any active attempt: a committed certificate outlives
         // the attempt object until its target acknowledges or the retry window
@@ -3975,6 +4237,7 @@ impl<T: Config> P2PSession<T> {
             }
             return;
         }
+        self.drive_coordinator_fallback();
         while self.coordinated_drop.active.is_none() {
             let Some(deferred) = self.coordinated_drop.deferred_prepares.pop_front() else {
                 break;
@@ -4100,7 +4363,8 @@ impl<T: Config> P2PSession<T> {
             let cut = active.cut;
             let cut_digest = active.cut_digest;
             let local_participant = active.local_participant;
-            let coordinator = participants.first().copied().unwrap_or(local_participant);
+            let coordinator =
+                Self::coordinated_drop_effective_coordinator(active).unwrap_or(local_participant);
             let is_coordinator = coordinator == local_participant;
             self.coordinated_drop_send_prepare(
                 DropPrepare {
@@ -4202,16 +4466,22 @@ impl<T: Config> P2PSession<T> {
             .is_some_and(|attempt| {
                 if attempt.cut.is_some()
                     || attempt.reports.len() < attempt.quorum
-                    || Self::coordinated_drop_coordinator(&attempt.participants)
+                    || Self::coordinated_drop_effective_coordinator(attempt)
                         != Some(attempt.local_participant)
                 {
                     return false;
                 }
-                attempt.reports.len() == attempt.participants.len()
-                    || self.coordinated_drop_missing_reports_are_unresponsive(
+                let missing_ok = if attempt.acting_coordinator.is_some() {
+                    self.coordinated_drop_missing_witnesses_excused(attempt, |participant| {
+                        !attempt.reports.contains_key(&participant)
+                    })
+                } else {
+                    self.coordinated_drop_missing_reports_are_unresponsive(
                         &attempt.participants,
                         &attempt.reports,
                     )
+                };
+                attempt.reports.len() == attempt.participants.len() || missing_ok
             });
         if choose_cut {
             let cut = self.coordinated_drop.active.as_ref().and_then(|attempt| {
@@ -4356,10 +4626,14 @@ impl<T: Config> P2PSession<T> {
                     // has observed the Ready quorum.
                     return Some(pending);
                 }
-                let is_coordinator = Self::coordinated_drop_coordinator(&active.participants)
+                let is_coordinator = Self::coordinated_drop_effective_coordinator(active)
                     == Some(active.local_participant);
                 let may_commit = if active.ready.len() == active.participants.len() {
                     true
+                } else if active.acting_coordinator.is_some() {
+                    self.coordinated_drop_missing_witnesses_excused(active, |participant| {
+                        !active.ready.contains(&participant)
+                    })
                 } else {
                     self.coordinated_drop_missing_ready_are_unresponsive(
                         &active.participants,
@@ -9398,6 +9672,17 @@ impl<T: Config> P2PSession<T> {
     /// coordinator's admission opens an attempt. That keeps reachability
     /// through a relay when the requester's direct link to the coordinator is
     /// lost while preventing a second, conflicting attempt from opening.
+    ///
+    /// If the deterministic coordinator is partitioned away from a reachable
+    /// strict majority, the lowest remaining participant takes over as acting
+    /// coordinator after a one-second grace (half the two-second operation
+    /// deadline). It admits the retained prepare and drives the same quorum,
+    /// cut, ready, backfill, and commit path. Any message from the real
+    /// coordinator cancels a pending takeover, the real coordinator never
+    /// yields one, and a later conflicting cut still fails closed. The takeover
+    /// never lowers the quorum and cannot commit without a strict-majority
+    /// ready transcript.
+    ///
     /// Operations that share a coordinator are serialized there; operations
     /// with different coordinators are ordered by operation identity at each
     /// participant.
@@ -17895,6 +18180,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -18067,6 +18354,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -18168,6 +18457,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -19441,6 +19732,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -19568,6 +19861,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -19748,6 +20043,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -19941,6 +20238,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -20868,6 +21167,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -21112,6 +21413,8 @@ mod tests {
                 backfill_grid_source: None,
                 backfill_donor: None,
                 donor_announcements: BTreeMap::new(),
+                acting_coordinator: None,
+                coordinator_heard: false,
                 started_at: now,
                 last_broadcast_at: now,
             });
@@ -21297,6 +21600,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -21432,6 +21737,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -21682,6 +21989,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -22785,6 +23094,179 @@ mod tests {
     }
 
     #[test]
+    fn fallback_prepare_requires_a_participant_source_and_waits_for_grace() {
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let prepare = DropPrepare {
+            operation,
+            targets,
+            participants: vec![0, 1, 2, 3],
+        };
+
+        // A source outside the participant set is only relayed.
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .coordinated_drop_accept_prepare(prepare.clone(), Some(4))
+            .expect("a non-participant prepare is relayed");
+        assert!(session.coordinated_drop.fallback_prepare.is_none());
+        assert!(session.coordinated_drop.active.is_none());
+
+        // The fallback source is retained, but not admitted before the grace.
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .coordinated_drop_accept_prepare(prepare, Some(1))
+            .expect("the fallback prepare is retained");
+        assert!(session.coordinated_drop.fallback_prepare.is_some());
+        assert!(session.coordinated_drop.active.is_none());
+        session.drive_coordinator_fallback();
+        assert!(
+            session.coordinated_drop.active.is_none(),
+            "the failover grace has not elapsed"
+        );
+
+        let aged = session.coordinated_drop_now()
+            - COORDINATED_DROP_FALLBACK_GRACE
+            - web_time::Duration::from_millis(1);
+        session
+            .coordinated_drop
+            .fallback_prepare
+            .as_mut()
+            .expect("candidate retained")
+            .first_seen_at = aged;
+        session.drive_coordinator_fallback();
+        assert!(session.coordinated_drop.fallback_prepare.is_none());
+        let active = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("the fallback prepare is admitted after the grace");
+        assert_eq!(active.acting_coordinator, Some(1));
+        assert_eq!(active.local_participant, 2);
+        assert!(
+            !active.coordinator_heard,
+            "no coordinator message was received"
+        );
+    }
+
+    #[test]
+    fn coordinator_prepare_cancels_a_pending_fallback() {
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let prepare = DropPrepare {
+            operation,
+            targets,
+            participants: vec![0, 1, 2, 3],
+        };
+
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .coordinated_drop_accept_prepare(prepare.clone(), Some(1))
+            .expect("the fallback prepare is retained");
+        assert!(session.coordinated_drop.fallback_prepare.is_some());
+
+        session
+            .coordinated_drop_accept_prepare(prepare, Some(0))
+            .expect("the coordinator prepare admits normally");
+        assert!(
+            session.coordinated_drop.fallback_prepare.is_none(),
+            "a coordinator message must cancel the pending fallback"
+        );
+        let active = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("the coordinator prepare opened the attempt");
+        assert_eq!(active.acting_coordinator, None);
+        assert!(active.coordinator_heard);
+    }
+
+    #[test]
+    fn acting_coordinator_excuses_only_the_replaced_coordinator() {
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+        };
+        let prepare = DropPrepare {
+            operation,
+            targets,
+            participants: vec![0, 1, 2, 3],
+        };
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .coordinated_drop_accept_prepare_with_act(prepare, Some(1), Some(1))
+            .expect("the fallback prepare admits");
+        let active = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("fallback attempt active");
+        assert!(
+            session
+                .coordinated_drop_missing_witnesses_excused(active, |participant| participant == 0),
+            "the replaced coordinator is excused"
+        );
+        assert!(
+            !session
+                .coordinated_drop_missing_witnesses_excused(active, |participant| participant == 3),
+            "a running non-coordinator is not excused"
+        );
+    }
+
+    #[test]
+    fn requester_adopts_the_fallback_after_the_grace() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        let (operation, targets, participants) = {
+            let active = session.coordinated_drop.active.as_ref().expect("active");
+            (
+                active.operation,
+                active.targets.clone(),
+                active.participants.clone(),
+            )
+        };
+        let now = session.coordinated_drop_now();
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            active.started_at =
+                now - COORDINATED_DROP_FALLBACK_GRACE - web_time::Duration::from_millis(1);
+        }
+        let prepare = DropPrepare {
+            operation,
+            targets,
+            participants,
+        };
+        session
+            .coordinated_drop_accept_prepare(prepare, Some(1))
+            .expect("fallback prepare is accepted");
+        let active = session.coordinated_drop.active.as_ref().expect("active");
+        assert_eq!(active.acting_coordinator, Some(1));
+        assert!(!active.coordinator_heard);
+    }
+
+    #[test]
     fn local_donor_uses_current_retained_history() {
         let mut session = create_two_player_session();
         let handle = PlayerHandle::new(1);
@@ -23098,6 +23580,8 @@ mod tests {
             backfill_grid_source: None,
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
+            acting_coordinator: None,
+            coordinator_heard: false,
             started_at: now,
             last_broadcast_at: now,
         });

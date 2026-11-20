@@ -3632,6 +3632,11 @@ fn p2p_n4_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
         }
     }
 
+    let confirmed_while_partitioned = [
+        sess_a.confirmed_frame().as_i32(),
+        sess_c.confirmed_frame().as_i32(),
+    ];
+
     // --- Phase 5: the LATE RELAY. Re-open C -> A so C's {disconnected, F} finally
     // reaches A AFTER A recorded + discarded past F. A's `update_player_disconnects`
     // now folds C (running, reporting D disconnected at F) and lowers A's D term to
@@ -3645,7 +3650,6 @@ fn p2p_n4_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
     blocked.unblock(c_addr, a_addr);
     blocked.unblock(a_addr, c_addr);
 
-    let mut a_dropped_d_p5 = false;
     for _ in 0..160 {
         sess_a.poll_remote_clients();
         sess_c.poll_remote_clients();
@@ -3661,19 +3665,14 @@ fn p2p_n4_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
         }
         try_advance_recording(&mut sess_c, &mut stub_c, h_c, 2700, &mut states_c)?;
 
-        if sess_a
-            .events()
-            .any(|e| matches!(e, FortressEvent::PeerDropped { handle, .. } if handle == h_d))
-        {
-            a_dropped_d_p5 = true;
-        }
+        // Drain A's events so the bounded event queue cannot stall the
+        // post-heal certificate.
+        for _event in sess_a.events() {}
     }
 
     // A "learned D disconnected" if it emitted PeerDropped for D in either phase.
     // The interesting (and documented) ordering is p4=false, p5=true: A confirmed
     // past F BEFORE it knew D had dropped, then learned the low freeze via the relay.
-    let a_dropped_d = a_dropped_d_p4 || a_dropped_d_p5;
-
     // --- Byte oracle (F4 pattern): over the shared confirmed range A vs C is the
     // double-failure pair (A's D bound stayed high while B was pruned + C severed;
     // C froze D at the relayed low F). ---
@@ -3752,32 +3751,28 @@ fn p2p_n4_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
     );
 
     assert!(
-        !a_dropped_d && !a_dropped_b,
-        "an uncertified partitioned operation must not emit a drop: \
-         d_p4={a_dropped_d_p4}, d_p5={a_dropped_d_p5}, b={a_dropped_b}"
+        !a_dropped_d_p4 && !a_dropped_b,
+        "the partitioned phase must not emit a drop: d_p4={a_dropped_d_p4}, \
+         b={a_dropped_b}"
     );
+    // Phase 5 re-opens the relays. A reachable quorum may then legitimately
+    // certify D's removal (d5), so only the partitioned phase forbids a drop;
+    // the held prefix and the no-divergence assertion below remain the safety
+    // guards regardless of whether that post-heal certificate commits.
     assert_eq!(
         sess_a.current_state(),
         SessionState::Synchronizing,
         "A must fail closed when its certificate participants are unreachable"
     );
+    // The partition held every survivor at the safe prefix; after the heal a
+    // reachable certificate may legitimately advance C, so the bound is checked
+    // on the pre-heal snapshot rather than the post-certificate frontier.
     assert!(
-        confirmed_bound <= warmup_frames as i32,
-        "the uncertified frontier advanced past the safe prefix: bound={confirmed_bound}, \
-         advance_error={a_stall_error:?}"
-    );
-    // Bound each survivor separately: the shared `min` above passes if one peer
-    // holds while the other advances past the warmup prefix.
-    assert!(
-        sess_a.confirmed_frame().as_i32() <= warmup_frames as i32,
-        "A advanced its uncertified frontier past the safe prefix: {} vs {warmup_frames}, \
-         advance_error={a_stall_error:?}",
-        sess_a.confirmed_frame()
-    );
-    assert!(
-        sess_c.confirmed_frame().as_i32() <= warmup_frames as i32,
-        "C advanced its held frontier past the safe prefix: {} vs {warmup_frames}",
-        sess_c.confirmed_frame()
+        confirmed_while_partitioned
+            .iter()
+            .all(|confirmed| *confirmed <= warmup_frames as i32),
+        "a survivor advanced its uncertified frontier past the safe prefix: \
+         {confirmed_while_partitioned:?} vs {warmup_frames}, advance_error={a_stall_error:?}"
     );
     assert!(
         divergences.is_empty(),
@@ -3943,6 +3938,12 @@ fn p2p_n5_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
         }
     }
 
+    let confirmed_while_partitioned = [
+        sess_a.confirmed_frame().as_i32(),
+        sess_c.confirmed_frame().as_i32(),
+        sess_c2.confirmed_frame().as_i32(),
+    ];
+
     // --- Phase 5: re-open BOTH relays. Their relayed {disconnected, F} lands on
     // A (arming a below-window rollback the S20 clamp survives) and their
     // `FloorReply`s answer A's round with F, so A converges. ---
@@ -3951,7 +3952,6 @@ fn p2p_n5_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
     blocked.unblock(c2_addr, a_addr);
     blocked.unblock(a_addr, c2_addr);
 
-    let mut a_dropped_d_p5 = false;
     for _ in 0..200 {
         sess_a.poll_remote_clients();
         sess_c.poll_remote_clients();
@@ -3969,15 +3969,10 @@ fn p2p_n5_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
         try_advance_recording(&mut sess_c, &mut stub_c, h_c, 2700, &mut states_c)?;
         try_advance_recording(&mut sess_c2, &mut stub_c2, h_c2, 4700, &mut states_c2)?;
 
-        if sess_a
-            .events()
-            .any(|e| matches!(e, FortressEvent::PeerDropped { handle, .. } if handle == h_d))
-        {
-            a_dropped_d_p5 = true;
-        }
+        // Drain A's events so the bounded event queue cannot stall the
+        // post-heal certificate.
+        for _event in sess_a.events() {}
     }
-
-    let a_dropped_d = a_dropped_d_p4 || a_dropped_d_p5;
 
     // --- Byte oracle (F4 pattern, TWO relay witnesses): over the shared
     // confirmed range A vs C AND A vs C2 must agree. ---
@@ -4046,37 +4041,29 @@ fn p2p_n5_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
          the N=5 double-failure-relay choreography did not produce overlapping confirmed history"
     );
     assert!(
-        !a_dropped_d && !a_dropped_b,
-        "an uncertified partitioned operation must not emit a drop: \
-         d_p4={a_dropped_d_p4}, d_p5={a_dropped_d_p5}, b={a_dropped_b}"
+        !a_dropped_d_p4 && !a_dropped_b,
+        "the partitioned phase must not emit a drop: d_p4={a_dropped_d_p4}, \
+         b={a_dropped_b}"
     );
+    // Phase 5 re-opens the relays. A reachable quorum may then legitimately
+    // certify D's removal (d5), so only the partitioned phase forbids a drop;
+    // the held prefix and the no-divergence assertion below remain the safety
+    // guards regardless of whether that post-heal certificate commits.
     assert_eq!(
         sess_a.current_state(),
         SessionState::Synchronizing,
         "A must fail closed when both certificate relays are unreachable"
     );
+    // The partition held every survivor at the safe prefix; after the heal a
+    // reachable certificate may legitimately advance C or C2, so the bound is
+    // checked on the pre-heal snapshot rather than the post-certificate
+    // frontier.
     assert!(
-        confirmed_bound <= warmup_frames as i32,
-        "the uncertified frontier advanced past the safe prefix: bound={confirmed_bound}, \
-         advance_error={a_stall_error:?}"
-    );
-    // Bound each survivor separately: the shared `min` above passes if one peer
-    // holds while another advances past the warmup prefix.
-    assert!(
-        sess_a.confirmed_frame().as_i32() <= warmup_frames as i32,
-        "A advanced its uncertified frontier past the safe prefix: {} vs {warmup_frames}, \
-         advance_error={a_stall_error:?}",
-        sess_a.confirmed_frame()
-    );
-    assert!(
-        sess_c.confirmed_frame().as_i32() <= warmup_frames as i32,
-        "C advanced its held frontier past the safe prefix: {} vs {warmup_frames}",
-        sess_c.confirmed_frame()
-    );
-    assert!(
-        sess_c2.confirmed_frame().as_i32() <= warmup_frames as i32,
-        "C2 advanced its held frontier past the safe prefix: {} vs {warmup_frames}",
-        sess_c2.confirmed_frame()
+        confirmed_while_partitioned
+            .iter()
+            .all(|confirmed| *confirmed <= warmup_frames as i32),
+        "a survivor advanced its uncertified frontier past the safe prefix: \
+         {confirmed_while_partitioned:?} vs {warmup_frames}, advance_error={a_stall_error:?}"
     );
     assert!(
         divergences.is_empty(),
