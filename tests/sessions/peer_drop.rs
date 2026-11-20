@@ -3147,8 +3147,9 @@ fn p2p_n4_relay_clobber_dropped_slot_freeze_frame_converges_across_survivors(
 // pinned AT the stale-low value and never confirms past it (no window-floor
 // re-exposure). The only cross-call escape is UNREACHABLE in a full mesh
 // (see the assertion-site comment below and the rustdoc); the genuine escape needs
-// fold-membership asymmetry, which is the sibling `p2p_n4_double_failure_relay_*`
-// (REAL) corner.
+// fold-membership asymmetry, which is the sibling double-failure-relay corner
+// (`p2p_n4_double_failure_certificate_partition_fails_closed`, closed by the
+// sequence-numbered floor round).
 //
 // This test is the IN-MESH REACHABILITY evidence for that NOTABUG: it drives the
 // full choreography and the F4 byte oracle (over the shared confirmed-frame range,
@@ -3368,8 +3369,8 @@ fn p2p_n4_stale_echo_freeze_dropped_slot_converges_across_survivors() -> Result<
     //     packet carries the full connect-status vector) delivers the same low `F` to
     //     US, pinning our bound at `F` BEFORE we can confirm past it. The genuine
     //     escape requires that source endpoint to be ABSENT from our fold
-    //     (fold-membership asymmetry) — i.e. the sibling `p2p_n4_double_failure_relay_*`
-    //     (REAL) corner, where the low term's origin dies and is pruned.
+    //     (fold-membership asymmetry) — i.e. the sibling double-failure-relay
+    //     corner, where the low term's origin dies and is pruned.
     //
     // If this assertion ever fails (divergences non-empty, or C errored), the
     // stale-echo corner has gone RED and this guard must be revisited.
@@ -3443,18 +3444,25 @@ fn p2p_n4_stale_echo_freeze_dropped_slot_converges_across_survivors() -> Result<
 // freeze and the committed freezes it folds disconnected). While the round to C is
 // incomplete (C unreachable during the sever), A HOLDS its confirmed bound for D
 // at the current confirmed frame and never discards the contested window; on re-
-// open C answers with `F` over a reorder-immune reply channel and A converges.
-// Because the reply rides a dedicated seq-validated channel (not the input
-// gossip), this closes the warm, cold-cache, AND mid-game-drop reorder facets in
-// one mechanism.
+// open C answers with `F` over a reorder-immune reply channel and the fold
+// converges down. Because the reply rides a dedicated seq-validated channel (not
+// the input gossip), this closes the warm, cold-cache, AND mid-game-drop reorder
+// facets in one mechanism. The hold and release themselves are pinned by the
+// unit tests `confirmed_frame_post_prune_unreplied_relay_holds_at_last_confirmed`
+// and `remote_slot_confirmed_bound_consumes_relay_floor_round_after_prune`.
 //
-// Oracle (F4 byte pattern): over the shared confirmed-frame range, A's and C's
-// recorded confirmed StateStub must be byte-equal; an EMPTY divergence list is the
-// GREEN signal (a NON-EMPTY one is a REGRESSION). The decisive SIGNATURE of this
-// corner (vs a plain input split) is that D's confirmed *inputs* also CONVERGE
-// across A and C (both frozen at F) — so the library's own input-checksum desync
-// detector (BLIND to the pre-fix state divergence) now agrees with the converged
-// state. The assertions pin the post-fix convergence as a CI-safe guard.
+// In THIS coordinated-drop choreography the certificate cannot form (its
+// declared survivors are split), so A fails closed after holding the frontier;
+// the oracle therefore checks the SAFETY half of the fix end-to-end: over the
+// shared confirmed-frame range, A's and C's recorded confirmed StateStub must be
+// byte-equal and neither may advance past the warmup prefix. An EMPTY divergence
+// list is the GREEN signal (a NON-EMPTY one is a REGRESSION). The decisive
+// SIGNATURE of this corner (vs a plain input split) is that D's confirmed
+// *inputs* also CONVERGE across A and C (both frozen at F) — so no input
+// comparison can reveal the pre-fix state divergence; only an
+// application-supplied state checksum covering the affected frames would, and
+// those frames may already be outside the retained history. Pre-fix, the same
+// choreography advances A past the safe prefix and diverges.
 
 /// A graceful drop whose declared survivors are split into disconnected
 /// components cannot form an all-participant certificate. The frontier must
@@ -3704,7 +3712,7 @@ fn p2p_n4_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
     // frames (`F + 1` .. the early window) are by now FULLY DISCARDED from the
     // input ring — `confirmed_inputs_for_frame` returns `Err`/`None` for them —
     // which STRENGTHENS the detector-blind claim: the divergence lives in discarded
-    // history the input-checksum detector cannot inspect. So we filter to the frames
+    // history any input comparison can inspect. So we filter to the frames
     // that ARE queryable (both peers return `Ok`) and assert NON-VACUOUSLY that D's
     // converged input matches across A and C on at least one genuine frame (a plain
     // `None == None` on a discarded frame must not count as a match).
@@ -3757,6 +3765,19 @@ fn p2p_n4_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
         confirmed_bound <= warmup_frames as i32,
         "the uncertified frontier advanced past the safe prefix: bound={confirmed_bound}, \
          advance_error={a_stall_error:?}"
+    );
+    // Bound each survivor separately: the shared `min` above passes if one peer
+    // holds while the other advances past the warmup prefix.
+    assert!(
+        sess_a.confirmed_frame().as_i32() <= warmup_frames as i32,
+        "A advanced its uncertified frontier past the safe prefix: {} vs {warmup_frames}, \
+         advance_error={a_stall_error:?}",
+        sess_a.confirmed_frame()
+    );
+    assert!(
+        sess_c.confirmed_frame().as_i32() <= warmup_frames as i32,
+        "C advanced its held frontier past the safe prefix: {} vs {warmup_frames}",
+        sess_c.confirmed_frame()
     );
     assert!(
         divergences.is_empty(),
@@ -4038,6 +4059,24 @@ fn p2p_n5_double_failure_certificate_partition_fails_closed() -> Result<(), Fort
         confirmed_bound <= warmup_frames as i32,
         "the uncertified frontier advanced past the safe prefix: bound={confirmed_bound}, \
          advance_error={a_stall_error:?}"
+    );
+    // Bound each survivor separately: the shared `min` above passes if one peer
+    // holds while another advances past the warmup prefix.
+    assert!(
+        sess_a.confirmed_frame().as_i32() <= warmup_frames as i32,
+        "A advanced its uncertified frontier past the safe prefix: {} vs {warmup_frames}, \
+         advance_error={a_stall_error:?}",
+        sess_a.confirmed_frame()
+    );
+    assert!(
+        sess_c.confirmed_frame().as_i32() <= warmup_frames as i32,
+        "C advanced its held frontier past the safe prefix: {} vs {warmup_frames}",
+        sess_c.confirmed_frame()
+    );
+    assert!(
+        sess_c2.confirmed_frame().as_i32() <= warmup_frames as i32,
+        "C2 advanced its held frontier past the safe prefix: {} vs {warmup_frames}",
+        sess_c2.confirmed_frame()
     );
     assert!(
         divergences.is_empty(),
