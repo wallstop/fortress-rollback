@@ -1360,6 +1360,7 @@ impl<T: Config> P2PSession<T> {
 
     /// Whether a wire certified-dropped handle list is bounded, sorted, and
     /// range-valid.
+    #[cfg(feature = "hot-join")]
     fn certified_dropped_list_is_valid(list: &[u16], num_players: usize) -> bool {
         list.len() <= num_players
             && list.iter().all(|handle| usize::from(*handle) < num_players)
@@ -1448,6 +1449,7 @@ impl<T: Config> P2PSession<T> {
     }
 
     /// Whether no hot-join serve or reactivation is in flight.
+    #[cfg(feature = "hot-join")]
     fn no_hot_join_in_flight(
         reactivation_idle: bool,
         joining_idle: bool,
@@ -18756,31 +18758,33 @@ mod tests {
 
     #[test]
     fn pure_membership_helpers_cover_every_branch() {
-        let handle = PlayerHandle::new(2);
-        assert!(
-            P2PSession::<TestConfig>::certified_dropped_list_is_valid(&[], 3),
-            "an empty exclusion list is valid"
-        );
-        assert!(P2PSession::<TestConfig>::certified_dropped_list_is_valid(
-            &[0, 2],
-            3
-        ));
-        assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
-            &[2, 2],
-            3
-        ));
-        assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
-            &[2, 1],
-            3
-        ));
-        assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
-            &[3],
-            3
-        ));
-        assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
-            &[0, 1, 2, 3],
-            3
-        ));
+        #[cfg(feature = "hot-join")]
+        {
+            assert!(
+                P2PSession::<TestConfig>::certified_dropped_list_is_valid(&[], 3),
+                "an empty exclusion list is valid"
+            );
+            assert!(P2PSession::<TestConfig>::certified_dropped_list_is_valid(
+                &[0, 2],
+                3
+            ));
+            assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
+                &[2, 2],
+                3
+            ));
+            assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
+                &[2, 1],
+                3
+            ));
+            assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
+                &[3],
+                3
+            ));
+            assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
+                &[0, 1, 2, 3],
+                3
+            ));
+        }
         assert!(P2PSession::<TestConfig>::report_has_authority(
             0,
             &[0, 1, 2],
@@ -18837,20 +18841,24 @@ mod tests {
             true, true
         ));
         assert!(!P2PSession::<TestConfig>::endpoint_requires_disconnect_fold(true, false));
-        assert!(P2PSession::<TestConfig>::no_hot_join_in_flight(
-            true, true, true
-        ));
-        assert!(!P2PSession::<TestConfig>::no_hot_join_in_flight(
-            false, true, true
-        ));
-        assert!(!P2PSession::<TestConfig>::no_hot_join_in_flight(
-            true, false, true
-        ));
-        assert!(!P2PSession::<TestConfig>::no_hot_join_in_flight(
-            true, true, false
-        ));
         #[cfg(feature = "hot-join")]
         {
+            assert!(P2PSession::<TestConfig>::no_hot_join_in_flight(
+                true, true, true
+            ));
+            assert!(!P2PSession::<TestConfig>::no_hot_join_in_flight(
+                false, true, true
+            ));
+            assert!(!P2PSession::<TestConfig>::no_hot_join_in_flight(
+                true, false, true
+            ));
+            assert!(!P2PSession::<TestConfig>::no_hot_join_in_flight(
+                true, true, false
+            ));
+        }
+        #[cfg(feature = "hot-join")]
+        {
+            let handle = PlayerHandle::new(2);
             assert!(P2PSession::<TestConfig>::hot_join_in_flight(
                 true, None, None, handle
             ));
@@ -18951,6 +18959,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "hot-join")]
     fn reserved_automatic_intent_is_skipped_without_failing_closed() {
         let mut session = create_two_player_session();
         session.state = SessionState::Running;
