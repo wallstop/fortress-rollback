@@ -125,6 +125,7 @@ fn operation() -> DropOperationId {
         coordinator_generation: 7,
         sequence: 0x1020_3040,
         target_set_digest: 0x0102_0304_0506_0708,
+        participant_set_digest: 0x1112_1314_1516_1718,
     }
 }
 
@@ -200,6 +201,7 @@ pub(super) fn fixtures() -> Vec<(&'static str, Message)> {
                 epoch: 9,
             }],
             checksum: Some(0x3132_3334_3536_3738_393A_3B3C_3D3E_3F40),
+            certified_dropped: Vec::new(),
         }),
         MessageBody::StateSnapshotAck(StateSnapshotAck {
             frame: Frame::new(40),
@@ -356,10 +358,18 @@ fn every_protocol_v1_variant_has_immutable_exact_bytes() {
     let fixtures = fixtures();
     for (variant, message) in fixtures {
         let expected = expected(&message.body);
-        // The drop-backfill wire struct gained donor/range fields after v1.
-        // The frozen v1 body can no longer decode under the current generic
-        // struct, but the version gate must still reject it.
-        if !matches!(&message.body, MessageBody::DropBackfill(_)) {
+        // Every drop body gained the participant-set digest in v4, so the
+        // frozen body can no longer decode under the current generic struct.
+        // The version gate must still reject it.
+        if !matches!(
+            &message.body,
+            MessageBody::DropPrepare(_)
+                | MessageBody::DropReport(_)
+                | MessageBody::DropBackfill(_)
+                | MessageBody::DropCommit(_)
+                | MessageBody::DropAbort(_)
+                | MessageBody::StateSnapshot(_)
+        ) {
             assert_eq!(
                 message.encoded_len(),
                 expected.len(),

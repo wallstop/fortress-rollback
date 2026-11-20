@@ -33,8 +33,12 @@ the required certificate fails closed instead of inventing a new confirmed histo
 timeout requires another live remote endpoint as an independent witness **and** a strict majority
 of the agreed membership to remain reachable; a symmetric partition leaves only the
 majority component running, while components without a majority stop rather than committing
-complementary one-sided certificates. Explicit `remove_player(handle)` retains its one-survivor
-path for an application-directed match decision.
+complementary one-sided certificates. Explicit `remove_player(handle)` derives its participant set
+from the same agreed membership epoch (minus the targets) while the session is `Running`, so a
+two-player session keeps its one-survivor path while an isolated minority in a larger session fails
+closed instead of committing a split-view cut. During initial `Synchronizing`, the participant set
+uses the local reachable view and may exclude an unavailable peer; no confirmed history exists yet,
+so that one-survivor certificate cannot fork a confirmed stream.
 
 An asymmetric (one-way) partition is terminal for the isolated peer. Its outbound traffic stops
 while the majority's inputs keep arriving, so it can confirm up to its prediction window past the

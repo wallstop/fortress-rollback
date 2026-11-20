@@ -63,6 +63,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** a peer-controlled coordinated-drop artifact that is malformed, stale, or
+  equivocal no longer halts the receiver. Invalid prepares (stale membership, target generation,
+  or participant digest), malformed inventory/report shapes, conflicting cut or digest claims from
+  non-authority participants, and non-canonical backfill chunks are discarded with a
+  `NetworkProtocol` violation diagnostic; a malformed backfill chunk is rejected before it can reset
+  or clear an accepted donor grid; the strict-majority ready quorum and shared participant
+  set still decide the certificate, so a single faulty or hostile peer can only decline to
+  contribute. A deterministic coordinator (or acting fallback) that conflicts with an already
+  locked cut or digest still fails the session closed, as do local invariant or allocation
+  failures, a conflict with a locally committed certificate, and a failed local backfill install.
+- **Pre-existing:** two requesters in a split view can no longer commit different cuts for one
+  coordinated graceful-removal target. The participant set is the agreed membership epoch minus
+  the targets, independent of local endpoint reachability, and its digest is bound into the
+  operation identity. Pinned by the deterministic split-view CAP row, the
+  `CoordinatorSplitView.tla` model (two disjoint groups; the local-view configuration is an
+  manual demo-fail), and participant-derivation unit guards.
 - **Pre-existing:** a coordinated graceful removal no longer fail-closes a reachable strict
   majority when the deterministic coordinator is isolated. After a one-second grace (half the
   two-second operation deadline) the fixed fallback candidate (the deterministic second-lowest
@@ -262,6 +278,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** the wire protocol version is now `4`. `DropOperationId` carries a
+  `participant_set_digest`, so every coordinated-drop control message is eight bytes larger; the
+  hot-join `StateSnapshot` carries the era's certified-dropped slot list so a fresh joiner derives
+  the same membership; and a coordinated-drop operation's participant set is now derived from the
+  agreed membership epoch
+  (one canonical voter per endpoint; configured slots that are certified dropped or mid-reactivation are not voters) rather than from locally reachable
+  endpoints. A split-view requester can no longer shrink the quorum denominator: two disjoint
+  groups cannot both hold a strict-majority certificate for one target, and an isolated minority in
+  a larger session now fails closed instead of certifying a cut. A two-player session keeps its
+  one-survivor certificate. Upgrade every peer in a session to v4; v3 headers are rejected at the
+  handshake.
 - **Breaking:** the wire protocol version is now `3`. Coordinated graceful removal adds two
   `DropReportStage` values (`Donor` and `TargetAck`) that released v2 peers cannot decode, so v3
   sessions reject v2 headers at the handshake instead of mixing report vocabularies. Upgrade every

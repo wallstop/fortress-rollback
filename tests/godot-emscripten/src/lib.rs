@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use fortress_replay_fixture::{EXPECTED_DIGEST, EXPECTED_FRAMES, EXPECTED_REQUEST_DIGEST};
+use fortress_rollback::network::codec;
 use fortress_rollback::{
     ClockFn, Config, DisconnectBehavior, FortressEvent, FortressRequest, Frame, Message,
     NetworkStats, NonBlockingSocket, P2PSession, PlayerHandle, PlayerType, ProtocolConfig,
@@ -49,8 +50,11 @@ struct SocketHealth {
 struct MemorySocket {
     local_address: u8,
     peer_address: u8,
-    inbox: Rc<RefCell<VecDeque<(u8, Message)>>>,
-    peer_inbox: Rc<RefCell<VecDeque<(u8, Message)>>>,
+    /// Wire-encoded datagrams. Delivering bytes (not `Message` values) runs the
+    /// real encode/decode codec under Emscripten, so a width or layout
+    /// regression in the network protocol fails on the 32-bit target.
+    inbox: Rc<RefCell<VecDeque<(u8, Vec<u8>)>>>,
+    peer_inbox: Rc<RefCell<VecDeque<(u8, Vec<u8>)>>>,
     health: Rc<SocketHealth>,
 }
 
@@ -70,7 +74,11 @@ impl NonBlockingSocket<u8> for MemorySocket {
             return;
         }
 
-        inbox.push_back((self.local_address, message.clone()));
+        let Ok(bytes) = codec::encode(message) else {
+            self.health.failed.set(true);
+            return;
+        };
+        inbox.push_back((self.local_address, bytes));
         self.health
             .sends
             .set(self.health.sends.get().saturating_add(1));
@@ -89,9 +97,18 @@ impl NonBlockingSocket<u8> for MemorySocket {
             return messages;
         }
         for _ in 0..message_count {
-            if let Some(message) = inbox.pop_front() {
-                messages.push(message);
+            let Some((source, bytes)) = inbox.pop_front() else {
+                break;
+            };
+            let Ok((message, consumed)) = codec::decode_message(&bytes) else {
+                self.health.failed.set(true);
+                continue;
+            };
+            if consumed != bytes.len() {
+                self.health.failed.set(true);
+                continue;
             }
+            messages.push((source, message));
         }
         messages
     }
@@ -624,6 +641,9 @@ fn replay_evidence() -> Result<(u32, u64, String, String, u32), String> {
     // of replay playback, so it is checked separately against native bytes.
     fortress_replay_fixture::check_machine_width_parity()?;
     fortress_replay_fixture::check_compression_parity()?;
+    if !fortress_replay_fixture::check_wire_codec_digest() {
+        return Err("coordinated-drop wire codec digest differs under Emscripten".to_owned());
+    }
     let evidence = fortress_replay_fixture::replay_fixture()?;
     if evidence.frames != EXPECTED_FRAMES {
         return Err(format!(

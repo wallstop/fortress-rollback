@@ -654,6 +654,23 @@ jobs:
         if: matrix.target == 'wasm32-unknown-emscripten'
         run: ./scripts/ci/check-emscripten-dependencies.sh
 
+      - name: Install wasmtime for the wasip1 runtime probe
+        if: matrix.target == 'wasm32-wasip1'
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: wasmtime
+
+      # Compile-only evidence cannot catch a `usize`-width, endianness, or
+      # WASM-boundary regression in the replay, machine-width, compression, or
+      # wire-codec paths (issue #506).
+      - name: Run wasip1 replay runtime probe
+        if: matrix.target == 'wasm32-wasip1'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cargo build -p fortress-replay-fixture --target ${{ matrix.target }} --bin wasip1-replay-probe
+          wasmtime run target/${{ matrix.target }}/debug/wasip1-replay-probe.wasm
+
   # Real Godot web exports exercise the dynamic-linking boundary that compile
   # checks cannot validate. Both threaded and non-threaded modes run in Chromium.
   godot-emscripten:
@@ -974,3 +991,12 @@ jobs:
           cargo nextest run --profile ci-cross-arch --target ${{ matrix.target }}
           --test simulation --features tokio,json,hot-join
           -E "test(hot_join_trace_matches_checked_in_cross_architecture_digest)"
+
+      # Serve-timeout, retry, rejoin, and reactivation rows live in the
+      # feature-gated `sessions` target. Exercise them on the 32-bit and
+      # aarch64 lanes too, not only on x86_64 (issue #506).
+      - name: Run hot-join session suite cross-architecture
+        run: >-
+          cargo nextest run --profile ci-cross-arch --target ${{ matrix.target }}
+          --test sessions --features tokio,json,hot-join
+          -E "test(sessions::hot_join::)"

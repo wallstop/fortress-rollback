@@ -701,6 +701,20 @@ a one-second grace, admits it under the deterministic fallback identity, and
 then uses the unchanged quorum/cut/ready/commit path; message loss, backfill,
 and target acknowledgement remain Rust-level obligations.
 
+`specs/tla/CoordinatorSplitView.tla` models the participant-set rule for that
+barrier under a split view. Two disjoint requester groups derive the participant
+set from the shared agreed membership epoch (every configured slot that has not
+been certified dropped), independent of locally reachable endpoints. With the
+epoch policy the configuration proves at most one committed cut non-vacuously:
+the five-member group commits a cut and the three-member group cannot. The
+manual `CoordinatorSplitViewLocal.cfg` configuration derives each group's
+participant set from its own reachable view instead and is a manual demo-fail
+(not auto-run by `verify-tla.sh`): both groups commit different cuts for one
+target. Binding the
+participant-set digest into the operation identity and validating it on every
+prepare are Rust-level obligations pinned by the deterministic split-view
+simulation row and the participant-derivation unit guards.
+
 `specs/tla/CoordinatedPeerDrop.tla` models two serialized operation IDs over two
 membership/target eras with independent per-survivor commit. The runtime defers
 a prepare received while a prior commit closes, discards its stale participant
@@ -776,6 +790,7 @@ implementation/test obligations.
 | Concurrency model             | TLA+ | ✅ Implemented (`specs/tla/Concurrency.tla`)      |
 | Graceful-drop barrier model | TLA+ | ✅ Implemented (`specs/tla/CoordinatedPeerDrop.tla`) |
 | Coordinated-drop coordinator failover | TLA+ | ✅ Implemented (`specs/tla/CoordinatorFailover.tla` + competing-cut safety companion) |
+| Coordinated-drop split-view participant sets | TLA+ | ✅ Implemented (`specs/tla/CoordinatorSplitView.tla` + manual local-view demo-fail) |
 
 ---
 

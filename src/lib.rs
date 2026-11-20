@@ -509,7 +509,7 @@ pub mod __internal {
 /// Protocol v3 adds the current-history donor and target-acknowledgement drop
 /// report stages; released v2 peers cannot decode those values and must fail
 /// closed at the header check instead of handshaking.
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Internally, -1 represents no frame / invalid frame.
 ///
