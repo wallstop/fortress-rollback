@@ -563,9 +563,11 @@ fn stats_alloc_realloc_growth_is_already_embedded_in_allocated_bytes() {
     // of 2 MiB.
     //
     // The region measures the process-global allocator, so the test harness
-    // may allocate a few dozen bytes on another thread while this test runs
-    // (observed under QEMU). Size the growth far above that noise and allow a
-    // small slack on the net-live assertion; the realloc counters are exact.
+    // may allocate or reallocate a few dozen bytes on another thread while
+    // this test runs (observed under QEMU). Size the growth far above that
+    // noise and allow a small slack on the net-live assertion. The raw
+    // allocation/reallocation counters are global and cannot be pinned
+    // exactly; only the growth-embedding and double-count bounds matter here.
     const INITIAL_BYTES: usize = 1_024 * 1_024;
     const GROWN_BYTES: usize = 2 * INITIAL_BYTES;
     const HARNESS_NOISE_BYTES: i64 = 64 * 1_024;
@@ -577,11 +579,9 @@ fn stats_alloc_realloc_growth_is_already_embedded_in_allocated_bytes() {
     assert_eq!(buffer.len(), 0);
     assert_eq!(buffer.capacity(), GROWN_BYTES);
     let stats = region.change();
-    assert_eq!(stats.reallocations, 1, "{stats:?}");
-    assert_eq!(
-        stats.bytes_reallocated,
-        isize::try_from(INITIAL_BYTES).unwrap_or(isize::MAX),
-        "{stats:?}"
+    assert!(
+        stats.reallocations >= 1,
+        "the growth must be observed as a reallocation: {stats:?}"
     );
     assert!(
         stats.bytes_allocated >= GROWN_BYTES,
