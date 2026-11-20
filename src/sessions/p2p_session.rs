@@ -286,6 +286,11 @@ struct CoordinatedDropAttempt<A> {
     /// for [`COORDINATED_DROP_FALLBACK_GRACE`]. `None` means the deterministic
     /// lowest participant still owns cut selection.
     acting_coordinator: Option<u16>,
+    /// Most recent message from the deterministic coordinator for this
+    /// operation. Kept on the attempt itself so the bounded cross-operation
+    /// journal cannot evict the evidence and make an alive coordinator look
+    /// silent.
+    coordinator_heard_at: Option<web_time::Instant>,
     started_at: web_time::Instant,
     last_broadcast_at: web_time::Instant,
 }
@@ -297,6 +302,9 @@ struct CoordinatedDropAttempt<A> {
 struct FallbackDropPrepare {
     prepare: DropPrepare,
     first_seen_at: web_time::Instant,
+    /// Coordinator-heard evidence captured when the candidate was retained.
+    /// A later coordinator message clears the candidate.
+    coordinator_heard_at: Option<web_time::Instant>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1497,32 +1505,58 @@ impl<T: Config> P2PSession<T> {
             .find(|(existing, _heard_at)| *existing == operation)
         {
             heard.1 = now;
-            return;
-        }
-        self.coordinated_drop
-            .coordinator_heard_operations
-            .push_back((operation, now));
-        while self.coordinated_drop.coordinator_heard_operations.len() > self.num_players.max(1) {
+        } else {
             self.coordinated_drop
                 .coordinator_heard_operations
-                .pop_front();
+                .push_back((operation, now));
+            while self.coordinated_drop.coordinator_heard_operations.len() > self.num_players.max(1)
+            {
+                self.coordinated_drop
+                    .coordinator_heard_operations
+                    .pop_front();
+            }
+        }
+        if let Some(active) = self
+            .coordinated_drop
+            .active
+            .as_mut()
+            .filter(|active| active.operation == operation)
+        {
+            active.coordinator_heard_at = Some(now);
+        }
+        if let Some(candidate) = self
+            .coordinated_drop
+            .fallback_prepare
+            .as_mut()
+            .filter(|candidate| candidate.prepare.operation == operation)
+        {
+            candidate.coordinator_heard_at = Some(now);
         }
     }
 
-    /// Whether the deterministic coordinator has been silent for at least the
-    /// failover grace. `now` is the caller's single poll timestamp.
-    fn coordinated_drop_coordinator_silent(
+    /// Most recent coordinator message for `operation`, if the bounded journal
+    /// still retains it. Live attempts and candidates also carry their own
+    /// timestamp so eviction from this journal can never be mistaken for
+    /// silence.
+    fn coordinated_drop_last_coordinator_heard(
         &self,
         operation: DropOperationId,
-        now: web_time::Instant,
-    ) -> bool {
+    ) -> Option<web_time::Instant> {
         self.coordinated_drop
             .coordinator_heard_operations
             .iter()
             .find(|(existing, _heard_at)| *existing == operation)
-            .is_none_or(|(_operation, heard_at)| {
-                now.saturating_duration_since(*heard_at) >= COORDINATED_DROP_FALLBACK_GRACE
-            })
+            .map(|(_operation, heard_at)| *heard_at)
+    }
+
+    /// Whether the coordinator has been silent for at least the failover grace.
+    fn coordinated_drop_silent_since(
+        heard_at: Option<web_time::Instant>,
+        now: web_time::Instant,
+    ) -> bool {
+        heard_at.is_none_or(|heard_at| {
+            now.saturating_duration_since(heard_at) >= COORDINATED_DROP_FALLBACK_GRACE
+        })
     }
 
     /// Retains a non-coordinator prepare for the failover silence window. Only
@@ -1533,6 +1567,7 @@ impl<T: Config> P2PSession<T> {
             return;
         }
         let now = self.coordinated_drop_now();
+        let coordinator_heard_at = self.coordinated_drop_last_coordinator_heard(prepare.operation);
         if let Some(existing) = self.coordinated_drop.fallback_prepare.as_mut() {
             // Equal operations also return here: a retransmission must keep the
             // original first-seen deadline.
@@ -1545,6 +1580,7 @@ impl<T: Config> P2PSession<T> {
         self.coordinated_drop.fallback_prepare = Some(FallbackDropPrepare {
             prepare,
             first_seen_at: now,
+            coordinator_heard_at,
         });
     }
 
@@ -2280,6 +2316,7 @@ impl<T: Config> P2PSession<T> {
             .map_or(now, |candidate| std::cmp::min(candidate.first_seen_at, now));
         let mut reports = BTreeMap::new();
         reports.insert(local_participant, report.clone());
+        let coordinator_heard_at = self.coordinated_drop_last_coordinator_heard(prepare.operation);
         self.coordinated_drop.fallback_prepare = None;
         self.coordinated_drop.active = Some(CoordinatedDropAttempt {
             operation,
@@ -2306,6 +2343,7 @@ impl<T: Config> P2PSession<T> {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at,
             started_at,
             last_broadcast_at: now,
         });
@@ -2499,10 +2537,10 @@ impl<T: Config> P2PSession<T> {
             .is_some_and(|active| active.operation == prepare.operation)
         {
             let now = self.coordinated_drop_now();
-            let coordinator_silent =
-                self.coordinated_drop_coordinator_silent(prepare.operation, now);
             let mut coordinator_heard = false;
             if let Some(active) = self.coordinated_drop.active.as_mut() {
+                let coordinator_silent =
+                    Self::coordinated_drop_silent_since(active.coordinator_heard_at, now);
                 let fallback = Self::coordinated_drop_fallback_coordinator(&active.participants);
                 let adopt_fallback = acting.is_none()
                     && active.acting_coordinator.is_none()
@@ -2711,6 +2749,7 @@ impl<T: Config> P2PSession<T> {
         let quorum = Self::coordinated_drop_quorum(prepare.participants.len());
         let mut reports = BTreeMap::new();
         reports.insert(local_participant, report.clone());
+        let coordinator_heard_at = self.coordinated_drop_last_coordinator_heard(prepare.operation);
         self.coordinated_drop.active = Some(CoordinatedDropAttempt {
             operation: prepare.operation,
             target_addr,
@@ -2736,6 +2775,7 @@ impl<T: Config> P2PSession<T> {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: acting,
+            coordinator_heard_at,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -2826,13 +2866,14 @@ impl<T: Config> P2PSession<T> {
             return Ok(());
         }
         let now = self.coordinated_drop_now();
-        let coordinator_silent = self.coordinated_drop_coordinator_silent(report.operation, now);
         let Some(active) = self.coordinated_drop.active.as_mut() else {
             return Ok(());
         };
         if active.operation != report.operation {
             return Ok(());
         }
+        let coordinator_silent =
+            Self::coordinated_drop_silent_since(active.coordinator_heard_at, now);
         if !active.participants.contains(&report.participant) {
             return Err(DropAbortReason::GenerationChanged);
         }
@@ -4293,7 +4334,7 @@ impl<T: Config> P2PSession<T> {
         if let Some(candidate) = self.coordinated_drop.fallback_prepare.clone() {
             let acting =
                 Self::coordinated_drop_fallback_coordinator(&candidate.prepare.participants);
-            if self.coordinated_drop_coordinator_silent(candidate.prepare.operation, now)
+            if Self::coordinated_drop_silent_since(candidate.coordinator_heard_at, now)
                 && candidate.prepare.participants.len() >= 3
                 && acting.is_some()
                 && now.saturating_duration_since(candidate.first_seen_at)
@@ -4323,7 +4364,7 @@ impl<T: Config> P2PSession<T> {
         let promote = self.coordinated_drop.active.as_ref().is_some_and(|active| {
             active.acting_coordinator.is_none()
                 && active.quorum < active.participants.len()
-                && self.coordinated_drop_coordinator_silent(active.operation, now)
+                && Self::coordinated_drop_silent_since(active.coordinator_heard_at, now)
                 && Self::coordinated_drop_fallback_coordinator(&active.participants)
                     == Some(active.local_participant)
                 && now.saturating_duration_since(active.started_at)
@@ -18323,6 +18364,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -18496,6 +18538,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -18598,6 +18641,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -19950,6 +19994,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -20078,6 +20123,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -20259,6 +20305,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -20453,6 +20500,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -21381,6 +21429,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -21626,6 +21675,7 @@ mod tests {
                 backfill_donor: None,
                 donor_announcements: BTreeMap::new(),
                 acting_coordinator: None,
+                coordinator_heard_at: None,
                 started_at: now,
                 last_broadcast_at: now,
             });
@@ -21812,6 +21862,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -21948,6 +21999,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -22199,6 +22251,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
@@ -23485,9 +23538,7 @@ mod tests {
             .expect("fallback prepare is accepted");
         let active = session.coordinated_drop.active.as_ref().expect("active");
         assert_eq!(active.acting_coordinator, Some(1));
-        assert!(
-            session.coordinated_drop_coordinator_silent(operation, session.coordinated_drop_now())
-        );
+        assert!(active.coordinator_heard_at.is_none());
     }
 
     #[test]
@@ -23545,13 +23596,8 @@ mod tests {
         );
         // Once the coordinator has also been silent for the grace, the retained
         // candidate is admitted under the deterministic fallback.
-        if let Some((_operation, heard_at)) = session
-            .coordinated_drop
-            .coordinator_heard_operations
-            .iter_mut()
-            .find(|(heard, _heard_at)| *heard == operation)
-        {
-            *heard_at = aged;
+        if let Some(candidate) = session.coordinated_drop.fallback_prepare.as_mut() {
+            candidate.coordinator_heard_at = Some(aged);
         }
         session.drive_coordinator_fallback();
         let active = session
@@ -23585,6 +23631,7 @@ mod tests {
                 participants: vec![0, 1, 2, 3],
             },
             first_seen_at,
+            coordinator_heard_at: None,
         });
         session
             .begin_coordinated_drop(PlayerHandle::new(4))
@@ -23933,6 +23980,7 @@ mod tests {
         session.coordinated_drop.fallback_prepare = Some(FallbackDropPrepare {
             prepare: candidate.clone(),
             first_seen_at: session.coordinated_drop_now(),
+            coordinator_heard_at: None,
         });
         let unrelated = fallback_operation(2, 2);
         session
@@ -23980,6 +24028,49 @@ mod tests {
                 .iter()
                 .any(|(heard, _heard_at)| *heard == operation),
             "a matching coordinator report marks the active operation heard"
+        );
+    }
+
+    #[test]
+    fn evicted_coordinator_journal_cannot_release_an_heard_active_attempt() {
+        let mut session = five_player_majority_session(PlayerHandle::new(1));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        let operation = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        session.coordinated_drop_record_coordinator_heard(operation);
+        // Evict the cross-operation journal entry entirely; the active attempt
+        // must retain its own coordinator-heard timestamp.
+        for sequence in 2..(2 + u32::try_from(session.num_players).expect("player count fits u32"))
+        {
+            session.coordinated_drop_record_coordinator_heard(DropOperationId {
+                sequence,
+                ..operation
+            });
+        }
+        assert!(
+            !session
+                .coordinated_drop
+                .coordinator_heard_operations
+                .iter()
+                .any(|(heard, _heard_at)| *heard == operation),
+            "the bounded journal must have evicted the original record"
+        );
+        let now = session.coordinated_drop_now();
+        if let Some(active) = session.coordinated_drop.active.as_mut() {
+            active.started_at =
+                now - COORDINATED_DROP_FALLBACK_GRACE - web_time::Duration::from_millis(1);
+        }
+        session.drive_coordinator_fallback();
+        let active = session.coordinated_drop.active.as_ref().expect("active");
+        assert_eq!(
+            active.acting_coordinator, None,
+            "journal eviction must not make an alive coordinator look silent"
         );
     }
 
@@ -24102,13 +24193,9 @@ mod tests {
             .operation;
         silent.coordinated_drop_record_coordinator_heard(operation);
         let now = silent.coordinated_drop_now();
-        if let Some((_operation, heard_at)) = silent
-            .coordinated_drop
-            .coordinator_heard_operations
-            .iter_mut()
-            .find(|(heard, _heard_at)| *heard == operation)
-        {
-            *heard_at = now - COORDINATED_DROP_FALLBACK_GRACE - web_time::Duration::from_millis(1);
+        if let Some(active) = silent.coordinated_drop.active.as_mut() {
+            active.coordinator_heard_at =
+                Some(now - COORDINATED_DROP_FALLBACK_GRACE - web_time::Duration::from_millis(1));
         }
         silent
             .coordinated_drop_accept_report_from(inventory_cut_report(operation, 1, 10), Some(1))
@@ -24216,13 +24303,9 @@ mod tests {
             .operation;
         silent.coordinated_drop_record_coordinator_heard(operation);
         let now = silent.coordinated_drop_now();
-        if let Some((_operation, heard_at)) = silent
-            .coordinated_drop
-            .coordinator_heard_operations
-            .iter_mut()
-            .find(|(heard, _heard_at)| *heard == operation)
-        {
-            *heard_at = now - COORDINATED_DROP_FALLBACK_GRACE - web_time::Duration::from_millis(1);
+        if let Some(active) = silent.coordinated_drop.active.as_mut() {
+            active.coordinator_heard_at =
+                Some(now - COORDINATED_DROP_FALLBACK_GRACE - web_time::Duration::from_millis(1));
         }
         silent
             .coordinated_drop_accept_report_from(ready_report(operation, 1, 10, 42), Some(1))
@@ -24547,6 +24630,7 @@ mod tests {
             backfill_donor: None,
             donor_announcements: BTreeMap::new(),
             acting_coordinator: None,
+            coordinator_heard_at: None,
             started_at: now,
             last_broadcast_at: now,
         });
