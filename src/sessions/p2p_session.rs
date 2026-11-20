@@ -4236,16 +4236,24 @@ impl<T: Config> P2PSession<T> {
                     >= COORDINATED_DROP_FALLBACK_GRACE
             {
                 self.coordinated_drop.fallback_prepare = None;
+                let first_seen_at = candidate.first_seen_at;
                 // The prepare may have arrived from the requester or a relay;
                 // the acting authority is the deterministic fallback, so admit
                 // it under that identity. A rejected candidate must not fail
                 // the session closed; the deterministic coordinator path (or
                 // the operation deadline) still owns the ordinary outcome.
-                let _ = self.coordinated_drop_accept_prepare_with_act(
-                    candidate.prepare,
-                    acting,
-                    acting,
-                );
+                if self
+                    .coordinated_drop_accept_prepare_with_act(candidate.prepare, acting, acting)
+                    .is_ok()
+                {
+                    // The fallback admission must not restart the operation
+                    // deadline: the prepare has been in flight since the first
+                    // copy arrived, so the bounded attempt still ends at the
+                    // original two-second mark.
+                    if let Some(active) = self.coordinated_drop.active.as_mut() {
+                        active.started_at = std::cmp::min(active.started_at, first_seen_at);
+                    }
+                }
             }
         }
         let promote = self.coordinated_drop.active.as_ref().is_some_and(|active| {
@@ -23215,6 +23223,10 @@ mod tests {
             .expect("the fallback prepare is admitted after the grace");
         assert_eq!(active.acting_coordinator, Some(1));
         assert_eq!(active.local_participant, 2);
+        assert_eq!(
+            active.started_at, aged,
+            "fallback admission must keep the prepare's original operation deadline"
+        );
         assert!(
             !active.coordinator_heard,
             "no coordinator message was received"
