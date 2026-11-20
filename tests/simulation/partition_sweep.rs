@@ -4285,3 +4285,395 @@ fn fallback_coordinator_takes_over_a_different_requesters_prepare() {
         "the requester-driven failover row must reproduce its exact trace"
     );
 }
+
+/// CAP matrix row 10: coordinator failover must be robust to loss on the
+/// surviving majority's links, not just a clean partition. The deterministic
+/// coordinator and the requested target are isolated at the cut; the remaining
+/// three survivors run the one-second failover grace and the full
+/// inventory/backfill/ready/commit barrier over `BackgroundNoise::Rough`
+/// (2–10% loss, reordering, duplication, and short bursts) under the five-second
+/// socket timeout. All three reachable survivors must stay `Running`, confirm
+/// past the cut, and certify the requested target without a fork; both
+/// isolated peers must fail closed.
+#[test]
+fn fallback_coordinator_commits_through_rough_loss() {
+    const N: usize = 5;
+    let mut initial_links = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to {
+                initial_links.push((from, to, LinkPolicy::clean()));
+            }
+        }
+    }
+    let mut events = Vec::new();
+    for isolated in [0_usize, N - 1] {
+        for other in 0..N {
+            if other == isolated {
+                continue;
+            }
+            events.push((
+                CUT_STEP,
+                ScheduleEvent::Block {
+                    from: isolated,
+                    to: other,
+                    blocked: true,
+                },
+            ));
+            events.push((
+                CUT_STEP,
+                ScheduleEvent::Block {
+                    from: other,
+                    to: isolated,
+                    blocked: true,
+                },
+            ));
+        }
+    }
+    events.push((
+        120,
+        ScheduleEvent::GracefulRemove {
+            by: 1,
+            target: N - 1,
+        },
+    ));
+    events.sort_by_key(|(step, _)| *step);
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x00ff_00ff_1234_5678,
+        config: SimConfig {
+            n_players: N,
+            steps: STEPS,
+            noise: BackgroundNoise::Rough,
+            disconnect_behavior: DropPolicy::ContinueWithout,
+            ..SimConfig::smoke(N)
+        },
+        initial_links,
+        events,
+        heal_at: STEPS,
+    };
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(5)),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let final_snapshot = report.trace_tail.last().expect("non-empty trace");
+    for survivor in [1_usize, 2, 3] {
+        assert_eq!(
+            final_snapshot.session_states.get(survivor),
+            Some(&TraceSessionState::Running),
+            "majority survivor {survivor} must stay Running through rough loss"
+        );
+        assert!(
+            report.final_confirmed[survivor] > 400,
+            "majority survivor {survivor} must keep confirming after the lossy failover: {:?}",
+            report.final_confirmed
+        );
+        assert!(
+            report.peer_dropped_order_by_peer[survivor].contains(&(N as u16 - 1)),
+            "majority survivor {survivor} must certify the requested removal under rough loss: {:?}",
+            report.peer_dropped_order_by_peer
+        );
+    }
+    for detached in [0_usize, N - 1] {
+        assert_eq!(
+            final_snapshot.session_states.get(detached),
+            Some(&TraceSessionState::Synchronizing),
+            "detached peer {detached} must fail closed (isolated coordinator / removed target)"
+        );
+    }
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+                | OracleFailure::FreezeFrameDivergence { .. }
+        )),
+        "the lossy failover must not fork or diverge: {:?}",
+        report.verdict.failures
+    );
+    let replay = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the lossy failover row must reproduce its exact trace"
+    );
+}
+
+/// CAP matrix row 11: the deterministic coordinator participates long enough
+/// for the majority to observe its prepare/report, then disappears. The
+/// fallback grace is a *silence* window, not a "never heard" predicate: after a
+/// full second without another coordinator message the lowest remaining
+/// participant must take over and certify the removal. Latching a single early
+/// coordinator packet would force the reachable strict majority to fail closed
+/// at the two-second operation deadline.
+#[test]
+fn fallback_takes_over_after_the_coordinator_goes_silent() {
+    const N: usize = 5;
+    let delayed = LinkPolicy {
+        base_delay: Duration::from_millis(100),
+        ..LinkPolicy::clean()
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to {
+                initial_links.push((from, to, delayed.clone()));
+            }
+        }
+    }
+    let mut events = vec![(
+        120,
+        ScheduleEvent::GracefulRemove {
+            by: 1,
+            target: N - 1,
+        },
+    )];
+    // Let the coordinator's prepare/inventory round reach the majority, then
+    // isolate it for the rest of the run. The 100 ms one-way delay keeps the
+    // operation in inventory at the block step instead of committing inside
+    // the first few zero-latency polls. The target stays connected to the
+    // majority so its drop proves the requested certificate committed rather
+    // than being explained by its own socket timeout.
+    for isolated in [0_usize] {
+        for other in 0..N {
+            if other == isolated {
+                continue;
+            }
+            events.push((
+                135,
+                ScheduleEvent::Block {
+                    from: isolated,
+                    to: other,
+                    blocked: true,
+                },
+            ));
+            events.push((
+                135,
+                ScheduleEvent::Block {
+                    from: other,
+                    to: isolated,
+                    blocked: true,
+                },
+            ));
+        }
+    }
+    events.sort_by_key(|(step, _)| *step);
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x00aa_00bb_00cc_00dd,
+        config: SimConfig {
+            n_players: N,
+            steps: 1_800,
+            noise: BackgroundNoise::Clean,
+            disconnect_behavior: DropPolicy::ContinueWithout,
+            ..SimConfig::smoke(N)
+        },
+        initial_links,
+        events,
+        heal_at: 1_800,
+    };
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(5)),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
+
+    // Prefix run: the reachable majority must certify the requested target
+    // well before the five-second endpoint timeout could explain the drop.
+    let mut prefix_schedule = schedule.clone();
+    prefix_schedule.config.steps = 300;
+    let prefix = run_with_input::<StubInput>(&prefix_schedule, &options);
+    for survivor in [1_usize, 2, 3] {
+        assert!(
+            prefix.peer_dropped_order_by_peer[survivor].contains(&(N as u16 - 1)),
+            "majority survivor {survivor} must take over after coordinator silence and certify the \
+             requested removal before the socket timeout: {:?}",
+            prefix.peer_dropped_order_by_peer
+        );
+    }
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let final_snapshot = report.trace_tail.last().expect("non-empty trace");
+    for survivor in [1_usize, 2, 3] {
+        assert_eq!(
+            final_snapshot.session_states.get(survivor),
+            Some(&TraceSessionState::Running),
+            "majority survivor {survivor} must stay Running after the coordinator goes silent"
+        );
+        assert!(
+            report.final_confirmed[survivor] > 400,
+            "majority survivor {survivor} must keep confirming after the silent-coordinator \
+             failover: {:?}",
+            report.final_confirmed
+        );
+    }
+    for detached in [0_usize, N - 1] {
+        assert_eq!(
+            final_snapshot.session_states.get(detached),
+            Some(&TraceSessionState::Synchronizing),
+            "detached peer {detached} must fail closed (silent coordinator / removed target)"
+        );
+    }
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+                | OracleFailure::FreezeFrameDivergence { .. }
+        )),
+        "the silent-coordinator failover must not fork or diverge: {:?}",
+        report.verdict.failures
+    );
+    let replay = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the silent-coordinator failover row must reproduce its exact trace"
+    );
+}
+
+/// CAP matrix row 12: with the deterministic coordinator isolated, a relayed
+/// prepare must also reach the deterministic fallback candidate. The requester
+/// broadcasts to the reachable relay but its direct link to the fallback is
+/// black-holed. If the relay forwarded only to the coordinator, the fallback
+/// would first see the prepare when the relay itself took over at the
+/// one-second grace, starting a fresh grace that expires with the operation
+/// deadline. Forwarding the first copy to the fallback lets it take over on
+/// time while the reachable majority stays live.
+#[test]
+fn fallback_receives_a_relayed_prepare_through_a_broken_direct_link() {
+    const N: usize = 5;
+    let delayed = LinkPolicy {
+        base_delay: Duration::from_millis(60),
+        ..LinkPolicy::clean()
+    };
+    let mut initial_links = Vec::new();
+    for from in 0..N {
+        for to in 0..N {
+            if from != to {
+                initial_links.push((from, to, delayed.clone()));
+            }
+        }
+    }
+    let mut events = Vec::new();
+    for other in 1..N {
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: 0,
+                to: other,
+                blocked: true,
+            },
+        ));
+        events.push((
+            CUT_STEP,
+            ScheduleEvent::Block {
+                from: other,
+                to: 0,
+                blocked: true,
+            },
+        ));
+    }
+    // The requester (2) cannot reach the fallback (1) directly, but peer 3 is
+    // reachable from both and must relay the prepare.
+    events.push((
+        CUT_STEP,
+        ScheduleEvent::Block {
+            from: 2,
+            to: 1,
+            blocked: true,
+        },
+    ));
+    events.push((
+        120,
+        ScheduleEvent::GracefulRemove {
+            by: 2,
+            target: N - 1,
+        },
+    ));
+    // Restore the requester-to-fallback link once the certificate has had time
+    // to commit; the permanent one-way fault would otherwise strand survivor 1
+    // on the requester's post-commit inputs.
+    events.push((
+        350,
+        ScheduleEvent::Block {
+            from: 2,
+            to: 1,
+            blocked: false,
+        },
+    ));
+    events.sort_by_key(|(step, _)| *step);
+    let schedule = Schedule {
+        schema_version: SCHEDULE_SCHEMA_VERSION,
+        seed: SEED,
+        link_seed: SEED ^ 0x1234_00aa_00bb_5678,
+        config: SimConfig {
+            n_players: N,
+            steps: 1_800,
+            noise: BackgroundNoise::Clean,
+            disconnect_behavior: DropPolicy::ContinueWithout,
+            ..SimConfig::smoke(N)
+        },
+        initial_links,
+        events,
+        heal_at: 1_800,
+    };
+    let options = RunOptions {
+        disconnect_timeout: Some(Duration::from_secs(5)),
+        live_graceful_target: true,
+        ..RunOptions::default()
+    };
+
+    let mut prefix_schedule = schedule.clone();
+    prefix_schedule.config.steps = 300;
+    prefix_schedule.heal_at = 300;
+    prefix_schedule.events.retain(|(step, _event)| *step < 300);
+    let prefix = run_with_input::<StubInput>(&prefix_schedule, &options);
+    for survivor in [1_usize, 2, 3] {
+        assert!(
+            prefix.peer_dropped_order_by_peer[survivor].contains(&(N as u16 - 1)),
+            "majority survivor {survivor} must certify the relayed removal before the operation \
+             deadline: {:?}",
+            prefix.peer_dropped_order_by_peer
+        );
+    }
+
+    let report = run_with_input::<StubInput>(&schedule, &options);
+    let final_snapshot = report.trace_tail.last().expect("non-empty trace");
+    for survivor in [1_usize, 2, 3] {
+        assert_eq!(
+            final_snapshot.session_states.get(survivor),
+            Some(&TraceSessionState::Running),
+            "majority survivor {survivor} must stay Running after the relayed failover"
+        );
+        assert!(
+            report.final_confirmed[survivor] > 400,
+            "majority survivor {survivor} must keep confirming after the relayed failover: {:?}",
+            report.final_confirmed
+        );
+    }
+    assert!(
+        !report.verdict.failures.iter().any(|failure| matches!(
+            failure,
+            OracleFailure::ConfirmedInputDivergence { .. }
+                | OracleFailure::StateDivergence { .. }
+                | OracleFailure::InbandDesyncDetected { .. }
+                | OracleFailure::ChecksumMismatchMetric { .. }
+                | OracleFailure::FreezeFrameDivergence { .. }
+        )),
+        "the relayed failover must not fork or diverge: {:?}",
+        report.verdict.failures
+    );
+    let replay = run_with_input::<StubInput>(&schedule, &options);
+    assert_eq!(
+        report.trace_hash, replay.trace_hash,
+        "the relayed failover row must reproduce its exact trace"
+    );
+}

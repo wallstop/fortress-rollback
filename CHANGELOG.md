@@ -68,9 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two-second operation deadline) the fixed fallback candidate (the deterministic second-lowest
   participant) acts as coordinator, admits the retained prepare, and drives the same
   quorum/cut/ready/backfill/commit path. Candidate selection does not consider reachability, so an
-  unreachable fallback candidate still fails closed at the deadline. Any message from the
-  real coordinator cancels a pending takeover, the real coordinator never yields one, a later
-  conflicting cut still fails closed, and the takeover never lowers the quorum. Machine-checked by
+  unreachable fallback candidate still fails closed at the deadline. The grace is a silence
+  window: any message from the real coordinator restarts it, so a coordinator that speaks once and
+  then disappears still releases the fallback after a full silent second. The real coordinator never
+  yields, a later conflicting cut still fails closed, and the takeover never lowers the quorum.
+  Machine-checked by
   `specs/tla/CoordinatorFailover.tla` (liveness with the coordinator partitioned and safety with a
   competing coordinator), pinned by the 5s `3/1/1` partition rows and the candidate
   retention/cancellation/adoption unit guards. The default two-second path is unchanged.
@@ -123,9 +125,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared participant set, but the deterministic lowest participant now owns the cut (announced
   before Ready so a donor backfill cannot deadlock), and a strict majority of matching Ready
   witnesses commits even when a named survivor is unreachable. A non-coordinator requester
-  broadcasts its prepare to the other participants, which forward it and the operation's reports
-  to the coordinator without admitting local attempts, so a lost requester-to-coordinator link
-  does not stall the certificate while a relay path exists. Superseded operations stay in a
+  broadcasts its prepare to the other participants, which forward it (and the operation's reports)
+  to the coordinator and the deterministic fallback candidate without admitting local attempts, so
+  a lost direct link does not stall the certificate while a relay path exists. A commit that
+  overtakes the cut announcement and Ready round under loss is adopted as the staged certified cut
+  and re-enters backfill, and its reporter counts as a ready transcript, instead of failing the
+  receiver closed as conflicting history. Superseded operations stay in a
   bounded rejection journal and answer retransmitted prepares and reports with a fresh
   `Superseded` abort. A still-alive target or an omitted
   survivor that receives the commit fails closed instead of continuing on a second history, and
