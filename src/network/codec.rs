@@ -2688,6 +2688,34 @@ mod tests {
     }
 
     #[test]
+    fn drop_operation_decode_errors_name_each_body_prefix() {
+        let expected = [
+            (18_u32, "drop_prepare.operation.coordinator"),
+            (19, "drop_report.operation.coordinator"),
+            (20, "drop_backfill.operation.coordinator"),
+            (21, "drop_commit.operation.coordinator"),
+            (22, "drop_abort.operation.coordinator"),
+        ];
+        for (tag, body) in drop_bodies() {
+            let message = Message {
+                header: MessageHeader::new(1),
+                body,
+            };
+            let bytes = encode(&message).unwrap();
+            let truncated = bytes.get(..13).expect("header + variant + one byte");
+            let error = decode_message(truncated).unwrap_err().to_string();
+            let prefix = expected
+                .iter()
+                .find_map(|(candidate, prefix)| (*candidate == tag).then_some(*prefix))
+                .expect("known drop tag");
+            assert!(
+                error.contains(prefix),
+                "tag {tag} must report {prefix}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn coordinated_drop_decoder_rejects_invalid_typed_discriminants() {
         let report = Message {
             header: MessageHeader::new(1),

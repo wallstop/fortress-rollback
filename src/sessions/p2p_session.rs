@@ -560,6 +560,10 @@ where
     /// Test-only count of actual `confirmed_frame` mesh folds.
     #[cfg(test)]
     confirmed_frame_folds: std::sync::atomic::AtomicU64,
+    /// Test-only count of disconnect-fold entries that passed the healthy
+    /// early-out.
+    #[cfg(test)]
+    disconnect_fold_runs: std::sync::atomic::AtomicU64,
     /// Contains all local inputs not yet sent into the system, indexed by player handle.
     /// This should have inputs for every local player before calling `advance_frame`.
     local_inputs: Vec<Option<PlayerInput<T::Input>>>,
@@ -1354,6 +1358,14 @@ impl<T: Config> P2PSession<T> {
             .collect()
     }
 
+    /// Whether a wire certified-dropped handle list is bounded, sorted, and
+    /// range-valid.
+    fn certified_dropped_list_is_valid(list: &[u16], num_players: usize) -> bool {
+        list.len() <= num_players
+            && list.iter().all(|handle| usize::from(*handle) < num_players)
+            && list.windows(2).all(|pair| pair[0] < pair[1])
+    }
+
     /// The agreed membership epoch for coordinated drops.
     ///
     /// The epoch is the configured roster reduced to one canonical voter per
@@ -1405,20 +1417,66 @@ impl<T: Config> P2PSession<T> {
         epoch
     }
 
+    /// Whether a report participant is a coordinator authority: the
+    /// deterministic coordinator or the acting fallback.
+    fn report_has_authority(participant: u16, participants: &[u16], acting: Option<u16>) -> bool {
+        participants.first().copied() == Some(participant) || acting == Some(participant)
+    }
+
+    /// Whether a transport source is a commit authority.
+    fn source_has_authority(source: Option<u16>, coordinator: u16, effective: Option<u16>) -> bool {
+        source == Some(coordinator) || source == effective
+    }
+
+    /// Whether an endpoint-timeout removal is an automatic intent. A peer
+    /// Goodbye carries an explicit admission exemption and stays explicit when
+    /// queued.
+    fn timeout_drop_is_automatic(peer_sent_goodbye: bool) -> bool {
+        !peer_sent_goodbye
+    }
+
+    /// Whether a status table is exactly roster-sized and fully connected.
+    fn status_table_is_clean(len_matches: bool, all_connected: bool) -> bool {
+        len_matches && all_connected
+    }
+
+    /// Whether a remote endpoint requires the disconnect fold to run.
+    fn endpoint_requires_disconnect_fold(running: bool, has_disconnect: bool) -> bool {
+        !running || has_disconnect
+    }
+
+    /// Whether no hot-join serve or reactivation is in flight.
+    fn no_hot_join_in_flight(
+        reactivation_idle: bool,
+        joining_idle: bool,
+        serve_idle: bool,
+    ) -> bool {
+        reactivation_idle && joining_idle && serve_idle
+    }
+
     /// Whether a hot-join serve/reactivation is in flight for `handle`.
     #[cfg(feature = "hot-join")]
     fn coordinated_drop_slot_join_in_flight(&self, handle: PlayerHandle) -> bool {
-        self.hot_join.joining.contains_key(&handle)
-            || self
-                .hot_join
-                .npeer
-                .as_ref()
-                .is_some_and(|serve| serve.handle == handle)
-            || self
-                .hot_join
+        Self::hot_join_in_flight(
+            self.hot_join.joining.contains_key(&handle),
+            self.hot_join.npeer.as_ref().map(|serve| serve.handle),
+            self.hot_join
                 .pending_reactivation
                 .as_ref()
-                .is_some_and(|pending| pending.handle == handle)
+                .map(|pending| pending.handle),
+            handle,
+        )
+    }
+
+    /// Pure membership check for the hot-join in-flight guard.
+    #[cfg(feature = "hot-join")]
+    fn hot_join_in_flight(
+        joining: bool,
+        served: Option<PlayerHandle>,
+        reactivating: Option<PlayerHandle>,
+        handle: PlayerHandle,
+    ) -> bool {
+        joining || served == Some(handle) || reactivating == Some(handle)
     }
 
     /// Canonical participant set for dropping `targets`.
@@ -3066,14 +3124,16 @@ impl<T: Config> P2PSession<T> {
                     && report.receipts.is_empty()
                     && report.exposed_confirmed.is_null();
                 if coordinator_cut_announcement {
-                    let deterministic = active.participants.first().copied();
                     let effective = Self::coordinated_drop_effective_coordinator(active);
                     // A conflicting cut from either coordinator authority is a
                     // genuine conflict, even when the other authority currently
                     // owns the locked cut. Check it before any discard branch.
                     if active.cut.is_some_and(|cut| cut != report.cut)
-                        && (Some(report.participant) == deterministic
-                            || Some(report.participant) == effective)
+                        && Self::report_has_authority(
+                            report.participant,
+                            &active.participants,
+                            active.acting_coordinator,
+                        )
                     {
                         return Err(DropAbortReason::ConflictingHistory);
                     }
@@ -3214,10 +3274,11 @@ impl<T: Config> P2PSession<T> {
                     active.phase = CoordinatedDropPhase::Backfill;
                     relay = true;
                 } else {
-                    let conflicting_authority = Some(report.participant)
-                        == active.participants.first().copied()
-                        || Self::coordinated_drop_effective_coordinator(active)
-                            == Some(report.participant);
+                    let conflicting_authority = Self::report_has_authority(
+                        report.participant,
+                        &active.participants,
+                        active.acting_coordinator,
+                    );
                     if active.cut != Some(report.cut)
                         || active
                             .cut_digest
@@ -3262,10 +3323,11 @@ impl<T: Config> P2PSession<T> {
                     );
                     return Ok(());
                 }
-                let conflicting_authority = Some(report.participant)
-                    == active.participants.first().copied()
-                    || Self::coordinated_drop_effective_coordinator(active)
-                        == Some(report.participant);
+                let conflicting_authority = Self::report_has_authority(
+                    report.participant,
+                    &active.participants,
+                    active.acting_coordinator,
+                );
                 match Self::coordinated_drop_stage_commit_locked(
                     active,
                     DropCommit {
@@ -3323,10 +3385,11 @@ impl<T: Config> P2PSession<T> {
                     );
                     return Ok(());
                 }
-                let donor_authority = Some(report.participant)
-                    == active.participants.first().copied()
-                    || Self::coordinated_drop_effective_coordinator(active)
-                        == Some(report.participant);
+                let donor_authority = Self::report_has_authority(
+                    report.participant,
+                    &active.participants,
+                    active.acting_coordinator,
+                );
                 let plan = match Self::coordinated_drop_backfill_plan(
                     active.targets.len(),
                     report.cut,
@@ -4366,7 +4429,7 @@ impl<T: Config> P2PSession<T> {
             .filter(|active| active.operation == commit.operation)
             .and_then(Self::coordinated_drop_effective_coordinator);
         let conflicting_authority =
-            source == Some(commit.operation.coordinator) || source == effective_authority;
+            Self::source_has_authority(source, commit.operation.coordinator, effective_authority);
         let Some(active) = self.coordinated_drop.active.as_mut() else {
             return Ok(());
         };
@@ -5475,6 +5538,8 @@ impl<T: Config> P2PSession<T> {
             confirmed_frame_cache: None,
             #[cfg(test)]
             confirmed_frame_folds: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            disconnect_fold_runs: std::sync::atomic::AtomicU64::new(0),
             local_inputs,
             desync_detection,
             local_checksum_history: BTreeMap::new(),
@@ -9154,16 +9219,7 @@ impl<T: Config> P2PSession<T> {
             return;
         }
 
-        if snapshot.certified_dropped.len() > self.num_players
-            || snapshot
-                .certified_dropped
-                .iter()
-                .any(|handle| usize::from(*handle) >= self.num_players)
-            || snapshot
-                .certified_dropped
-                .windows(2)
-                .any(|pair| matches!(pair, [left, right] if left >= right))
-        {
+        if !Self::certified_dropped_list_is_valid(&snapshot.certified_dropped, self.num_players) {
             report_violation!(
                 ViolationSeverity::Error,
                 ViolationKind::NetworkProtocol,
@@ -9708,16 +9764,7 @@ impl<T: Config> P2PSession<T> {
         // (the serve only ever covers a frozen slot — an honest coordinator
         // captures pre-commit); no slot may be frozen above S (its (S, f0]
         // ring history cannot be bridged).
-        if snapshot.certified_dropped.len() > self.num_players
-            || snapshot
-                .certified_dropped
-                .iter()
-                .any(|handle| usize::from(*handle) >= self.num_players)
-            || snapshot
-                .certified_dropped
-                .windows(2)
-                .any(|pair| matches!(pair, [left, right] if left >= right))
-        {
+        if !Self::certified_dropped_list_is_valid(&snapshot.certified_dropped, self.num_players) {
             report_violation!(
                 ViolationSeverity::Warning,
                 ViolationKind::NetworkProtocol,
@@ -14798,11 +14845,12 @@ impl<T: Config> P2PSession<T> {
         let healthy_mesh_view = {
             // A truncated status table must still run the fold so its
             // invariant guards report the corruption.
-            let local_clean = self.local_connect_status.len() == self.num_players
-                && self
-                    .local_connect_status
+            let local_clean = Self::status_table_is_clean(
+                self.local_connect_status.len() == self.num_players,
+                self.local_connect_status
                     .iter()
-                    .all(|status| !status.disconnected);
+                    .all(|status| !status.disconnected),
+            );
             let gossiped_disconnect = self.player_reg.remotes.values().any(|endpoint| {
                 #[cfg(feature = "hot-join")]
                 if self.hot_join.endpoint_is_reserved(endpoint) {
@@ -14811,12 +14859,17 @@ impl<T: Config> P2PSession<T> {
                 // A stopped endpoint may not have latched a gossip disconnect
                 // yet; run the fold until it either restarts or its handles
                 // are locally disconnected.
-                !endpoint.is_running() || endpoint.peer_connect_status_has_disconnect()
+                Self::endpoint_requires_disconnect_fold(
+                    endpoint.is_running(),
+                    endpoint.peer_connect_status_has_disconnect(),
+                )
             });
             #[cfg(feature = "hot-join")]
-            let no_join_in_flight = self.hot_join.pending_reactivation.is_none()
-                && self.hot_join.joining.is_empty()
-                && self.hot_join.npeer.is_none();
+            let no_join_in_flight = Self::no_hot_join_in_flight(
+                self.hot_join.pending_reactivation.is_none(),
+                self.hot_join.joining.is_empty(),
+                self.hot_join.npeer.is_none(),
+            );
             #[cfg(not(feature = "hot-join"))]
             let no_join_in_flight = true;
             local_clean && !gossiped_disconnect && no_join_in_flight
@@ -14829,6 +14882,11 @@ impl<T: Config> P2PSession<T> {
             && self.coordinated_drop.halted_targets.is_empty()
         {
             return false;
+        }
+        #[cfg(test)]
+        {
+            self.disconnect_fold_runs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let mut changed = false;
 
@@ -15488,7 +15546,7 @@ impl<T: Config> P2PSession<T> {
                             }
                             if let Err(error) = self.begin_coordinated_drop_with_origin(
                                 target_handle,
-                                !peer_sent_goodbye,
+                                Self::timeout_drop_is_automatic(peer_sent_goodbye),
                             ) {
                                 report_violation!(
                                     ViolationSeverity::Error,
@@ -18692,6 +18750,298 @@ mod tests {
             !session.automatic_drop_survivor_quorum_met(target),
             "the target endpoint's canonical voter (handle 1) must not count as a survivor"
         );
+    }
+
+    #[test]
+    fn pure_membership_helpers_cover_every_branch() {
+        let handle = PlayerHandle::new(2);
+        assert!(
+            P2PSession::<TestConfig>::certified_dropped_list_is_valid(&[], 3),
+            "an empty exclusion list is valid"
+        );
+        assert!(P2PSession::<TestConfig>::certified_dropped_list_is_valid(
+            &[0, 2],
+            3
+        ));
+        assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
+            &[2, 2],
+            3
+        ));
+        assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
+            &[2, 1],
+            3
+        ));
+        assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
+            &[3],
+            3
+        ));
+        assert!(!P2PSession::<TestConfig>::certified_dropped_list_is_valid(
+            &[0, 1, 2, 3],
+            3
+        ));
+        assert!(P2PSession::<TestConfig>::report_has_authority(
+            0,
+            &[0, 1, 2],
+            Some(1)
+        ));
+        assert!(P2PSession::<TestConfig>::report_has_authority(
+            1,
+            &[0, 1, 2],
+            Some(1)
+        ));
+        assert!(!P2PSession::<TestConfig>::report_has_authority(
+            2,
+            &[0, 1, 2],
+            Some(1)
+        ));
+        assert!(!P2PSession::<TestConfig>::report_has_authority(
+            1,
+            &[0, 1, 2],
+            None
+        ));
+        assert!(P2PSession::<TestConfig>::source_has_authority(
+            Some(0),
+            0,
+            Some(1)
+        ));
+        assert!(P2PSession::<TestConfig>::source_has_authority(
+            Some(1),
+            0,
+            Some(1)
+        ));
+        assert!(!P2PSession::<TestConfig>::source_has_authority(
+            Some(2),
+            0,
+            Some(1)
+        ));
+        assert!(!P2PSession::<TestConfig>::source_has_authority(
+            None,
+            0,
+            Some(1)
+        ));
+        assert!(!P2PSession::<TestConfig>::timeout_drop_is_automatic(true));
+        assert!(P2PSession::<TestConfig>::timeout_drop_is_automatic(false));
+        assert!(P2PSession::<TestConfig>::status_table_is_clean(true, true));
+        assert!(!P2PSession::<TestConfig>::status_table_is_clean(
+            true, false
+        ));
+        assert!(!P2PSession::<TestConfig>::status_table_is_clean(
+            false, true
+        ));
+        assert!(P2PSession::<TestConfig>::endpoint_requires_disconnect_fold(
+            false, false
+        ));
+        assert!(P2PSession::<TestConfig>::endpoint_requires_disconnect_fold(
+            true, true
+        ));
+        assert!(!P2PSession::<TestConfig>::endpoint_requires_disconnect_fold(true, false));
+        assert!(P2PSession::<TestConfig>::no_hot_join_in_flight(
+            true, true, true
+        ));
+        assert!(!P2PSession::<TestConfig>::no_hot_join_in_flight(
+            false, true, true
+        ));
+        assert!(!P2PSession::<TestConfig>::no_hot_join_in_flight(
+            true, false, true
+        ));
+        assert!(!P2PSession::<TestConfig>::no_hot_join_in_flight(
+            true, true, false
+        ));
+        #[cfg(feature = "hot-join")]
+        {
+            assert!(P2PSession::<TestConfig>::hot_join_in_flight(
+                true, None, None, handle
+            ));
+            assert!(P2PSession::<TestConfig>::hot_join_in_flight(
+                false,
+                Some(handle),
+                None,
+                handle
+            ));
+            assert!(P2PSession::<TestConfig>::hot_join_in_flight(
+                false,
+                None,
+                Some(handle),
+                handle
+            ));
+            assert!(!P2PSession::<TestConfig>::hot_join_in_flight(
+                false,
+                Some(PlayerHandle::new(1)),
+                Some(PlayerHandle::new(1)),
+                handle
+            ));
+        }
+    }
+
+    #[test]
+    fn coordinated_drop_queue_tracks_explicit_and_automatic_origins() {
+        let mut automatic_first = five_player_majority_session(PlayerHandle::new(0));
+        automatic_first
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("active attempt");
+        automatic_first
+            .begin_coordinated_drop_with_origin(PlayerHandle::new(3), true)
+            .expect("automatic intent queued");
+        assert!(automatic_first
+            .coordinated_drop
+            .queued_automatic
+            .contains(&PlayerHandle::new(3)));
+        automatic_first
+            .begin_coordinated_drop_with_origin(PlayerHandle::new(3), false)
+            .expect("explicit intent supersedes");
+        assert!(
+            !automatic_first
+                .coordinated_drop
+                .queued_automatic
+                .contains(&PlayerHandle::new(3)),
+            "an explicit request must clear the automatic origin"
+        );
+
+        let mut explicit_first = five_player_majority_session(PlayerHandle::new(0));
+        explicit_first
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("active attempt");
+        explicit_first
+            .begin_coordinated_drop_with_origin(PlayerHandle::new(3), false)
+            .expect("explicit intent queued");
+        explicit_first
+            .begin_coordinated_drop_with_origin(PlayerHandle::new(3), true)
+            .expect("automatic retransmission");
+        assert!(
+            !explicit_first
+                .coordinated_drop
+                .queued_automatic
+                .contains(&PlayerHandle::new(3)),
+            "an automatic retransmission must not override an explicit intent"
+        );
+    }
+
+    #[test]
+    fn prepare_with_an_unbound_participant_digest_is_rejected() {
+        let session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let mut prepare = DropPrepare {
+            operation: DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence: 1,
+                target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
+                    &targets,
+                ),
+                participant_set_digest: 0,
+            },
+            targets,
+            participants: vec![0, 1, 2, 3],
+        };
+        assert!(
+            !session.coordinated_drop_validate_prepare(&prepare),
+            "the unbound participant digest must be rejected"
+        );
+        prepare.operation.participant_set_digest =
+            P2PSession::<TestConfig>::coordinated_drop_participant_digest(&prepare.participants);
+        assert!(
+            session.coordinated_drop_validate_prepare(&prepare),
+            "the bound participant digest must be accepted"
+        );
+    }
+
+    #[test]
+    fn reserved_automatic_intent_is_skipped_without_failing_closed() {
+        let mut session = create_two_player_session();
+        session.state = SessionState::Running;
+        let remote = PlayerHandle::new(1);
+        session.hot_join.reserved_slots.insert(remote);
+        session.coordinated_drop.queued.insert(remote);
+        session.coordinated_drop.queued_automatic.insert(remote);
+        session.drive_coordinated_drop();
+        assert!(
+            session.coordinated_drop.active.is_none(),
+            "a reserved slot is not an automatic-removal target"
+        );
+        assert!(
+            session.halt_confirmed_ceiling.is_none(),
+            "a reserved-slot timeout intent must not fail the session closed"
+        );
+    }
+
+    #[test]
+    fn disconnect_fold_counter_distinguishes_clean_from_dirty_views() {
+        let loads = |session: &P2PSession<TestConfig>| {
+            session
+                .disconnect_fold_runs
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let mut healthy = five_player_majority_session(PlayerHandle::new(0));
+        assert!(!healthy.update_player_disconnects());
+        assert_eq!(loads(&healthy), 0, "a clean mesh must take the early-out");
+
+        let mut gossip = five_player_majority_session(PlayerHandle::new(0));
+        gossip
+            .player_reg
+            .remotes
+            .get_mut(&test_addr(9401))
+            .expect("endpoint")
+            .set_peer_connect_status_for_tests(
+                PlayerHandle::new(2),
+                ConnectionStatus {
+                    disconnected: true,
+                    last_frame: Frame::new(5),
+                    epoch: 0,
+                },
+            );
+        let _ = gossip.update_player_disconnects();
+        assert!(loads(&gossip) > 0, "a gossiped disconnect runs the fold");
+
+        let mut stopped = five_player_majority_session(PlayerHandle::new(0));
+        stopped
+            .player_reg
+            .remotes
+            .get_mut(&test_addr(9401))
+            .expect("endpoint")
+            .force_synchronizing_for_tests();
+        let _ = stopped.update_player_disconnects();
+        assert!(loads(&stopped) > 0, "a stopped endpoint runs the fold");
+
+        let mut truncated = five_player_majority_session(PlayerHandle::new(0));
+        truncated.local_connect_status.clear();
+        let _ = truncated.update_player_disconnects();
+        assert!(
+            loads(&truncated) > 0,
+            "a truncated status table runs the fold"
+        );
+
+        let mut local_disconnect = five_player_majority_session(PlayerHandle::new(0));
+        local_disconnect.local_connect_status[2].disconnected = true;
+        let _ = local_disconnect.update_player_disconnects();
+        assert!(
+            loads(&local_disconnect) > 0,
+            "a local disconnect runs the fold"
+        );
+    }
+
+    #[test]
+    fn backfill_with_zero_frames_is_discarded() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let (operation, _cut) = staged_post_inventory_backfill_attempt(&mut session);
+        session
+            .coordinated_drop_accept_report_from(donor_report(operation, 1, Frame::new(3)), Some(1))
+            .expect("announcement accepted");
+        let mut chunk = backfill_chunk(operation, Frame::new(3), &[3, 4, 5]);
+        chunk.frame_count = 0;
+        assert_eq!(
+            session.coordinated_drop_accept_backfill(1, chunk),
+            Ok(()),
+            "a zero-frame chunk is a peer artifact"
+        );
+        assert_eq!(
+            session.diagnostic_player_retained_input_range(PlayerHandle::new(3)),
+            Some((Frame::new(0), Frame::new(2))),
+            "the malformed chunk must not install"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
     }
 
     #[test]
@@ -25135,6 +25485,171 @@ mod tests {
                 .and_then(|active| active.cut),
             Some(Frame::new(10)),
             "the staged certificate keeps authority"
+        );
+    }
+
+    #[test]
+    fn coordinator_conflicting_cut_after_a_fallback_lock_fails_closed() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        let operation = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        session
+            .coordinated_drop_accept_commit(
+                DropCommit {
+                    operation,
+                    cut: Frame::new(10),
+                    cut_digest: 7,
+                },
+                Some(1),
+            )
+            .expect("fallback certificate stages");
+        session
+            .coordinated_drop_accept_report_from(inventory_cut_report(operation, 1, 10), Some(1))
+            .expect("matching fallback announcement adopts");
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.acting_coordinator),
+            Some(1)
+        );
+        assert_eq!(
+            session.coordinated_drop_accept_report_from(
+                inventory_cut_report(operation, 0, 11),
+                Some(0)
+            ),
+            Err(DropAbortReason::ConflictingHistory),
+            "a different cut from the deterministic coordinator must fail closed"
+        );
+    }
+
+    #[test]
+    fn ready_conflicts_are_authority_scoped() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        let operation = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        session
+            .coordinated_drop_accept_report_from(inventory_cut_report(operation, 0, 10), Some(0))
+            .expect("coordinator cut announcement locks the cut");
+
+        assert_eq!(
+            session.coordinated_drop_accept_report_from(ready_report(operation, 3, 11, 7), Some(3)),
+            Ok(()),
+            "a non-authority conflicting Ready is a peer artifact"
+        );
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .and_then(|active| active.cut),
+            Some(Frame::new(10))
+        );
+
+        let before = sent_message_count(&session, crate::metrics::MessageKind::DropReport);
+        session
+            .coordinated_drop_accept_report_from(ready_report(operation, 3, 10, 7), Some(3))
+            .expect("a matching non-authority Ready is accepted");
+        assert!(
+            sent_message_count(&session, crate::metrics::MessageKind::DropReport) > before,
+            "a newly accepted Ready must be relayed"
+        );
+
+        assert_eq!(
+            session.coordinated_drop_accept_report_from(ready_report(operation, 0, 11, 7), Some(0)),
+            Err(DropAbortReason::ConflictingHistory),
+            "the coordinator's conflicting Ready fails closed"
+        );
+    }
+
+    #[test]
+    fn committed_report_conflicts_are_authority_scoped() {
+        let mut session = five_player_majority_session(PlayerHandle::new(2));
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        let operation = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        session
+            .coordinated_drop_accept_report_from(inventory_cut_report(operation, 0, 10), Some(0))
+            .expect("coordinator cut announcement locks the cut");
+        session
+            .coordinated_drop_accept_report_from(ready_report(operation, 0, 10, 7), Some(0))
+            .expect("coordinator Ready locks the digest");
+
+        let conflicting = DropReport {
+            operation,
+            participant: 3,
+            stage: DropReportStage::Committed,
+            exposed_confirmed: Frame::NULL,
+            cut: Frame::new(11),
+            cut_digest: 7,
+            receipts: Vec::new(),
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_report_from(conflicting, Some(3)),
+            Ok(()),
+            "a non-authority conflicting Committed report is a peer artifact"
+        );
+
+        let matching = DropReport {
+            operation,
+            participant: 3,
+            stage: DropReportStage::Committed,
+            exposed_confirmed: Frame::NULL,
+            cut: Frame::new(10),
+            cut_digest: 7,
+            receipts: Vec::new(),
+        };
+        let before = sent_message_count(&session, crate::metrics::MessageKind::DropReport);
+        session
+            .coordinated_drop_accept_report_from(matching, Some(3))
+            .expect("a matching non-authority Committed report is accepted");
+        assert!(
+            sent_message_count(&session, crate::metrics::MessageKind::DropReport) > before,
+            "a newly accepted Committed report must be relayed"
+        );
+        assert!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .is_some_and(|active| active.committed_acks.contains(&3)),
+            "the matching report counts as a committed ack"
+        );
+
+        let authority_conflict = DropReport {
+            operation,
+            participant: 0,
+            stage: DropReportStage::Committed,
+            exposed_confirmed: Frame::NULL,
+            cut: Frame::new(11),
+            cut_digest: 7,
+            receipts: Vec::new(),
+        };
+        assert_eq!(
+            session.coordinated_drop_accept_report_from(authority_conflict, Some(0)),
+            Err(DropAbortReason::ConflictingHistory),
+            "the coordinator's conflicting Committed report fails closed"
         );
     }
 
