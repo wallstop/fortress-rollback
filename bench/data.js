@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795149989045,
+  "lastUpdate": 1795156071025,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "fe0b935910de6d34abb062fd97ac3d9eb2aea440",
-          "message": "test(simulation): publish the violation-site exercise census (P2) (#412)\n\nJoin the checked-in report_violation! baseline with main coverage and exact nightly fleet observations, publish the unexercised set from a nightly job, and enable tokio,json,hot-join in coverage (recovering 12 hot-join sites; 13 -> 25 exercised). Also replace the hardcoded action-pin allowlist with immutable-SHA shape checks and fold in the dependabot action bumps.",
-          "timestamp": "2026-11-12T22:45:22-08:00",
-          "tree_id": "21e4c0661222ed57744ad3854c7b26384082830e",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/fe0b935910de6d34abb062fd97ac3d9eb2aea440"
-        },
-        "date": 1794552779317,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 39543,
-            "range": "± 574",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 25713,
-            "range": "± 182",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1091,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1243,
-            "range": "± 1",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2810,
-            "range": "± 221",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 5074,
             "range": "± 178",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "c7b3f7b1e9bd3b0fa5a1be42a0bc46040b9b9201",
+          "message": "fix: keep coordinated-drop failover live after coordinator silence (#508)\n\n## Summary\n\nCloses the coordinated-drop failover liveness gaps found by a CAP review\nof the newly landed\ncoordinator-failover path, plus the commit-before-cut availability gap\nin the same certificate flow.\n\n1. **The failover grace is now a silence window, not a \"never heard\"\nlatch.** A single early\ncoordinator message used to set `coordinator_heard = true` forever, so a\ncoordinator that\ncommitted/reported once and then disappeared forced a reachable strict\nmajority to fail closed\nat the two-second deadline. The journal now stores the most recent\ncoordinator timestamp per\noperation; fallback admission, promotion, cut adoption, and Ready\nadoption require a full\none-second silence window, and every coordinator message refreshes it.\nAn alive coordinator\nkeeps priority; a late conflicting cut still fails closed; quorum,\ntarget sets, digests,\n   backfill, and transcripts are unchanged.\n2. **A relayed prepare now also reaches the deterministic fallback\ncandidate.** Previously a\nnon-coordinator relay forwarded only to the coordinator. With the\ncoordinator isolated and the\nrequester-to-fallback link broken, the fallback first learned of the\noperation when the relay\ntook over at the grace, starting a fresh grace that expired with the\noperation deadline. The\n   first copy now starts the fallback's timer.\n3. **A commit that overtakes the cut/Ready round is adopted instead of\nrejected.** A valid\n`Committed` report (or direct `Commit`) received while the local attempt\nis still in `Inventory`\nused to return `ConflictingHistory` or stage a cut-less pending commit,\nfailing a reachable\nparticipant closed or timing it out. The certified cut is now adopted,\nthe attempt re-enters\nbackfill to verify local history, and the committed reporter counts as\nits ready transcript.\n4. **Coordinator-heard evidence lives on the live attempt/candidate**,\nnot only\nin the bounded cross-operation journal, so journal eviction can never be\nmistaken for coordinator silence. A regression evicts the journal entry\nand\n   asserts the fallback stays blocked while the coordinator is alive.\n5. **Steady-state drop polling skips empty mailboxes** before cloning\nendpoint handle sets.\n\nNo wire-format change. Out-of-scope findings are tracked as #504 (split\nparticipant-set views),\n#505 (malformed peer artifact fail-closes the receiver), #506\n(cross-platform runtime coverage),\nand #507 (per-advance performance follow-ups). `PLAN.md` queues #504.\n\n## Tests\n\n- `fallback_takes_over_after_the_coordinator_goes_silent`: N=5, 100 ms\nlinks, coordinator heard\nthen isolated; the reachable majority must certify the target before the\n5 s socket timeout and\n  keep confirming. Red on the old latch.\n- `fallback_receives_a_relayed_prepare_through_a_broken_direct_link`:\ncoordinator isolated,\nrequester->fallback direct link broken; the relay must forward the first\ncopy so the fallback\n  takes over on time.\n- `fallback_coordinator_commits_through_rough_loss`: same topology over\n2-10% loss, delay,\n  jitter, duplication, and loss bursts.\n- Unit guards for silence-based adoption/blocking plus direct-commit and\nCommitted-report\nstaging before the local cut, including\n`evicted_coordinator_journal_cannot_release_an_heard_active_attempt`.\n- The PCT lagging-survivor premise vector was updated to its new\ndeterministic value (the\ncontrol-path change shifted the interleaving by a few frames while\npreserving the shape).\n\n## Verification\n\n- `cargo fmt`, `cargo clippy --workspace --all-targets --features\ntokio,json`: clean.\n- Full suite: 3663 passed / 77 skipped.\n- Hot-join feature suite: see CI.\n- Targeted fallback/commit tests: 21 passed.\n- cargo-mutants over the fallback corpus: 23 caught, 4 unviable, 0\nmissed.\n- `check-plan-hygiene.py`, `markdownlint`, `typos`, changelog/version\nchecks: clean.\n- Cross-target `cargo check` for wasm32-unknown-unknown / wasi /\nemscripten, i686, aarch64.\n\n## Type of Change\n\n- [x] Bug fix (non-breaking change which fixes an issue)\n\n## Checklist\n\n- [x] I have read the CONTRIBUTING guide\n- [x] I have followed the zero-panic policy\n- [x] I have added tests that prove the fix is effective\n- [x] `cargo fmt` and clippy are clean\n- [x] Full suite passes",
+          "timestamp": "2026-11-20T06:15:08Z",
+          "tree_id": "bd583ba3ca7ced2717ad1271cf4471cd6c8ebb65",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/c7b3f7b1e9bd3b0fa5a1be42a0bc46040b9b9201"
+        },
+        "date": 1795156069700,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 60689,
+            "range": "± 1052",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 33382,
+            "range": "± 705",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1862,
+            "range": "± 107",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 107",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3140,
+            "range": "± 182",
             "unit": "ns/iter"
           }
         ]
