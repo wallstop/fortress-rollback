@@ -542,41 +542,14 @@ fn read_rss_kib() -> Option<u64> {
 /// difference to `bytes_allocated` on growth and to `bytes_deallocated` on
 /// shrink) and additionally keeps `bytes_reallocated` as an informational
 /// tally of the same deltas. Adding that tally here therefore double-counts
-/// growth; see
-/// [`stats_alloc_realloc_growth_is_already_embedded_in_allocated_bytes`] for
-/// the executable proof. Note this differs from `allocation_contract`'s
+/// growth; see `tests/stats_alloc_contract.rs` for the executable proof in an
+/// isolated process. Note this differs from `allocation_contract`'s
 /// `allocated_and_grown_bytes`, which deliberately sums the tally because it
 /// charges cumulative allocation pressure, not outstanding bytes.
 fn net_live_heap_bytes(stats: stats_alloc::Stats) -> i64 {
     let allocated = i64::try_from(stats.bytes_allocated).unwrap_or(i64::MAX);
     let deallocated = i64::try_from(stats.bytes_deallocated).unwrap_or(i64::MAX);
     allocated.saturating_sub(deallocated)
-}
-
-#[test]
-fn stats_alloc_realloc_growth_is_already_embedded_in_allocated_bytes() {
-    // Pins stats_alloc's realloc contract end-to-end: one exact allocation
-    // followed by one exact growth must leave net_live_heap_bytes equal to
-    // the final outstanding size even though bytes_reallocated also carries
-    // the growth delta. If the deltas were not embedded -- or were added
-    // again here -- this would report 12,288 instead of 8,192.
-    let region = Region::new(SOAK_MEMORY);
-    let mut buffer: Vec<u8> = Vec::new();
-    buffer.reserve_exact(4096);
-    buffer.reserve_exact(8192);
-    assert_eq!(buffer.len(), 0);
-    assert_eq!(buffer.capacity(), 8192);
-    let stats = region.change();
-    assert_eq!(stats.allocations, 1, "{stats:?}");
-    assert_eq!(stats.reallocations, 1, "{stats:?}");
-    assert_eq!(stats.bytes_allocated, 8_192, "{stats:?}");
-    assert_eq!(stats.bytes_deallocated, 0, "{stats:?}");
-    assert_eq!(stats.bytes_reallocated, 4_096, "{stats:?}");
-    assert_eq!(
-        net_live_heap_bytes(stats),
-        8_192,
-        "realloc growth must count exactly once toward outstanding bytes"
-    );
 }
 
 #[test]

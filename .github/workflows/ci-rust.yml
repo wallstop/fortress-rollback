@@ -976,10 +976,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
 
+      # Keep this suite package-scoped. `network-test-peer` always enables
+      # `fortress-rollback/hot-join`, so a `--workspace` build unifies that
+      # feature into this package and silently runs the hot-join queues here,
+      # including the 120k-poll serve-abort row that exceeds the QEMU per-test
+      # budget. Package scope is what makes "feature-gated, so compiled out"
+      # below true.
       - name: Run deterministic suite
         run: >-
           cargo nextest run --profile ci-cross-arch --target ${{ matrix.target }}
-          --workspace --features tokio,json
+          -p fortress-rollback --features tokio,json
           -E "${{ matrix.filter }}"
 
       # The hot-join membership lane is feature-gated, so the suite above
