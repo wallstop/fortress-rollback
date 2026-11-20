@@ -63,6 +63,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pre-existing:** a coordinated graceful removal no longer fail-closes a reachable strict
+  majority when the deterministic coordinator is isolated. After a one-second grace (half the
+  two-second operation deadline) the fixed fallback candidate (the deterministic second-lowest
+  participant) acts as coordinator, admits the retained prepare, and drives the same
+  quorum/cut/ready/backfill/commit path. Candidate selection does not consider reachability, so an
+  unreachable fallback candidate still fails closed at the deadline. Any message from the
+  real coordinator cancels a pending takeover, the real coordinator never yields one, a later
+  conflicting cut still fails closed, and the takeover never lowers the quorum. Machine-checked by
+  `specs/tla/CoordinatorFailover.tla` (liveness with the coordinator partitioned and safety with a
+  competing coordinator), pinned by the 5s `3/1/1` partition rows and the candidate
+  retention/cancellation/adoption unit guards. The default two-second path is unchanged.
 - **Pre-existing:** periodic hot-join cycles no longer wedge after many rejoins. A committed drop
   for a slot now supersedes an in-flight but not-yet-reopened reactivation for that slot (its
   shield previously kept the slot connected forever and blocked every later directive), including

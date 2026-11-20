@@ -74,6 +74,8 @@ SPECS=(
     "SpectatorReactivationEpoch"
     "PeerDrop"
     "CoordinatedPeerDrop"
+    "CoordinatorFailover"
+    "CoordinatorFailoverCompeting"
     "NPeerReactivation"
     "NPeerServeFreezeConvergence"
     "FreezeConvergence"
