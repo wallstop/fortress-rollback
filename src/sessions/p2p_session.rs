@@ -23935,6 +23935,33 @@ mod tests {
             Err(DropAbortReason::GenerationChanged)
         );
 
+        // The active flag alone blocks the fallback cut, without a cut or
+        // journal entry.
+        let mut flagged = five_player_majority_session(PlayerHandle::new(2));
+        flagged
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut flagged);
+        let operation = flagged
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        flagged
+            .coordinated_drop
+            .active
+            .as_mut()
+            .expect("active")
+            .coordinator_heard = true;
+        assert_eq!(
+            flagged.coordinated_drop_accept_report_from(
+                inventory_cut_report(operation, 1, 10),
+                Some(1)
+            ),
+            Err(DropAbortReason::GenerationChanged)
+        );
+
         // A recorded coordinator operation blocks the fallback cut even when
         // the active attempt's flag was reset.
         let mut recorded = five_player_majority_session(PlayerHandle::new(2));
@@ -24034,6 +24061,34 @@ mod tests {
                 "local={local} sender={sender} heard={heard} must not adopt"
             );
         }
+
+        // The active flag alone blocks the fallback Ready, without a cut or
+        // journal entry.
+        let mut flagged = five_player_majority_session(PlayerHandle::new(2));
+        flagged
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("begin drop");
+        age_active_grace(&mut flagged);
+        let operation = flagged
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("active")
+            .operation;
+        flagged
+            .coordinated_drop
+            .active
+            .as_mut()
+            .expect("active")
+            .coordinator_heard = true;
+        flagged
+            .coordinated_drop_accept_report_from(ready_report(operation, 1, 10, 42), Some(1))
+            .expect("the flagged Ready is ignored");
+        assert!(flagged
+            .coordinated_drop
+            .active
+            .as_ref()
+            .is_some_and(|active| active.acting_coordinator.is_none() && active.cut.is_none()));
     }
 
     #[test]
