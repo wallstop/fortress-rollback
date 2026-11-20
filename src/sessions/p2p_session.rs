@@ -1363,7 +1363,9 @@ impl<T: Config> P2PSession<T> {
     fn certified_dropped_list_is_valid(list: &[u16], num_players: usize) -> bool {
         list.len() <= num_players
             && list.iter().all(|handle| usize::from(*handle) < num_players)
-            && list.windows(2).all(|pair| pair[0] < pair[1])
+            && list
+                .windows(2)
+                .all(|pair| matches!(pair, [left, right] if left < right))
     }
 
     /// The agreed membership epoch for coordinated drops.
