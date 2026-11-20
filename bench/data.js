@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795205304633,
+  "lastUpdate": 1795212460325,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "482ec27e9e6473f31d3bd08451181b2a5b79258f",
-          "message": "test(simulation): complete and cut the exact violation-site census (#414)\n\nInventory report_violation_to! sites, wrapper-macro call sites, and placeholder-first messages; regenerate the 284-site baseline; delete two redundant receive-path asserts; cover 36 previously unexercised sites with focused tests. Local exact census: 154/284 exercised (130 unexercised), down from 159 unexercised in nightly run 43555370869.",
-          "timestamp": "2026-11-13T21:23:36-08:00",
-          "tree_id": "962e69a2812ca55ab94cdfcfc4361ee3dab7a3bd",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/482ec27e9e6473f31d3bd08451181b2a5b79258f"
-        },
-        "date": 1794634303012,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 60534,
-            "range": "± 972",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 31110,
-            "range": "± 198",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1862,
-            "range": "± 112",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 91",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3139,
-            "range": "± 176",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2761,
             "range": "± 160",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "0085c493f81796124f6590261c153923be4809b8",
+          "message": "test: close the #509 mutation survivors in the new drop/hot-join paths (#511)\n\n## Description\n\nThe post-merge `main` mutation job for PR #509 reported **44 missed\nmutants**\nin the new coordinated-drop split-view, peer-artifact, hot-join\nexclusion, and\ndisconnect-fold code. This follow-up closes every survivor without\nchanging\nbehavior:\n\n- Extract the boolean membership/authority predicates into pure helpers\n  (`hot_join_in_flight`, `report_has_authority`, `source_has_authority`,\n  `timeout_drop_is_automatic`, `status_table_is_clean`,\n`endpoint_requires_disconnect_fold`, `no_hot_join_in_flight`) and cover\nevery\n  branch with unit tests.\n- Reuse one `certified_dropped_list_is_valid` validator in both the\n2-peer and\n  N-peer snapshot paths; test bounded, sorted, and in-range cases.\n- Add a test-only `disconnect_fold_runs` counter so the healthy\nearly-out and\neach dirty view (gossip, stopped endpoint, truncated status table, local\n  disconnect) are observable.\n- Add targeted tests for: queue origin (explicit vs automatic, including\na\nreserved-slot automatic intent), unbound participant digests, zero-frame\nbackfill chunks, coordinator/fallback cut conflicts after a fallback\nlock,\n  authority-scoped Ready/Committed report conflicts, the relay of newly\n  accepted reports, and the per-body decode-error prefixes in\n  `decode_drop_operation_id`.\n\n## Verification\n\n- Focused `cargo-mutants --in-diff` over the branch diff vs `main`: **57\n  mutants, 32 caught, 25 unviable, 0 missed, 0 timeout**.\n- Full workspace nextest (`tokio,json,hot-join,violation-census`): 3760\npassed,\n  77 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n-- -D\n  warnings`: clean.\n- `agent-preflight.py --full --auto-fix`: all checks pass.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n- [x] I have followed the zero-panic policy\n- [x] I have added tests that prove the fixes are effective\n- [x] `cargo fmt` and clippy are clean\n- [x] Full suite passes\n\n## Related Issues\n\nFollow-up to #509; addresses the post-merge mutation-testing failure on\n`main` (`e9ca5907`).",
+          "timestamp": "2026-11-20T21:56:34Z",
+          "tree_id": "fb7e66377080df78524abe1c3f2621d5c0e3c109",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/0085c493f81796124f6590261c153923be4809b8"
+        },
+        "date": 1795212458666,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 39303,
+            "range": "± 848",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 25066,
+            "range": "± 286",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1091,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1245,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 2765,
+            "range": "± 162",
             "unit": "ns/iter"
           }
         ]
