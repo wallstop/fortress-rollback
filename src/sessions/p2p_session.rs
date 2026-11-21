@@ -1949,6 +1949,9 @@ impl<T: Config> P2PSession<T> {
                 generation: target.generation,
                 sequence: operation.sequence,
             });
+            // Bounded by policy: a replay older than this window needs a
+            // protocol-level terminal epoch (#516). Exact matching above keeps
+            // a different live sequence admissible.
             let bound = self.num_players.saturating_mul(2).max(1);
             while history.len() > bound {
                 history.pop_front();

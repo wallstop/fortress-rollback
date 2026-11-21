@@ -69,11 +69,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   participant), malformed inventory/report shapes,
   conflicting cut or digest claims from non-authority participants, and non-canonical backfill
   chunks are discarded with a `NetworkProtocol` violation diagnostic; an exact replay of an
-  already-terminated operation is silently ignored, while a different live sequence (including a
-  lower one) is left to the operation comparator, and a retry skips exact terminal identities so
-  it still opens a fresh attempt; a malformed backfill chunk is rejected before it can reset or
-  clear an accepted donor grid; the strict-majority ready quorum and shared participant set still
-  decide the certificate, so a single faulty or hostile peer can only decline to contribute. A deterministic coordinator (or acting fallback) that conflicts with an already
+  already-terminated operation is silently ignored while its identity remains in the per-target
+  terminal history (bounded to `2 * num_players` identities per target handle), while a different
+  live sequence (including a lower one) is left to the operation comparator, and a retry skips
+  exact terminal identities so it still opens a fresh attempt; a replay older than that bounded
+  history needs the protocol-level terminal epoch tracked in #516; a malformed backfill chunk is
+  rejected before it can reset or clear an accepted donor grid; the strict-majority ready quorum
+  and shared participant set still decide the certificate, so a single faulty or hostile peer can
+  only decline to contribute. A deterministic coordinator (or acting fallback) that conflicts with an already
   locked cut or digest still fails the session closed, as do local invariant or allocation
   failures, a conflict with a locally committed certificate, and a failed local backfill install.
 - **Pre-existing:** two requesters in a split view can no longer commit different cuts for one
