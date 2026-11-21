@@ -2580,9 +2580,8 @@ impl<T: Config> P2PSession<T> {
                 target_set_digest,
                 participant_set_digest,
             };
-            let stale_terminal = self
-                .coordinated_drop_terminal_sequence_for_targets(candidate, &targets)
-                .is_some_and(|terminal| candidate.sequence <= terminal);
+            let terminal = self.coordinated_drop_terminal_sequence_for_targets(candidate, &targets);
+            let stale_terminal = terminal.is_some_and(|terminal| candidate.sequence <= terminal);
             if !stale_terminal
                 && !self
                     .coordinated_drop
@@ -2592,13 +2591,17 @@ impl<T: Config> P2PSession<T> {
             {
                 break candidate;
             }
-            sequence = sequence
-                .checked_add(1)
-                .ok_or(FortressError::InternalErrorStructured {
-                    kind: InternalErrorKind::Custom(
-                        "coordinated drop operation sequence exhausted",
-                    ),
-                })?;
+            // Jump directly past a terminal watermark: its sequence can be an
+            // arbitrary peer-supplied value, and walking the gap one value at a
+            // time runs on the caller's thread. Closed-journal collisions stay
+            // on the single-step path; that journal is bounded by the roster.
+            let next_sequence = match terminal {
+                Some(terminal) if stale_terminal => terminal.checked_add(1),
+                _ => sequence.checked_add(1),
+            };
+            sequence = next_sequence.ok_or(FortressError::InternalErrorStructured {
+                kind: InternalErrorKind::Custom("coordinated drop operation sequence exhausted"),
+            })?;
         };
         let quorum = Self::coordinated_drop_quorum(participants.len());
         let held_at = self.confirmed_frame();
@@ -19133,6 +19136,128 @@ mod tests {
         assert!(
             retry.sequence > operation.sequence,
             "retry must advance past the terminal watermark: {retry:?}"
+        );
+    }
+
+    #[test]
+    fn evicted_rejected_prepare_still_cannot_reopen() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let target_digest = P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets);
+        let participant_digest =
+            P2PSession::<TestConfig>::coordinated_drop_participant_digest(&participants);
+        let operation = |generation| DropOperationId {
+            coordinator: 0,
+            coordinator_generation: generation,
+            sequence: 1,
+            target_set_digest: target_digest,
+            participant_set_digest: participant_digest,
+        };
+        let first = operation(0);
+        session.coordinated_drop_note_rejected(first, &targets);
+        // Distinct coordinator generations evict the first identity from the
+        // bounded rejected journal.
+        for generation in 1..=u16::try_from(session.num_players).expect("roster fits u16") {
+            session.coordinated_drop_note_rejected(operation(generation), &targets);
+        }
+        assert!(
+            !session
+                .coordinated_drop
+                .rejected
+                .iter()
+                .any(|rejected| rejected.operation == first),
+            "fixture must evict the identity from the rejected journal"
+        );
+
+        session
+            .coordinated_drop_accept_prepare(
+                DropPrepare {
+                    operation: first,
+                    targets,
+                    participants,
+                },
+                Some(0),
+            )
+            .expect("an evicted rejected prepare is a peer artifact");
+        assert!(
+            session.coordinated_drop.active.is_none(),
+            "an evicted rejected prepare must not reopen an inventory attempt"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
+    }
+
+    #[test]
+    fn retry_steps_once_past_a_closed_identity_after_the_terminal_watermark() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let target_digest = P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets);
+        let participant_digest =
+            P2PSession::<TestConfig>::coordinated_drop_participant_digest(&participants);
+        let operation = |sequence| DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence,
+            target_set_digest: target_digest,
+            participant_set_digest: participant_digest,
+        };
+        session.coordinated_drop_record_terminal_targets(operation(1), &targets);
+        session.coordinated_drop_close_operation(operation(2));
+
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("retry");
+        let retry = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("retry must open an attempt")
+            .operation;
+        assert_eq!(
+            retry.sequence, 3,
+            "a closed-journal collision above the watermark takes one step, not a rewind"
+        );
+    }
+
+    #[test]
+    fn retry_jumps_past_a_large_terminal_watermark() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let watermark = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: u32::MAX - 2,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &participants,
+            ),
+        };
+        session.coordinated_drop_record_terminal_targets(watermark, &targets);
+
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("retry");
+        let retry = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("retry must open an attempt")
+            .operation;
+        assert_eq!(
+            retry.sequence,
+            u32::MAX - 1,
+            "a retry must jump directly past a large terminal watermark"
         );
     }
 
