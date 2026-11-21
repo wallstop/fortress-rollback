@@ -411,13 +411,17 @@ struct UnseenCommitEvidence {
     sources: std::collections::BTreeSet<u16>,
 }
 
-/// Terminal sequence retained for one target handle and one operation
-/// identity. Sequences are generation-local per target set, so the target-set
-/// digest must participate in the comparison.
+/// One exact terminal operation identity retained for a target handle.
+///
+/// Sequences are generation-local per target set and a lower sequence can
+/// still be a live higher-priority attempt, so only an exact identity match is
+/// treated as a replay. The coordinator generation participates so a rejoined
+/// coordinator is not blocked by its predecessor's terminal history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TerminalTargetWatermark {
     target_set_digest: u64,
     participant_set_digest: u64,
+    coordinator_generation: u16,
     generation: u16,
     sequence: u32,
 }
@@ -449,14 +453,13 @@ struct CoordinatedDropState<A> {
     /// observed disconnect status is not authoritative membership).
     certified_dropped: std::collections::BTreeSet<PlayerHandle>,
     closed: VecDeque<DropOperationId>,
-    /// Terminal sequence watermark per target handle.
+    /// Exact terminal operation identities per target handle.
     ///
-    /// A target set is canonical (every handle of its endpoint), so one
-    /// identity per handle can validate at a time. Operations for other
-    /// targets cannot evict this entry; a new participant era or target
-    /// generation replaces it because the old prepare fails the normal
-    /// membership/generation validation. Bounded by the player count.
-    terminal_targets: BTreeMap<u16, TerminalTargetWatermark>,
+    /// A target's history survives operations for other targets. The exact
+    /// identity includes the coordinator generation and sequence, so a rejoined
+    /// coordinator and a concurrent lower sequence are not blocked. Bounded by
+    /// two entries per player per handle.
+    terminal_targets: BTreeMap<u16, VecDeque<TerminalTargetWatermark>>,
     /// Recently rejected superseded prepares, bounded to one per player.
     rejected: VecDeque<RejectedDropOperation>,
     /// Targets of an uncertified attempt that a failed-closed session abandoned.
@@ -1876,38 +1879,39 @@ impl<T: Config> P2PSession<T> {
                 .any(|deferred| deferred.prepare.operation == operation)
     }
 
-    /// Highest terminal sequence for `operation` on any of its targets.
+    /// Whether `operation` exactly matches a retained terminal identity on any
+    /// of its targets.
     ///
-    /// The lookup only matches the full operation identity: target set,
-    /// participant era, and target generation. A canonical target set has one
-    /// valid identity per generation, so a single entry per handle covers every
-    /// prepare that can still validate.
-    fn coordinated_drop_terminal_sequence_for_targets(
+    /// Exact matching (including sequence and coordinator generation) is
+    /// required: a lower sequence can still be a live higher-priority attempt,
+    /// and a rejoined coordinator starts a new generation that must not be
+    /// suppressed by its predecessor's history.
+    fn coordinated_drop_operation_is_terminal(
         &self,
         operation: DropOperationId,
         targets: &[DropTarget],
-    ) -> Option<u32> {
-        targets
-            .iter()
-            .filter_map(|target| {
-                self.coordinated_drop
-                    .terminal_targets
-                    .get(&target.handle)
-                    .and_then(|watermark| {
-                        (watermark.target_set_digest == operation.target_set_digest
+    ) -> bool {
+        targets.iter().any(|target| {
+            self.coordinated_drop
+                .terminal_targets
+                .get(&target.handle)
+                .is_some_and(|history| {
+                    history.iter().any(|watermark| {
+                        watermark.target_set_digest == operation.target_set_digest
                             && watermark.participant_set_digest == operation.participant_set_digest
-                            && watermark.generation == target.generation)
-                            .then_some(watermark.sequence)
+                            && watermark.coordinator_generation == operation.coordinator_generation
+                            && watermark.generation == target.generation
+                            && watermark.sequence == operation.sequence
                     })
-            })
-            .max()
+                })
+        })
     }
 
-    /// Records a terminal operation's sequence for every target handle.
+    /// Records a terminal operation's exact identity for every target handle.
     ///
-    /// One entry per valid handle, bounded by the configured player count. A
-    /// matching identity keeps the highest sequence; a new participant era or
-    /// target generation replaces the entry (old prepares fail validation).
+    /// Each handle retains the most recent `2 * num_players` exact identities,
+    /// so the total is bounded by the roster squared. Exact matching keeps a
+    /// lower live sequence and a new coordinator generation admissible.
     fn coordinated_drop_record_terminal_targets(
         &mut self,
         operation: DropOperationId,
@@ -1917,34 +1921,37 @@ impl<T: Config> P2PSession<T> {
             if target.handle as usize >= self.num_players {
                 continue;
             }
-            let candidate = TerminalTargetWatermark {
-                target_set_digest: operation.target_set_digest,
-                participant_set_digest: operation.participant_set_digest,
-                generation: target.generation,
-                sequence: operation.sequence,
-            };
-            match self
+            let history = self
                 .coordinated_drop
                 .terminal_targets
-                .get_mut(&target.handle)
-            {
-                Some(existing) => {
-                    if existing.target_set_digest == candidate.target_set_digest
-                        && existing.participant_set_digest == candidate.participant_set_digest
-                        && existing.generation == candidate.generation
-                    {
-                        existing.sequence = existing.sequence.max(candidate.sequence);
-                    } else {
-                        *existing = candidate;
-                    }
-                },
-                None => {
-                    // alloc-bound: at most one entry per valid handle, and there
-                    // are at most `num_players` handles.
-                    self.coordinated_drop
-                        .terminal_targets
-                        .insert(target.handle, candidate);
-                },
+                .entry(target.handle)
+                .or_default();
+            let existing = history.iter().position(|watermark| {
+                watermark.target_set_digest == operation.target_set_digest
+                    && watermark.participant_set_digest == operation.participant_set_digest
+                    && watermark.coordinator_generation == operation.coordinator_generation
+                    && watermark.generation == target.generation
+                    && watermark.sequence == operation.sequence
+            });
+            if let Some(index) = existing {
+                if let Some(watermark) = history.remove(index) {
+                    history.push_back(watermark);
+                }
+                continue;
+            }
+            // alloc-bound: every valid handle keeps at most
+            // `2 * num_players` identities, and there are at most
+            // `num_players` handles.
+            history.push_back(TerminalTargetWatermark {
+                target_set_digest: operation.target_set_digest,
+                participant_set_digest: operation.participant_set_digest,
+                coordinator_generation: operation.coordinator_generation,
+                generation: target.generation,
+                sequence: operation.sequence,
+            });
+            let bound = self.num_players.saturating_mul(2).max(1);
+            while history.len() > bound {
+                history.pop_front();
             }
         }
     }
@@ -2599,9 +2606,7 @@ impl<T: Config> P2PSession<T> {
                 target_set_digest,
                 participant_set_digest,
             };
-            let terminal = self.coordinated_drop_terminal_sequence_for_targets(candidate, &targets);
-            let stale_terminal = terminal.is_some_and(|terminal| candidate.sequence <= terminal);
-            if !stale_terminal
+            if !self.coordinated_drop_operation_is_terminal(candidate, &targets)
                 && !self
                     .coordinated_drop
                     .closed
@@ -2610,17 +2615,13 @@ impl<T: Config> P2PSession<T> {
             {
                 break candidate;
             }
-            // Jump directly past a terminal watermark: its sequence can be an
-            // arbitrary peer-supplied value, and walking the gap one value at a
-            // time runs on the caller's thread. Closed-journal collisions stay
-            // on the single-step path; that journal is bounded by the roster.
-            let next_sequence = match terminal {
-                Some(terminal) if stale_terminal => terminal.checked_add(1),
-                _ => sequence.checked_add(1),
-            };
-            sequence = next_sequence.ok_or(FortressError::InternalErrorStructured {
-                kind: InternalErrorKind::Custom("coordinated drop operation sequence exhausted"),
-            })?;
+            sequence = sequence
+                .checked_add(1)
+                .ok_or(FortressError::InternalErrorStructured {
+                    kind: InternalErrorKind::Custom(
+                        "coordinated drop operation sequence exhausted",
+                    ),
+                })?;
         };
         let quorum = Self::coordinated_drop_quorum(participants.len());
         let held_at = self.confirmed_frame();
@@ -2880,13 +2881,11 @@ impl<T: Config> P2PSession<T> {
         {
             return Ok(());
         }
-        // The per-operation journal is bounded; the per-target watermark
-        // outlives it so an evicted aborted or superseded operation cannot
-        // reopen an Inventory attempt (issue #512).
-        if self
-            .coordinated_drop_terminal_sequence_for_targets(prepare.operation, &prepare.targets)
-            .is_some_and(|sequence| prepare.operation.sequence <= sequence)
-        {
+        // The per-operation journal is bounded; the per-target history
+        // outlives it so an exact replay of an evicted aborted or superseded
+        // operation cannot reopen an Inventory attempt (issue #512). A
+        // different (including lower) sequence is left to the comparator.
+        if self.coordinated_drop_operation_is_terminal(prepare.operation, &prepare.targets) {
             return Ok(());
         }
         if source == Some(prepare.operation.coordinator) {
@@ -19139,6 +19138,51 @@ mod tests {
     }
 
     #[test]
+    fn rejoined_coordinator_generation_is_not_blocked_by_terminal_history() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let target_digest = P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets);
+        let participant_digest =
+            P2PSession::<TestConfig>::coordinated_drop_participant_digest(&participants);
+        let old = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: target_digest,
+            participant_set_digest: participant_digest,
+        };
+        session.coordinated_drop_record_terminal_targets(old, &targets);
+
+        let rejoined = DropOperationId {
+            coordinator_generation: 1,
+            ..old
+        };
+        session
+            .coordinated_drop_accept_prepare(
+                DropPrepare {
+                    operation: rejoined,
+                    targets,
+                    participants,
+                },
+                Some(0),
+            )
+            .expect("a rejoined coordinator generation is a fresh authority era");
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .map(|active| active.operation),
+            Some(rejoined),
+            "a new coordinator generation must not be blocked by its predecessor"
+        );
+    }
+
+    #[test]
     fn evicted_terminal_prepare_does_not_reopen_and_retry_advances() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let targets = vec![DropTarget {
@@ -19301,23 +19345,23 @@ mod tests {
     }
 
     #[test]
-    fn retry_jumps_past_a_large_terminal_watermark() {
+    fn large_terminal_identity_does_not_block_a_new_retry() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let targets = vec![DropTarget {
             handle: 4,
             generation: 0,
         }];
         let participants = vec![0, 1, 2, 3];
-        let watermark = DropOperationId {
+        let terminal = DropOperationId {
             coordinator: 0,
             coordinator_generation: 0,
-            sequence: u32::MAX - 2,
+            sequence: u32::MAX,
             target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
             participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
                 &participants,
             ),
         };
-        session.coordinated_drop_record_terminal_targets(watermark, &targets);
+        session.coordinated_drop_record_terminal_targets(terminal, &targets);
 
         session
             .begin_coordinated_drop(PlayerHandle::new(4))
@@ -19329,14 +19373,13 @@ mod tests {
             .expect("retry must open an attempt")
             .operation;
         assert_eq!(
-            retry.sequence,
-            u32::MAX - 1,
-            "a retry must jump directly past a large terminal watermark"
+            retry.sequence, 1,
+            "an unrelated terminal identity must not exhaust the retry sequence"
         );
     }
 
     #[test]
-    fn terminal_watermark_is_scoped_to_target_era_and_player_bound() {
+    fn terminal_watermark_matches_exact_identity_and_is_bounded() {
         let mut session = five_player_majority_session(PlayerHandle::new(0));
         let targets = vec![DropTarget {
             handle: 4,
@@ -19350,37 +19393,39 @@ mod tests {
             participant_set_digest: 0xBBBB,
         };
         session.coordinated_drop_record_terminal_targets(base, &targets);
+        assert!(session.coordinated_drop_operation_is_terminal(base, &targets));
+        let initial_len = session
+            .coordinated_drop
+            .terminal_targets
+            .get(&4)
+            .map(VecDeque::len);
+        session.coordinated_drop_record_terminal_targets(base, &targets);
         assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(base, &targets),
-            Some(3)
+            session
+                .coordinated_drop
+                .terminal_targets
+                .get(&4)
+                .map(VecDeque::len),
+            initial_len,
+            "a duplicate exact identity must not grow the history"
         );
+        assert!(session.coordinated_drop_operation_is_terminal(base, &targets));
 
         let other_era = DropOperationId {
             participant_set_digest: 0xCCCC,
             ..base
         };
-        assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(other_era, &targets),
-            None,
-            "a different participant era must not inherit the watermark"
-        );
-        let newer_generation = vec![DropTarget {
-            handle: 4,
-            generation: 1,
-        }];
-        assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(base, &newer_generation),
-            None,
-            "a newer target generation must not inherit the watermark"
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(other_era, &targets),
+            "a different participant era must not inherit the terminal identity"
         );
         let other_target = vec![DropTarget {
             handle: 3,
             generation: 0,
         }];
-        assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(base, &other_target),
-            None,
-            "another target handle must not inherit the watermark"
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(base, &other_target),
+            "another target handle must not inherit the terminal identity"
         );
         let other_target_set = DropOperationId {
             target_set_digest: 0xDDDD,
@@ -19396,42 +19441,46 @@ mod tests {
                 generation: 0,
             },
         ];
-        assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(other_target_set, &two_handles),
-            None,
-            "a different target set must not share the per-target sequence space"
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(other_target_set, &two_handles),
+            "a different target set must not inherit the terminal identity"
+        );
+        let other_sequence = DropOperationId {
+            sequence: 4,
+            ..base
+        };
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(other_sequence, &targets),
+            "a different live sequence must not be treated as a replay"
+        );
+        let other_coordinator_generation = DropOperationId {
+            coordinator_generation: 1,
+            ..base
+        };
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(other_coordinator_generation, &targets),
+            "a rejoined coordinator generation must not be blocked"
         );
 
-        session.coordinated_drop_record_terminal_targets(
-            DropOperationId {
-                sequence: 9,
-                ..base
-            },
-            &targets,
-        );
-        session.coordinated_drop_record_terminal_targets(
-            DropOperationId {
-                sequence: 4,
-                ..base
-            },
-            &targets,
-        );
+        let bound = session.num_players.saturating_mul(2).max(1);
+        for sequence in 10..10_u32.saturating_add(u32::try_from(bound).unwrap_or(u32::MAX)) {
+            session.coordinated_drop_record_terminal_targets(
+                DropOperationId { sequence, ..base },
+                &targets,
+            );
+        }
         assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(base, &targets),
-            Some(9),
-            "the same identity must keep the highest terminal sequence"
+            session
+                .coordinated_drop
+                .terminal_targets
+                .get(&4)
+                .map(VecDeque::len),
+            Some(bound),
+            "each target handle's exact-identity history must stay bounded"
         );
-
-        session.coordinated_drop_record_terminal_targets(other_era, &targets);
-        assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(other_era, &targets),
-            Some(3),
-            "a new era must install its own watermark"
-        );
-        assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(base, &targets),
-            None,
-            "a replaced era cannot validate and must not inherit the watermark"
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(base, &targets),
+            "the oldest identity is evicted once the handle history is full"
         );
 
         let invalid = vec![DropTarget {
@@ -19441,11 +19490,11 @@ mod tests {
         session.coordinated_drop_record_terminal_targets(base, &invalid);
         assert!(
             !session.coordinated_drop.terminal_targets.contains_key(&99),
-            "invalid handles must not grow the watermark journal"
+            "invalid handles must not grow the terminal history"
         );
         assert!(
             session.coordinated_drop.terminal_targets.len() <= session.num_players,
-            "the terminal watermark journal must stay bounded by the player count"
+            "the terminal history must stay bounded by the player count"
         );
     }
 
