@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795212460325,
+  "lastUpdate": 1795219675462,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "e64f23ad8d258f0c006d3789d7dcde04fba3d61a",
-          "message": "test: cover reachable violation-site guards (P2) (#415)\n\nExercise the reachable defensive guards behind the remaining unexercised violation-site inventory. Local exact census moves 154/284 -> 202/284 exercised (130 -> 82 unexercised). Test-only change; no production behavior.",
-          "timestamp": "2026-11-13T22:56:20-08:00",
-          "tree_id": "e6c74af16e17544ca19a2200197803cc67e25420",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/e64f23ad8d258f0c006d3789d7dcde04fba3d61a"
-        },
-        "date": 1794639875811,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 43906,
-            "range": "± 187",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 25497,
-            "range": "± 213",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 674,
-            "range": "± 76",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 869,
-            "range": "± 5",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 6940,
-            "range": "± 274",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 2765,
             "range": "± 162",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "eaad20973a6eb8946b7a56c53a1750a4ce7d4b90",
+          "message": "ci: keep the cross-arch default suite free of hot-join (#513)\n\n## Description\n\nRestores green `main` after the post-merge `CI - Rust` failure on\n`0085c493`. The only failed check was **Cross-Arch Runtime\n(aarch64-qemu)**, step **Run deterministic suite** (`exit code 100`,\n7m03s); the two dedicated hot-join steps never ran. Run:\nhttps://github.com/Ambiguous-Interactive/fortress-rollback/actions/runs/44825116296/job/136595656123\n\n### Root cause\n\nThe step ran `cargo nextest ... --workspace --features tokio,json`, but\n`network-test-peer` unconditionally enables\n`fortress-rollback/hot-join`. Cargo feature unification therefore built\nthe root package **with hot-join**, so the suite that the workflow\ncomment says \"compiles it out\" actually ran 3,246 tests including\n`network::soak::*` and `sessions::hot_join::*`.\n\nTwo consequences in the same step:\n\n- `sessions::hot_join::hot_join_phase4_abort_does_not_spam_send_queue`\ndrives 120,000 polls and takes **73.2s** under `qemu-aarch64` on the\ndevelopment host. The `ci-cross-arch` profile terminates a test after\n240s; a slower CI runner crosses that budget and nextest exits 100.\n- `stats_alloc_realloc_growth_is_already_embedded_in_allocated_bytes`\nreads a process-global `Region`, so its exact `allocations`/net-live\nassertions race with harness allocations on another thread (observed\nunder QEMU).\n\n### Fix\n\n- Scope the deterministic suite to `-p fortress-rollback`, so `hot-join`\nreally is compiled out and the feature-gated rows run only in their\ndedicated steps. The workflow comment now explains the unification\nhazard.\n- Deflake the allocator contract: 1 MiB -> 2 MiB growth, no exact\nprocess-global counter assertions, 64 KiB slack for allocator noise, and\nthe double-count guard still distinguishes 2 MiB from 3 MiB. The\nend-to-end test moved to `tests/stats_alloc_contract.rs`, a single-test\nprocess, so `cargo test` cannot run another test concurrently against\nthe same global allocator. A deterministic alloc/realloc noise thread\npasses 20/20 under qemu-aarch64.\n\n### Regression coverage\n\n- `scripts/tests/test_ci_rust_workflow.py` now requires package scope\nand rejects `--workspace` for that step.\n- A deterministic 4 KiB cross-thread allocation reproduced the soak\nfailure on the old assertions and passes with the fix.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n- [x] 🔧 CI/Build (changes to CI configuration or build process)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json,hot-join` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] My changes generate no new compiler warnings\n- [ ] Documentation updated (not user-facing)\n- [ ] CHANGELOG entry (test/CI only, no `pub` or user-observable change)\n\n## Testing\n\n**Tests added/modified:**\n\n- `test_cross_arch_runtime_executes_arm_and_32_bit_usize_targets` now\npins `-p fortress-rollback` and the absence of `--workspace`.\n-\n`tests/stats_alloc_contract.rs::stats_alloc_realloc_growth_is_already_embedded_in_allocated_bytes`\ntolerates harness noise while keeping the growth-embedding and\ndouble-count bounds; it runs as the only test in its process.\n\n**Manual testing performed:**\n\n| Lane | Command | Result |\n| --- | --- | --- |\n| aarch64 QEMU (new command) | exact CI filter, `-p fortress-rollback` |\n**2,945 passed, 503 skipped, 166.5s** |\n| i686 (new command) | exact CI filter, `-p fortress-rollback` | **2,943\npassed, 503 skipped, 7.9s** |\n| host workspace | `tokio,json,hot-join,violation-census` | **3,692\npassed, 77 skipped, 39.3s** |\n| static | `actionlint`, `pytest scripts/tests/test_ci_rust_workflow.py`\n(31), `agent-preflight.py --full --auto-fix` | pass |\n\nRed/green for the soak test with deterministic helper-thread noise:\nbaseline `allocations: 12 != 1` (exit 101); the current test passes\n20/20 with an alloc + realloc + promote noise thread under qemu-aarch64\n(exit 0).\n\n## Related Issues\n\n- Relates to #512 (coordinated-drop terminal-operation eviction; filed\nas a follow-up finding).\n- Review follow-up: the three unresolved #508 threads were verified\nagainst `e9ca5907` and resolved with pointers to the fixing tests.",
+          "timestamp": "2026-11-20T23:56:12Z",
+          "tree_id": "a8508bb00bddb4d1816e1e168a33d51d2cca52e0",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/eaad20973a6eb8946b7a56c53a1750a4ce7d4b90"
+        },
+        "date": 1795219674375,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 44338,
+            "range": "± 1128",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 28516,
+            "range": "± 498",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 791,
+            "range": "± 86",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1011,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 7942,
+            "range": "± 130",
             "unit": "ns/iter"
           }
         ]
