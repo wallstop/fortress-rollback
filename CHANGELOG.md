@@ -65,12 +65,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Pre-existing:** a peer-controlled coordinated-drop artifact that is malformed, stale, or
   equivocal no longer halts the receiver. Invalid prepares (stale membership, target generation,
-  or participant digest), malformed inventory/report shapes, conflicting cut or digest claims from
+  participant digest, or an operation identity that already terminated and left the bounded
+  journal), malformed inventory/report shapes, conflicting cut or digest claims from
   non-authority participants, and non-canonical backfill chunks are discarded with a
-  `NetworkProtocol` violation diagnostic; a malformed backfill chunk is rejected before it can reset
-  or clear an accepted donor grid; the strict-majority ready quorum and shared participant
-  set still decide the certificate, so a single faulty or hostile peer can only decline to
-  contribute. A deterministic coordinator (or acting fallback) that conflicts with an already
+  `NetworkProtocol` violation diagnostic; a retry advances its sequence past every retained
+  terminal identity so it still opens a fresh attempt; a malformed backfill chunk is rejected
+  before it can reset or clear an accepted donor grid; the strict-majority ready quorum and shared
+  participant set still decide the certificate, so a single faulty or hostile peer can only decline
+  to contribute. A deterministic coordinator (or acting fallback) that conflicts with an already
   locked cut or digest still fails the session closed, as do local invariant or allocation
   failures, a conflict with a locally committed certificate, and a failed local backfill install.
 - **Pre-existing:** two requesters in a split view can no longer commit different cuts for one

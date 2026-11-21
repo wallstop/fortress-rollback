@@ -438,6 +438,12 @@ struct CoordinatedDropState<A> {
     /// observed disconnect status is not authoritative membership).
     certified_dropped: std::collections::BTreeSet<PlayerHandle>,
     closed: VecDeque<DropOperationId>,
+    /// Highest terminal sequence per operation identity
+    /// `(coordinator, coordinator_generation, target_set_digest,
+    /// participant_set_digest)`. Retained after the per-operation `closed`
+    /// journal evicts an entry, so a delayed prepare cannot reopen an
+    /// operation that already ended. Bounded to one entry per player.
+    terminal_sequences: VecDeque<((u16, u16, u64, u64), u32)>,
     /// Recently rejected superseded prepares, bounded to one per player.
     rejected: VecDeque<RejectedDropOperation>,
     /// Targets of an uncertified attempt that a failed-closed session abandoned.
@@ -478,6 +484,7 @@ impl<A> Default for CoordinatedDropState<A> {
             membership_generations: BTreeMap::new(),
             certified_dropped: std::collections::BTreeSet::new(),
             closed: VecDeque::new(),
+            terminal_sequences: VecDeque::new(),
             rejected: VecDeque::new(),
             halted_targets: std::collections::BTreeSet::new(),
             retiring: BTreeMap::new(),
@@ -1798,6 +1805,17 @@ impl<T: Config> P2PSession<T> {
         });
     }
 
+    /// Identity shared by every artifact of one operation, independent of its
+    /// sequence. Used by the terminal-history and closed-cut watermarks.
+    fn coordinated_drop_operation_identity(operation: DropOperationId) -> (u16, u16, u64, u64) {
+        (
+            operation.coordinator,
+            operation.coordinator_generation,
+            operation.target_set_digest,
+            operation.participant_set_digest,
+        )
+    }
+
     fn coordinated_drop_operation_cmp(
         left: DropOperationId,
         right: DropOperationId,
@@ -1845,11 +1863,54 @@ impl<T: Config> P2PSession<T> {
                 .any(|deferred| deferred.prepare.operation == operation)
     }
 
+    /// Highest terminal sequence for `operation`'s full identity.
+    ///
+    /// The journal is keyed per operation identity rather than per operation
+    /// instance, so terminal operations for another target or membership era
+    /// cannot evict the tombstone that stops this identity from reopening.
+    fn coordinated_drop_terminal_sequence(&self, operation: DropOperationId) -> Option<u32> {
+        let identity = Self::coordinated_drop_operation_identity(operation);
+        self.coordinated_drop
+            .terminal_sequences
+            .iter()
+            .find_map(|(candidate, sequence)| (*candidate == identity).then_some(*sequence))
+    }
+
+    /// Records a terminal operation's sequence for its full identity.
+    ///
+    /// Bounded to one entry per player. An update moves the identity to the
+    /// back so a target that keeps aborting and retrying keeps its history.
+    fn coordinated_drop_record_terminal_sequence(&mut self, operation: DropOperationId) {
+        let identity = Self::coordinated_drop_operation_identity(operation);
+        if let Some(index) = self
+            .coordinated_drop
+            .terminal_sequences
+            .iter()
+            .position(|(candidate, _)| *candidate == identity)
+        {
+            if let Some((key, previous)) = self.coordinated_drop.terminal_sequences.remove(index) {
+                self.coordinated_drop
+                    .terminal_sequences
+                    .push_back((key, previous.max(operation.sequence)));
+            }
+            return;
+        }
+        while self.coordinated_drop.terminal_sequences.len() >= self.num_players.max(1) {
+            self.coordinated_drop.terminal_sequences.pop_front();
+        }
+        // alloc-bound: the terminal journal is trimmed to `num_players`
+        // entries immediately above.
+        self.coordinated_drop
+            .terminal_sequences
+            .push_back((identity, operation.sequence));
+    }
+
     /// Records a terminal coordinated-drop operation so replayed control
     /// messages for it are ignored. The history is bounded to one entry per
     /// player: the supersede/abort paths are peer-driven and may run every
     /// poll, so an untrimmed deque would grow without bound.
     fn coordinated_drop_close_operation(&mut self, operation: DropOperationId) {
+        self.coordinated_drop_record_terminal_sequence(operation);
         self.coordinated_drop.closed.push_back(operation);
         while self.coordinated_drop.closed.len() > self.num_players {
             self.coordinated_drop.closed.pop_front();
@@ -1888,6 +1949,7 @@ impl<T: Config> P2PSession<T> {
         while self.coordinated_drop.rejected.len() >= self.num_players.max(1) {
             self.coordinated_drop.rejected.pop_front();
         }
+        self.coordinated_drop_record_terminal_sequence(operation);
         self.coordinated_drop
             .rejected
             .push_back(RejectedDropOperation {
@@ -2483,7 +2545,9 @@ impl<T: Config> P2PSession<T> {
         // the old attempt (a `Superseded` abort, an old inventory report) would
         // otherwise be indistinguishable from the retry's. Advance the
         // coordinator-local sequence past every recently closed identity so the
-        // retry opens a genuinely fresh attempt.
+        // retry opens a genuinely fresh attempt. The per-identity terminal
+        // watermark also covers identities that have already left the bounded
+        // `closed` journal (issue #512).
         let operation = loop {
             let candidate = DropOperationId {
                 coordinator,
@@ -2492,11 +2556,15 @@ impl<T: Config> P2PSession<T> {
                 target_set_digest,
                 participant_set_digest,
             };
-            if !self
-                .coordinated_drop
-                .closed
-                .iter()
-                .any(|closed| *closed == candidate)
+            let stale_terminal = self
+                .coordinated_drop_terminal_sequence(candidate)
+                .is_some_and(|terminal| candidate.sequence <= terminal);
+            if !stale_terminal
+                && !self
+                    .coordinated_drop
+                    .closed
+                    .iter()
+                    .any(|closed| *closed == candidate)
             {
                 break candidate;
             }
@@ -2740,6 +2808,15 @@ impl<T: Config> P2PSession<T> {
             .closed
             .iter()
             .any(|closed| *closed == prepare.operation)
+        {
+            return Ok(());
+        }
+        // The per-operation journal is bounded; the per-identity watermark
+        // outlives it so an evicted aborted or superseded operation cannot
+        // reopen an Inventory attempt (issue #512).
+        if self
+            .coordinated_drop_terminal_sequence(prepare.operation)
+            .is_some_and(|sequence| prepare.operation.sequence <= sequence)
         {
             return Ok(());
         }
@@ -4169,12 +4246,7 @@ impl<T: Config> P2PSession<T> {
 
     /// Records the highest cut applied for one operation identity.
     fn coordinated_drop_record_closed_cut(&mut self, commit: &DropCommit) {
-        let key = (
-            commit.operation.coordinator,
-            commit.operation.coordinator_generation,
-            commit.operation.target_set_digest,
-            commit.operation.participant_set_digest,
-        );
+        let key = Self::coordinated_drop_operation_identity(commit.operation);
         if let Some((_, cut)) = self
             .coordinated_drop
             .closed_commit_cuts
@@ -18955,6 +19027,146 @@ mod tests {
         assert!(
             session.coordinated_drop_validate_prepare(&prepare),
             "the bound participant digest must be accepted"
+        );
+    }
+
+    #[test]
+    fn evicted_terminal_prepare_does_not_reopen_and_retry_advances() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &participants,
+            ),
+        };
+        let prepare = DropPrepare {
+            operation,
+            targets,
+            participants,
+        };
+        assert!(
+            session.coordinated_drop_validate_prepare(&prepare),
+            "fixture must be a valid prepare"
+        );
+
+        session.coordinated_drop_close_operation(operation);
+        // Evict the operation from the per-operation journal with enough newer
+        // terminal operations for another target set.
+        for sequence in 2..=6 {
+            session.coordinated_drop_close_operation(DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence,
+                target_set_digest: 0xDEAD_BEEF,
+                participant_set_digest: 0xFEED_FACE,
+            });
+        }
+        assert!(
+            !session
+                .coordinated_drop
+                .closed
+                .iter()
+                .any(|closed| *closed == operation),
+            "fixture must evict the terminal operation from the bounded journal"
+        );
+
+        session
+            .coordinated_drop_accept_prepare(prepare, Some(0))
+            .expect("an evicted terminal prepare is a peer artifact");
+        assert!(
+            session.coordinated_drop.active.is_none(),
+            "an evicted terminal prepare must not reopen an inventory attempt"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
+
+        // A genuine retry for the same target set must advance past the
+        // terminal watermark instead of being rejected by it.
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("retry");
+        let retry = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("retry must open an attempt")
+            .operation;
+        assert!(
+            retry.sequence > operation.sequence,
+            "retry must advance past the terminal watermark: {retry:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_watermark_is_scoped_to_every_operation_identity_field() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let base = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 3,
+            target_set_digest: 0xAAAA,
+            participant_set_digest: 0xBBBB,
+        };
+        session.coordinated_drop_record_terminal_sequence(base);
+        assert_eq!(session.coordinated_drop_terminal_sequence(base), Some(3));
+
+        let variants = [
+            DropOperationId {
+                coordinator: 1,
+                ..base
+            },
+            DropOperationId {
+                coordinator_generation: 1,
+                ..base
+            },
+            DropOperationId {
+                target_set_digest: 0xCCCC,
+                ..base
+            },
+            DropOperationId {
+                participant_set_digest: 0xDDDD,
+                ..base
+            },
+        ];
+        for (index, variant) in variants.into_iter().enumerate() {
+            assert_eq!(
+                session.coordinated_drop_terminal_sequence(variant),
+                None,
+                "every identity field must participate in the watermark key (variant {index})"
+            );
+            let updated = DropOperationId {
+                sequence: 7,
+                ..variant
+            };
+            session.coordinated_drop_record_terminal_sequence(updated);
+            assert_eq!(session.coordinated_drop_terminal_sequence(updated), Some(7));
+        }
+
+        session.coordinated_drop_record_terminal_sequence(DropOperationId {
+            sequence: 9,
+            ..base
+        });
+        assert_eq!(session.coordinated_drop_terminal_sequence(base), Some(9));
+        assert_eq!(
+            session.coordinated_drop_terminal_sequence(variants[0]),
+            Some(7),
+            "updating one identity must not overwrite another"
+        );
+
+        session.coordinated_drop_record_terminal_sequence(DropOperationId {
+            participant_set_digest: 0xEEEE,
+            ..base
+        });
+        assert!(
+            session.coordinated_drop.terminal_sequences.len() <= session.num_players,
+            "the terminal watermark journal must stay bounded by the player count"
         );
     }
 
