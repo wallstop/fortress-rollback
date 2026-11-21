@@ -1402,10 +1402,11 @@ impl<T: Config> P2PSession<T> {
     /// (issue #504). Reachability only decides whether the operation can reach
     /// quorum in time; it never changes the participant set. The certified
     /// exclusion is a shared fact: it travels in the hot-join snapshot and is
-    /// cleared by the lifecycle commit on every peer. A never-joined reserved
-    /// slot is omitted because it cannot report; a reserved slot whose serve
-    /// or reactivation is in flight is included because it is about to become
-    /// a participant.
+    /// cleared by the lifecycle commit on every peer. The roster and reserved
+    /// flags are part of the agreed configuration on every peer. A
+    /// never-joined reserved slot is omitted because it cannot report; a
+    /// reserved slot whose serve or reactivation is in flight is included
+    /// because it is about to become a participant.
     fn coordinated_drop_membership_epoch(&self) -> Vec<u16> {
         // alloc-bound: at most one entry per configured player slot.
         let mut epoch = Vec::new();
