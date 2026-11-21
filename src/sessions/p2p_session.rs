@@ -18923,6 +18923,16 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_epoch_matches_the_derived_epoch() {
+        let session = create_two_player_session();
+        assert_eq!(
+            session.diagnostic_coordinated_drop_membership_epoch(),
+            vec![PlayerHandle::new(0), PlayerHandle::new(1)],
+            "the doc-hidden diagnostic must expose the derived participant epoch"
+        );
+    }
+
+    #[test]
     #[cfg(feature = "hot-join")]
     fn membership_epoch_excludes_never_joined_reserved_slots() {
         let session = SessionBuilder::<TestConfig>::new()
