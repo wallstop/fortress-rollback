@@ -2822,6 +2822,12 @@ impl<T: Config> P2PSession<T> {
         {
             return false;
         }
+        // The operation's coordinator identity is the canonical first
+        // participant. A forged handle must not open a second authority for the
+        // same participant set.
+        if prepare.participants.first().copied() != Some(prepare.operation.coordinator) {
+            return false;
+        }
         // A prepare is a survivor-quorum certificate. Accepting a participant
         // list that omits (or invents) a currently running survivor would let a
         // single peer mint a certificate for an uninvolved third slot, and
@@ -19096,6 +19102,39 @@ mod tests {
         assert!(
             session.coordinated_drop_validate_prepare(&prepare),
             "the bound participant digest must be accepted"
+        );
+    }
+
+    #[test]
+    fn forged_operation_coordinator_is_rejected() {
+        let session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let mut prepare = DropPrepare {
+            operation: DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence: 1,
+                target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
+                    &targets,
+                ),
+                participant_set_digest:
+                    P2PSession::<TestConfig>::coordinated_drop_participant_digest(&participants),
+            },
+            targets,
+            participants,
+        };
+        assert!(
+            session.coordinated_drop_validate_prepare(&prepare),
+            "the canonical coordinator fixture must validate"
+        );
+        prepare.operation.coordinator = 1;
+        assert!(
+            !session.coordinated_drop_validate_prepare(&prepare),
+            "an operation coordinator that is not the first participant must be rejected"
         );
     }
 

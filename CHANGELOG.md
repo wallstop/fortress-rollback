@@ -65,7 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Pre-existing:** a peer-controlled coordinated-drop artifact that is malformed, stale, or
   equivocal no longer halts the receiver. Invalid prepares (stale membership, target generation,
-  participant digest, or a non-canonical target subset), malformed inventory/report shapes,
+  participant digest, a non-canonical target subset, or a coordinator that is not the first
+  participant), malformed inventory/report shapes,
   conflicting cut or digest claims from non-authority participants, and non-canonical backfill
   chunks are discarded with a `NetworkProtocol` violation diagnostic; a prepare that repeats an
   already-terminated operation
