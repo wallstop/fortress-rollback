@@ -185,6 +185,7 @@ for (const mode of MODES) {
         real_clock_smoke: true,
         removal_certified: true,
         hot_join_activated: true,
+        certified_epoch_imported: true,
         ping_a_ms: 50,
         ping_b_ms: 50,
         replay_frames: 4096,

@@ -1402,8 +1402,11 @@ impl<T: Config> P2PSession<T> {
     /// (issue #504). Reachability only decides whether the operation can reach
     /// quorum in time; it never changes the participant set. The certified
     /// exclusion is a shared fact: it travels in the hot-join snapshot and is
-    /// cleared by the lifecycle commit on every peer. Local serve/pending
-    /// state is never consulted here.
+    /// cleared by the lifecycle commit on every peer. The roster and reserved
+    /// flags are part of the agreed configuration on every peer. A reserved
+    /// slot is omitted until the join or reactivation commit activates it;
+    /// local in-flight state is never consulted, so one peer observing a
+    /// serve cannot derive a different quorum from another.
     fn coordinated_drop_membership_epoch(&self) -> Vec<u16> {
         // alloc-bound: at most one entry per configured player slot.
         let mut epoch = Vec::new();
@@ -1422,6 +1425,17 @@ impl<T: Config> P2PSession<T> {
         // voters that can never report and make quorum unreachable (PR #508
         // review).
         for endpoint in self.player_reg.remotes.values() {
+            // A reserved slot is not a voter until the join/reactivation
+            // commit activates it. This is a configuration fact on every peer,
+            // not a local in-flight view: including a slot merely because one
+            // peer already observed a serve would let peers derive different
+            // quorums for the same operation.
+            #[cfg(feature = "hot-join")]
+            {
+                if self.hot_join.endpoint_is_reserved(endpoint) {
+                    continue;
+                }
+            }
             // A certified-dropped slot is not part of the era.
             if endpoint
                 .handles()
@@ -11463,6 +11477,22 @@ impl<T: Config> P2PSession<T> {
         self.sometimes_state_seen.fetch_or(mask, Ordering::Relaxed);
     }
 
+    /// Diagnostics/testing surface (hidden; **not** part of the stable public
+    /// API): returns the agreed coordinated-drop participant epoch derived
+    /// from the configured roster and the certified-dropped slots.
+    ///
+    /// A fresh hot-join joiner exposes the snapshot's certified exclusions
+    /// here, so a runtime probe can verify that a non-empty
+    /// `StateSnapshot::certified_dropped` list was imported.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn diagnostic_coordinated_drop_membership_epoch(&self) -> Vec<PlayerHandle> {
+        self.coordinated_drop_membership_epoch()
+            .into_iter()
+            .map(|handle| PlayerHandle::new(usize::from(handle)))
+            .collect()
+    }
+
     /// Returns the maximum prediction window of a session.
     #[must_use]
     pub fn max_prediction(&self) -> usize {
@@ -18889,6 +18919,28 @@ mod tests {
             two_local.coordinated_drop_membership_epoch(),
             vec![0],
             "a multi-handle local endpoint reports once"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hot-join")]
+    fn membership_epoch_excludes_never_joined_reserved_slots() {
+        let session = SessionBuilder::<TestConfig>::new()
+            .with_num_players(3)
+            .expect("three players")
+            .with_hot_join(true)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("local player")
+            .add_player(PlayerType::Remote(test_addr(9401)), PlayerHandle::new(1))
+            .expect("remote player")
+            .add_reserved_player(test_addr(9402), PlayerHandle::new(2))
+            .expect("reserved slot")
+            .start_p2p_session(DummySocket)
+            .expect("three-player host");
+        assert_eq!(
+            session.coordinated_drop_membership_epoch(),
+            vec![0, 1],
+            "a never-joined reserved slot must not inflate the removal quorum"
         );
     }
 

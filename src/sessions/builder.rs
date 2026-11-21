@@ -534,6 +534,12 @@ impl<T: Config> SessionBuilder<T> {
     /// [`with_hot_join(true)`](Self::with_hot_join)) so the session cannot be
     /// misconfigured with a reserved slot but no serving.
     ///
+    /// Every peer in the session should register the same reserved slot; only
+    /// the serving host opens the snapshot handshake. Registering it as an
+    /// ordinary remote on a non-host peer makes that peer wait for the absent
+    /// joiner during synchronization, and local reserved state is part of the
+    /// agreed coordinated-drop epoch.
+    ///
     /// This is feature-gated behind the `hot-join` feature.
     ///
     /// # Errors

@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed-order, monotonic observations for the deterministic nightly simulation census. The census
   publishes bounded, domain-separated organic and targeted evidence without changing simulation,
   replay, or wire behavior.
+- A doc-hidden `P2PSession::diagnostic_coordinated_drop_membership_epoch` reports the derived
+  coordinated-drop participant epoch. The browser and Emscripten runtime probes use it to verify
+  that a fresh joiner imports a non-empty `certified_dropped` hot-join snapshot instead of
+  retaining a dropped slot in its membership.
 - `SessionBuilder::try_start_spectator_session` and
   `SessionBuilder::try_start_spectator_session_multi` return the exact structured configuration,
   serialization, protocol, or allocation error from spectator startup. The existing `Option` methods
@@ -82,9 +86,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pre-existing:** two requesters in a split view can no longer commit different cuts for one
   coordinated graceful-removal target. The participant set is the agreed membership epoch minus
   the targets, independent of local endpoint reachability, and its digest is bound into the
-  operation identity. Pinned by the deterministic split-view CAP row, the
-  `CoordinatorSplitView.tla` model (two disjoint groups; the local-view configuration is an
-  manual demo-fail), and participant-derivation unit guards.
+  operation identity. A reserved hot-join slot is not a voter in that epoch until its join or
+  reactivation commit activates it, so a removal before the slot is filled no longer waits on a
+  participant that cannot report, and local in-flight state cannot split the quorum. Pinned by the
+  deterministic
+  split-view CAP row, the `CoordinatorSplitView.tla` model (two disjoint groups; the local-view
+  configuration is a manual demo-fail), participant-derivation unit guards, and the
+  browser/Emscripten certified-dropped snapshot probes.
 - **Pre-existing:** a coordinated graceful removal no longer fail-closes a reachable strict
   majority when the deterministic coordinator is isolated. After a one-second grace (half the
   two-second operation deadline) the fixed fallback candidate (the deterministic second-lowest

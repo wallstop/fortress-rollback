@@ -679,6 +679,262 @@ mod tests {
         );
     }
 
+    /// A fresh joiner must import the snapshot's non-empty `certified_dropped`
+    /// list and derive the same membership epoch as the survivors. The host
+    /// starts with a live remote and a reserved slot, removes the remote, then
+    /// serves the reserved slot. The joiner's epoch must be `[0, 2]`, not
+    /// `[0, 1, 2]`; the native suite covers the same gate but not the wasm
+    /// snapshot/decode path.
+    #[cfg(feature = "hot-join")]
+    #[wasm_bindgen_test]
+    fn hot_join_imports_certified_dropped_epoch_in_browser() {
+        let observer = Arc::new(fortress_rollback::telemetry::CollectingObserver::new());
+        let _observer_scope = fortress_rollback::telemetry::push_violation_observer(Arc::clone(
+            &observer,
+        )
+            as Arc<dyn fortress_rollback::telemetry::ViolationObserver>);
+        let (clock, offset_ms) = virtual_clock();
+        let (sockets, _bus) = RawBus::with_peers(3);
+        let mut sockets = sockets.into_iter();
+        let host_socket = sockets.next().expect("host socket");
+        let peer_socket = sockets.next().expect("peer socket");
+        let joiner_socket = sockets.next().expect("joiner socket");
+        let protocol_config = |seed| ProtocolConfig {
+            protocol_rng_seed: Some(seed),
+            clock: Some(clock.clone()),
+            ..ProtocolConfig::default()
+        };
+
+        let mut host = SessionBuilder::<BrowserConfig>::new()
+            .with_protocol_config(protocol_config(0xB105))
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .with_num_players(3)
+            .expect("three-player certified-snapshot host must accept its player count")
+            .with_hot_join(true)
+            .add_player(PlayerType::Local, PlayerHandle::new(0))
+            .expect("certified-snapshot host local player must be accepted")
+            .add_player(PlayerType::Remote(BrowserPeer(1)), PlayerHandle::new(1))
+            .expect("certified-snapshot host remote player must be accepted")
+            .add_reserved_player(BrowserPeer(2), PlayerHandle::new(2))
+            .expect("certified-snapshot host reserved slot must be accepted")
+            .start_p2p_session(host_socket)
+            .expect("certified-snapshot host must build");
+
+        let mut peer = SessionBuilder::<BrowserConfig>::new()
+            .with_protocol_config(protocol_config(0xB106))
+            .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+            .with_num_players(3)
+            .expect("certified-snapshot peer must accept its player count")
+            .with_hot_join(true)
+            .add_player(PlayerType::Remote(BrowserPeer(0)), PlayerHandle::new(0))
+            .expect("certified-snapshot peer host slot must be accepted")
+            .add_player(PlayerType::Local, PlayerHandle::new(1))
+            .expect("certified-snapshot peer local slot must be accepted")
+            .add_reserved_player(BrowserPeer(2), PlayerHandle::new(2))
+            .expect("certified-snapshot peer reserved slot must be accepted")
+            .start_p2p_session(peer_socket)
+            .expect("certified-snapshot peer must build");
+
+        for _ in 0..SYNC_POLL_BUDGET {
+            host.poll_remote_clients();
+            peer.poll_remote_clients();
+            offset_ms.fetch_add(16, Ordering::Relaxed);
+            if host.current_state() == SessionState::Running
+                && peer.current_state() == SessionState::Running
+            {
+                break;
+            }
+        }
+        assert!(
+            host.current_state() == SessionState::Running
+                && peer.current_state() == SessionState::Running,
+            "certified-snapshot host and peer failed to synchronize"
+        );
+        let _ = host.events().count();
+        let _ = peer.events().count();
+
+        let mut host_state = BrowserState::default();
+        let mut peer_state = BrowserState::default();
+        for frame_index in 0..4u32 {
+            host.add_local_input(
+                PlayerHandle::new(0),
+                BrowserInput {
+                    value: 100 + frame_index,
+                },
+            )
+            .expect("pre-removal host input must be accepted");
+            peer.add_local_input(
+                PlayerHandle::new(1),
+                BrowserInput {
+                    value: 200 + frame_index,
+                },
+            )
+            .expect("pre-removal peer input must be accepted");
+            apply_requests(
+                &mut host_state,
+                host.advance_frame().expect("pre-removal host must advance"),
+            );
+            apply_requests(
+                &mut peer_state,
+                peer.advance_frame().expect("pre-removal peer must advance"),
+            );
+            host.poll_remote_clients();
+            peer.poll_remote_clients();
+            offset_ms.fetch_add(16, Ordering::Relaxed);
+        }
+        for _ in 0..INPUT_POLL_BUDGET {
+            if host.confirmed_frame() >= Frame::new(3) {
+                break;
+            }
+            host.poll_remote_clients();
+            peer.poll_remote_clients();
+            offset_ms.fetch_add(16, Ordering::Relaxed);
+        }
+        assert!(
+            host.confirmed_frame() >= Frame::new(3),
+            "the host must confirm a pre-removal snapshot prefix"
+        );
+
+        host.remove_player(PlayerHandle::new(1))
+            .expect("the certified-snapshot host must accept the removal");
+        let mut dropped = false;
+        let mut peer_stopped = false;
+        for _ in 0..REMOVAL_POLL_BUDGET {
+            host.poll_remote_clients();
+            peer.poll_remote_clients();
+            offset_ms.fetch_add(16, Ordering::Relaxed);
+            for event in host.events() {
+                if let FortressEvent::PeerDropped { handle, .. } = event {
+                    assert_eq!(
+                        handle,
+                        PlayerHandle::new(1),
+                        "the removal must certify exactly the configured remote"
+                    );
+                    dropped = true;
+                }
+            }
+            let _ = peer.events().count();
+            peer_stopped = peer.current_state() == SessionState::Synchronizing;
+            if dropped && peer_stopped {
+                break;
+            }
+        }
+        assert!(
+            dropped,
+            "the host must certify the removal before the join; state={:?} confirmed={:?} \
+             epoch={:?} host=[{}] peer=[{}] violations={:?}",
+            host.current_state(),
+            host.confirmed_frame(),
+            host.diagnostic_coordinated_drop_membership_epoch(),
+            host.diagnostic_connect_status(),
+            peer.diagnostic_connect_status(),
+            observer
+                .violations()
+                .iter()
+                .map(|violation| violation.message.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            peer_stopped,
+            "the removed peer must apply its certificate before the join"
+        );
+        assert_eq!(
+            host.diagnostic_coordinated_drop_membership_epoch(),
+            vec![PlayerHandle::new(0)],
+            "the survivor epoch must exclude the certified drop and the unjoined reserved slot"
+        );
+
+        // Let the survivor drain the removed target's speculative tail before
+        // serving the snapshot: the N-peer serve captures `last_saved_frame`
+        // and waits for it to confirm while the host is paused.
+        for offset in 0..2u32 {
+            host.add_local_input(
+                PlayerHandle::new(0),
+                BrowserInput {
+                    value: 300 + offset,
+                },
+            )
+            .expect("post-removal host input must be accepted");
+            apply_requests(
+                &mut host_state,
+                host.advance_frame()
+                    .expect("post-removal host must confirm its speculative tail"),
+            );
+            host.poll_remote_clients();
+            offset_ms.fetch_add(16, Ordering::Relaxed);
+        }
+        assert_eq!(
+            host.current_state(),
+            SessionState::Running,
+            "the survivor must remain Running after draining the removed target"
+        );
+
+        let mut joiner = SessionBuilder::<BrowserConfig>::new()
+            .with_protocol_config(protocol_config(0xB107))
+            .with_num_players(3)
+            .expect("certified-snapshot joiner must accept its player count")
+            .add_player(PlayerType::Remote(BrowserPeer(0)), PlayerHandle::new(0))
+            .expect("certified-snapshot joiner host slot must be accepted")
+            .add_player(PlayerType::Remote(BrowserPeer(1)), PlayerHandle::new(1))
+            .expect("certified-snapshot joiner dropped slot must be accepted")
+            .add_player(PlayerType::Local, PlayerHandle::new(2))
+            .expect("certified-snapshot joiner local slot must be accepted")
+            .start_hot_join_session(joiner_socket, BrowserPeer(0))
+            .expect("certified-snapshot joiner must build");
+        assert_eq!(
+            joiner.current_state(),
+            SessionState::HotJoining,
+            "the certified-snapshot joiner must start in HotJoining"
+        );
+
+        for _ in 0..HOT_JOIN_POLL_BUDGET {
+            host.poll_remote_clients();
+            joiner.poll_remote_clients();
+            offset_ms.fetch_add(16, Ordering::Relaxed);
+            if joiner.current_state() == SessionState::Running {
+                break;
+            }
+        }
+        assert!(
+            joiner.current_state() == SessionState::Running,
+            "the certified-snapshot joiner must complete the snapshot handshake; \
+             joiner={:?} host={:?} host_epoch={:?} joiner_epoch={:?} host=[{}] joiner=[{}] \
+             violations={:?}",
+            joiner.current_state(),
+            host.current_state(),
+            host.diagnostic_coordinated_drop_membership_epoch(),
+            joiner.diagnostic_coordinated_drop_membership_epoch(),
+            host.diagnostic_connect_status(),
+            joiner.diagnostic_connect_status(),
+            observer
+                .violations()
+                .iter()
+                .map(|violation| violation.message.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // The first advance applies the served snapshot, including its
+        // certified-dropped list.
+        let mut joiner_state = BrowserState::default();
+        apply_requests(
+            &mut joiner_state,
+            joiner
+                .advance_frame()
+                .expect("the certified-snapshot joiner must apply its snapshot"),
+        );
+
+        assert_eq!(
+            joiner.diagnostic_coordinated_drop_membership_epoch(),
+            vec![PlayerHandle::new(0), PlayerHandle::new(2)],
+            "the joiner must import the snapshot's certified-dropped slot into its epoch"
+        );
+        assert_eq!(
+            host.diagnostic_coordinated_drop_membership_epoch(),
+            vec![PlayerHandle::new(0), PlayerHandle::new(2)],
+            "the host epoch must include the now-joined reserved slot and exclude the dropped slot"
+        );
+    }
+
     #[wasm_bindgen_test]
     fn default_clock_receive_does_not_panic_in_browser() {
         let config = ChaosConfig::builder().seed(42).build();
@@ -704,9 +960,8 @@ mod tests {
         max_attempts_in_one_poll: usize,
     }
 
-    #[derive(Default)]
     struct RawBusState {
-        queues: [VecDeque<(BrowserPeer, Vec<u8>)>; 2],
+        queues: Vec<VecDeque<(BrowserPeer, Vec<u8>)>>,
         stats: RawTransportStats,
     }
 
@@ -716,21 +971,30 @@ mod tests {
     }
 
     impl RawBus {
-        fn pair() -> (RawChannelSocket, RawChannelSocket, Self) {
+        fn with_peers(count: usize) -> (Vec<RawChannelSocket>, Self) {
+            let mut queues = Vec::with_capacity(count);
+            queues.resize_with(count, VecDeque::new);
             let bus = Self {
-                state: Rc::new(RefCell::new(RawBusState::default())),
+                state: Rc::new(RefCell::new(RawBusState {
+                    queues,
+                    stats: RawTransportStats::default(),
+                })),
             };
-            (
-                RawChannelSocket {
-                    local: BrowserPeer(0),
+            let sockets = (0..count)
+                .map(|index| RawChannelSocket {
+                    local: BrowserPeer(u8::try_from(index).unwrap_or(0)),
                     bus: bus.clone(),
-                },
-                RawChannelSocket {
-                    local: BrowserPeer(1),
-                    bus: bus.clone(),
-                },
-                bus,
-            )
+                })
+                .collect();
+            (sockets, bus)
+        }
+
+        fn pair() -> (RawChannelSocket, RawChannelSocket, Self) {
+            let (sockets, bus) = Self::with_peers(2);
+            let mut sockets = sockets.into_iter();
+            let first = sockets.next().expect("first browser test socket");
+            let second = sockets.next().expect("second browser test socket");
+            (first, second, bus)
         }
 
         fn inject_raw(&self, source: BrowserPeer, destination: BrowserPeer, bytes: Vec<u8>) {
