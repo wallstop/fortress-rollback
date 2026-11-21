@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795240924603,
+  "lastUpdate": 1795242390007,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "e6ad6c17ccfbdfdbd8a726444920a203ee7a857b",
-          "message": "test(simulation): bound PCT interleaving and fix a lagging-survivor freeze false positive (#421)\n\n## Summary\n\n- Adds an opt-in, bounded PCT peer-interleaving axis to the\ndeterministic simulation harness (`RunOptions::pct`, at most 1,024\npriority assignments). The historical forward order is unchanged when\nunset, and `pct` is mutually exclusive with differential mode.\n- Uses the axis to run a matched equal-compute comparison against the\ncurrent forward-order scheduler on the nightly schedule generator.\n- Fixes a freeze-frame oracle false positive exposed by the comparison:\na survivor whose confirmed prefix ends *before* another survivor's\nobserved freeze frame was treated as an authoritative `None`\ndisagreement.\n- Records the PCT rejection in the fleet-search roadmap and narrows\n`PLAN.md` to the remaining prefix-replay and LDFI-lite comparison\n(scoped by #420).\n\n## Measured comparison\n\nMatched arms: run id `202611140101`, shard 0, 128 schedules, 640,000\nscheduled steps each.\n\n| Arm | unique organic vectors | unique peer-count buckets | unique\nbehavior signatures | failures |\n| --- | ---: | ---: | ---: | ---: |\n| Forward (baseline) | 6 | 13 | 107 | 0 |\n| PCT, K=16 | 6 | 13 | 107 | 0 |\n\nBoth arms observed exactly `{0, 2, 4, 6, 17, 21}` (5-bit OR of the\nregistry; sparse-earlier remains unreachable organically). Every trace\nhash changed, proving the interleaving was applied. No coverage or\ndefect-discovery gain, so PCT stays out of the nightly fleet; the opt-in\naxis is retained for order-sensitivity regressions.\n\n## Bug found and fixed\n\nA 1-change PCT run on the checked-in D14 lossy graceful-remove schedule\nproduced:\n\n```text\nFreezeFrameDivergence { slot: 4, peer: 3, first_author: 0, expected: None,\n  actual: Some(FreezePoint { frame: 302, ... }) }\n```\n\nThe step-302 visit order left peer 0 at confirmed frame 301 while peer 3\nreached 303 and observed the slot-4 freeze at 302. The oracle treated\npeer 0's not-yet-observed `None` as a disagreement. A survivor that has\nnot reached the freeze frame cannot disagree; a survivor that did reach\nit and never observed a stable `Disconnected` run still fails. Pinned\nby:\n\n- `oracle_ignores_lagging_survivor_before_the_freeze_frame` (unit).\n- `pct_lagging_survivor_does_not_fake_a_freeze_divergence` (D14\nintegration + exact replay).\n- `oracle_ignores_all_survivors_lagging_behind_the_removal_cut`\n(all-`None` case).\n\nAdversarial review follow-up also clarified that PCT shrinking preserves\nthe stable failure class rather than the exact original trace, and\nrefreshed the stale artifact-schema message after the v9 bump.\n\n## Verification\n\n- `cargo nextest run --profile ci --test simulation --features hot-join`\n→ 473 passed, 27 skipped.\n- `cargo nextest run --profile ci --features tokio,json` → 3,184 passed,\n75 skipped.\n- `cargo clippy --workspace --all-targets --features tokio,json -- -D\nwarnings` → clean.\n- `cargo clippy --tests --test simulation --features hot-join -- -D\nwarnings` → clean.\n- `python3 scripts/ci/agent-preflight.py --auto-fix` → all checks\npassed.\n- Plan hygiene, Agent Skill validation/quality, markdownlint, link\ncheck, typos → green.\n\n## Issue notes\n\n- #403 remains calendar-bound (2/7 scheduled post-redesign windows; five\nremain through 2026-11-19).\n- #420 records the entrance gate and acceptance criteria for\nprefix-replay branching and LDFI-lite.\n- No production behavior, wire format, replay format, or public API\nchanges. No changelog entry is required for test-only work.",
-          "timestamp": "2026-11-14T15:26:14-08:00",
-          "tree_id": "321a75ff934b20387dba9e66bddac1c28811f741",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/e6ad6c17ccfbdfdbd8a726444920a203ee7a857b"
-        },
-        "date": 1794699255636,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 61319,
-            "range": "± 978",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 31905,
-            "range": "± 577",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1693,
-            "range": "± 112",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1556,
-            "range": "± 98",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 3167,
-            "range": "± 198",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 6797,
             "range": "± 141",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": false,
+          "id": "bd4a3d2bb0286dbf25617966186475073e689156",
+          "message": "test: guard the diagnostic epoch surface (#518)\n\n## Description\n\nPost-merge red-main follow-up for `caa387b1` (#517). The `Mutation\nTesting Summary` job failed with two missed mutants:\n\n```text\nwarning Missed mutant  replace P2PSession<T>::diagnostic_coordinated_drop_membership_epoch -> Vec<PlayerHandle> with vec![Default::default()]\nwarning Missed mutant  replace P2PSession<T>::diagnostic_coordinated_drop_membership_epoch -> Vec<PlayerHandle> with vec![]\n```\n\nThe doc-hidden diagnostic added by #517 was exercised only by the\nbrowser/Emscripten probes, not by a native test. Add\n`diagnostic_epoch_matches_the_derived_epoch`, which asserts the\ndiagnostic exposes `[0, 1]` for a two-player session. Targeted mutation\non the function is **2/2 caught**.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have followed the zero-panic policy\n- [x] I have added a test that proves the fix is effective\n- [x] `cargo fmt && cargo clippy --workspace --all-targets --features\ntokio,json,hot-join` are clean\n- [x] `cargo nextest run` passes\n\n## Testing\n\n| Check | Result |\n| --- | --- |\n| `diagnostic_epoch_matches_the_derived_epoch` | 1 passed |\n| Targeted `cargo mutants -F\ndiagnostic_coordinated_drop_membership_epoch` | 2 mutants, **2 caught**\n|\n| Full workspace (`tokio,json,hot-join,violation-census`) | **3,702\npassed, 77 skipped** |\n| `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n-- -D warnings` | clean |\n\n## Related Issues\n\n- Follow-up to #517 / red-main mutation failure on `caa387b1`.",
+          "timestamp": "2026-11-21T06:12:21Z",
+          "tree_id": "45899e697609841383b3128b82eadc5490a365fe",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/bd4a3d2bb0286dbf25617966186475073e689156"
+        },
+        "date": 1795242388672,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 62062,
+            "range": "± 1450",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31767,
+            "range": "± 784",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1861,
+            "range": "± 111",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 63",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3133,
+            "range": "± 181",
             "unit": "ns/iter"
           }
         ]
