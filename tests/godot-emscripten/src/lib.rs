@@ -19,6 +19,9 @@ use web_time::{Duration, Instant};
 
 const FIRST_ADDRESS: u8 = 1;
 const SECOND_ADDRESS: u8 = 2;
+const MESH_HOST_ADDRESS: u8 = 0;
+const MESH_PEER_ADDRESS: u8 = 1;
+const MESH_JOINER_ADDRESS: u8 = 2;
 const MAX_QUEUED_MESSAGES: usize = 256;
 const MAX_SYNC_POLLS: usize = 100;
 const MAX_REMOVAL_POLLS: usize = 512;
@@ -118,6 +121,91 @@ struct SessionPair {
     first: P2PSession<ProbeConfig>,
     second: P2PSession<ProbeConfig>,
     health: Rc<SocketHealth>,
+}
+
+/// Multi-endpoint wire-encoded mesh used by the certified-snapshot probe.
+/// Every send routes to the destination's inbox, so a 3-peer hot-join can
+/// exercise the real codec without a real network.
+struct MeshSocket {
+    local_address: u8,
+    inboxes: Rc<RefCell<Vec<VecDeque<(u8, Vec<u8>)>>>>,
+    health: Rc<SocketHealth>,
+}
+
+impl NonBlockingSocket<u8> for MeshSocket {
+    fn send_to(&mut self, message: &Message, address: &u8) {
+        let Ok(mut inboxes) = self.inboxes.try_borrow_mut() else {
+            self.health.failed.set(true);
+            return;
+        };
+        let Some(inbox) = inboxes.get_mut(usize::from(*address)) else {
+            self.health.failed.set(true);
+            return;
+        };
+        if inbox.len() >= MAX_QUEUED_MESSAGES {
+            self.health.failed.set(true);
+            return;
+        }
+        let Ok(bytes) = codec::encode(message) else {
+            self.health.failed.set(true);
+            return;
+        };
+        inbox.push_back((self.local_address, bytes));
+        self.health
+            .sends
+            .set(self.health.sends.get().saturating_add(1));
+    }
+
+    fn receive_all_messages(&mut self) -> Vec<(u8, Message)> {
+        let Ok(mut inboxes) = self.inboxes.try_borrow_mut() else {
+            self.health.failed.set(true);
+            return Vec::new();
+        };
+        let Some(inbox) = inboxes.get_mut(usize::from(self.local_address)) else {
+            self.health.failed.set(true);
+            return Vec::new();
+        };
+        let message_count = inbox.len().min(MAX_QUEUED_MESSAGES);
+        let mut messages = Vec::new();
+        if messages.try_reserve_exact(message_count).is_err() {
+            self.health.failed.set(true);
+            return messages;
+        }
+        for _ in 0..message_count {
+            let Some((source, bytes)) = inbox.pop_front() else {
+                break;
+            };
+            let Ok((message, consumed)) = codec::decode_message(&bytes) else {
+                self.health.failed.set(true);
+                continue;
+            };
+            if consumed != bytes.len() {
+                self.health.failed.set(true);
+                continue;
+            }
+            messages.push((source, message));
+        }
+        messages
+    }
+}
+
+fn create_socket_mesh(addresses: &[u8]) -> (Vec<MeshSocket>, Rc<SocketHealth>) {
+    let inboxes = Rc::new(RefCell::new(
+        addresses
+            .iter()
+            .map(|_| VecDeque::new())
+            .collect::<Vec<_>>(),
+    ));
+    let health = Rc::new(SocketHealth::default());
+    let sockets = addresses
+        .iter()
+        .map(|&address| MeshSocket {
+            local_address: address,
+            inboxes: Rc::clone(&inboxes),
+            health: Rc::clone(&health),
+        })
+        .collect();
+    (sockets, health)
 }
 
 fn create_socket_pair() -> (MemorySocket, MemorySocket, Rc<SocketHealth>) {
@@ -626,6 +714,231 @@ fn run_hot_join_probe() -> Result<(), String> {
     Ok(())
 }
 
+/// A 3-peer Emscripten probe for issue #515: the host has a live remote and a
+/// reserved slot, removes the remote, then serves the reserved slot. The
+/// joiner must import the snapshot's non-empty `certified_dropped` list and
+/// derive the epoch `[0, 2]`, not `[0, 1, 2]`.
+fn run_certified_epoch_probe() -> Result<(), String> {
+    let base = Instant::now();
+    let offset_ms = Arc::new(AtomicU64::new(0));
+    let clock_offset = Arc::clone(&offset_ms);
+    let clock: ClockFn =
+        Arc::new(move || base + Duration::from_millis(clock_offset.load(Ordering::Relaxed)));
+    let protocol_config = |seed| ProtocolConfig {
+        protocol_rng_seed: Some(seed),
+        clock: Some(clock.clone()),
+        ..ProtocolConfig::default()
+    };
+
+    let (sockets, health) =
+        create_socket_mesh(&[MESH_HOST_ADDRESS, MESH_PEER_ADDRESS, MESH_JOINER_ADDRESS]);
+    let mut sockets = sockets.into_iter();
+    let host_socket = sockets
+        .next()
+        .ok_or_else(|| "missing certified-epoch host socket".to_owned())?;
+    let peer_socket = sockets
+        .next()
+        .ok_or_else(|| "missing certified-epoch peer socket".to_owned())?;
+    let joiner_socket = sockets
+        .next()
+        .ok_or_else(|| "missing certified-epoch joiner socket".to_owned())?;
+
+    let mut host = SessionBuilder::<ProbeConfig>::new()
+        .with_protocol_config(protocol_config(505))
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .with_num_players(3)
+        .map_err(|error| format!("certified-epoch host player count: {error}"))?
+        .with_hot_join(true)
+        .add_player(PlayerType::Local, PlayerHandle::new(0))
+        .map_err(|error| format!("certified-epoch host local player: {error}"))?
+        .add_player(PlayerType::Remote(MESH_PEER_ADDRESS), PlayerHandle::new(1))
+        .map_err(|error| format!("certified-epoch host remote player: {error}"))?
+        .add_reserved_player(MESH_JOINER_ADDRESS, PlayerHandle::new(2))
+        .map_err(|error| format!("certified-epoch host reserved slot: {error}"))?
+        .start_p2p_session(host_socket)
+        .map_err(|error| format!("certified-epoch host session: {error}"))?;
+
+    let mut peer = SessionBuilder::<ProbeConfig>::new()
+        .with_protocol_config(protocol_config(606))
+        .with_disconnect_behavior(DisconnectBehavior::ContinueWithout)
+        .with_num_players(3)
+        .map_err(|error| format!("certified-epoch peer player count: {error}"))?
+        .with_hot_join(true)
+        .add_player(PlayerType::Remote(MESH_HOST_ADDRESS), PlayerHandle::new(0))
+        .map_err(|error| format!("certified-epoch peer host slot: {error}"))?
+        .add_player(PlayerType::Local, PlayerHandle::new(1))
+        .map_err(|error| format!("certified-epoch peer local slot: {error}"))?
+        .add_reserved_player(MESH_JOINER_ADDRESS, PlayerHandle::new(2))
+        .map_err(|error| format!("certified-epoch peer reserved slot: {error}"))?
+        .start_p2p_session(peer_socket)
+        .map_err(|error| format!("certified-epoch peer session: {error}"))?;
+
+    for _ in 0..MAX_SYNC_POLLS {
+        host.poll_remote_clients();
+        peer.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+        if host.current_state() == SessionState::Running
+            && peer.current_state() == SessionState::Running
+        {
+            break;
+        }
+        if health.failed.get() {
+            return Err("in-memory mesh failed during certified-epoch sync".to_owned());
+        }
+    }
+    if host.current_state() != SessionState::Running
+        || peer.current_state() != SessionState::Running
+    {
+        return Err("certified-epoch host and peer did not synchronize".to_owned());
+    }
+    let _ = host.events().count();
+    let _ = peer.events().count();
+
+    let mut host_game = ProbeGame::default();
+    let mut peer_game = ProbeGame::default();
+    for frame_index in 0..4u8 {
+        host.add_local_input(PlayerHandle::new(0), 100 + frame_index)
+            .map_err(|error| format!("pre-removal host input: {error}"))?;
+        peer.add_local_input(PlayerHandle::new(1), 200 + frame_index)
+            .map_err(|error| format!("pre-removal peer input: {error}"))?;
+        host_game.handle(
+            host.advance_frame()
+                .map_err(|error| format!("pre-removal host advance: {error}"))?,
+        )?;
+        peer_game.handle(
+            peer.advance_frame()
+                .map_err(|error| format!("pre-removal peer advance: {error}"))?,
+        )?;
+        host.poll_remote_clients();
+        peer.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+    }
+    for _ in 0..MAX_CONFIRM_POLLS {
+        if host.confirmed_frame() >= Frame::new(3) {
+            break;
+        }
+        host.poll_remote_clients();
+        peer.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+    }
+    if host.confirmed_frame() < Frame::new(3) {
+        return Err("certified-epoch host did not confirm a pre-removal prefix".to_owned());
+    }
+
+    host.remove_player(PlayerHandle::new(1))
+        .map_err(|error| format!("certified-epoch removal: {error}"))?;
+    let mut dropped = false;
+    let mut peer_stopped = false;
+    for _ in 0..MAX_REMOVAL_POLLS {
+        host.poll_remote_clients();
+        peer.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+        for event in host.events() {
+            if let FortressEvent::PeerDropped { handle, .. } = event {
+                if handle != PlayerHandle::new(1) {
+                    return Err(format!(
+                        "certified-epoch removal dropped handle {} instead of 1",
+                        handle.as_usize()
+                    ));
+                }
+                dropped = true;
+            }
+        }
+        let _ = peer.events().count();
+        peer_stopped = peer.current_state() == SessionState::Synchronizing;
+        if dropped && peer_stopped {
+            break;
+        }
+        if health.failed.get() {
+            return Err("in-memory mesh failed during certified-epoch removal".to_owned());
+        }
+    }
+    if !dropped {
+        return Err("certified-epoch host did not certify the removal".to_owned());
+    }
+    if !peer_stopped {
+        return Err("certified-epoch peer did not apply its removal certificate".to_owned());
+    }
+    if host.diagnostic_coordinated_drop_membership_epoch() != vec![PlayerHandle::new(0)] {
+        return Err(format!(
+            "certified-epoch host epoch after removal is {:?}, expected [0]",
+            host.diagnostic_coordinated_drop_membership_epoch()
+        ));
+    }
+
+    // Drain the removed target's speculative tail before the N-peer serve
+    // captures its snapshot frame.
+    for offset in 0..2u8 {
+        host.add_local_input(PlayerHandle::new(0), 50 + offset)
+            .map_err(|error| format!("post-removal host input: {error}"))?;
+        host_game.handle(
+            host.advance_frame()
+                .map_err(|error| format!("post-removal host advance: {error}"))?,
+        )?;
+        host.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+    }
+
+    let mut joiner = SessionBuilder::<ProbeConfig>::new()
+        .with_protocol_config(protocol_config(707))
+        .with_num_players(3)
+        .map_err(|error| format!("certified-epoch joiner player count: {error}"))?
+        .add_player(PlayerType::Remote(MESH_HOST_ADDRESS), PlayerHandle::new(0))
+        .map_err(|error| format!("certified-epoch joiner host slot: {error}"))?
+        .add_player(PlayerType::Remote(MESH_PEER_ADDRESS), PlayerHandle::new(1))
+        .map_err(|error| format!("certified-epoch joiner dropped slot: {error}"))?
+        .add_player(PlayerType::Local, PlayerHandle::new(2))
+        .map_err(|error| format!("certified-epoch joiner local slot: {error}"))?
+        .start_hot_join_session(joiner_socket, MESH_HOST_ADDRESS)
+        .map_err(|error| format!("certified-epoch joiner session: {error}"))?;
+    if joiner.current_state() != SessionState::HotJoining {
+        return Err("certified-epoch joiner did not start in HotJoining".to_owned());
+    }
+
+    for _ in 0..MAX_HOT_JOIN_POLLS {
+        host.poll_remote_clients();
+        joiner.poll_remote_clients();
+        offset_ms.fetch_add(VIRTUAL_POLL_INTERVAL_MS, Ordering::Relaxed);
+        if joiner.current_state() == SessionState::Running {
+            break;
+        }
+        if health.failed.get() {
+            return Err("in-memory mesh failed during certified-epoch join".to_owned());
+        }
+    }
+    if joiner.current_state() != SessionState::Running {
+        return Err(format!(
+            "certified-epoch joiner remained {:?} after the snapshot handshake",
+            joiner.current_state()
+        ));
+    }
+
+    let mut joiner_game = ProbeGame::default();
+    joiner_game.handle(
+        joiner
+            .advance_frame()
+            .map_err(|error| format!("certified-epoch snapshot apply: {error}"))?,
+    )?;
+
+    let expected_epoch = vec![PlayerHandle::new(0), PlayerHandle::new(2)];
+    if joiner.diagnostic_coordinated_drop_membership_epoch() != expected_epoch {
+        return Err(format!(
+            "certified-epoch joiner epoch is {:?}, expected {expected_epoch:?}",
+            joiner.diagnostic_coordinated_drop_membership_epoch()
+        ));
+    }
+    if host.diagnostic_coordinated_drop_membership_epoch() != expected_epoch {
+        return Err(format!(
+            "certified-epoch host epoch after join is {:?}, expected {expected_epoch:?}",
+            host.diagnostic_coordinated_drop_membership_epoch()
+        ));
+    }
+    if health.failed.get() {
+        return Err("in-memory mesh failed during the certified-epoch probe".to_owned());
+    }
+    Ok(())
+}
+
 fn mode() -> &'static str {
     if cfg!(feature = "nothreads") {
         "nothreads"
@@ -707,12 +1020,14 @@ impl FortressEmscriptenProbe {
             })
             .and_then(|evidence| run_removal_probe().map(|()| evidence))
             .and_then(|evidence| run_hot_join_probe().map(|()| evidence))
+            .and_then(|evidence| run_certified_epoch_probe().map(|()| evidence))
         {
             Ok((real_clock_send_delta, (first_ping, second_ping), replay)) => {
                 result.set("ok", true);
                 result.set("real_clock_smoke", true);
                 result.set("removal_certified", true);
                 result.set("hot_join_activated", true);
+                result.set("certified_epoch_imported", true);
                 result.set(
                     "real_clock_send_delta",
                     i64::try_from(real_clock_send_delta).unwrap_or(i64::MAX),
@@ -734,6 +1049,7 @@ impl FortressEmscriptenProbe {
                 result.set("real_clock_smoke", false);
                 result.set("removal_certified", false);
                 result.set("hot_join_activated", false);
+                result.set("certified_epoch_imported", false);
                 result.set("real_clock_send_delta", 0);
                 result.set("ping_a_ms", -1);
                 result.set("ping_b_ms", -1);
