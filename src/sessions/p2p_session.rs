@@ -422,11 +422,6 @@ struct TerminalTargetWatermark {
     sequence: u32,
 }
 
-/// Distinct operation identities retained per target handle. A single
-/// endpoint normally has one target set; the small history covers a changing
-/// handle set without letting a peer flush the entry with unrelated targets.
-const TERMINAL_TARGET_HISTORY: usize = 4;
-
 #[derive(Debug)]
 struct CoordinatedDropState<A> {
     active: Option<CoordinatedDropAttempt<A>>,
@@ -454,14 +449,14 @@ struct CoordinatedDropState<A> {
     /// observed disconnect status is not authoritative membership).
     certified_dropped: std::collections::BTreeSet<PlayerHandle>,
     closed: VecDeque<DropOperationId>,
-    /// Terminal sequence watermark per target handle:
-    /// `handle -> recently terminal operation identities`.
-    /// A target's history survives operations for other targets, so an
-    /// evicted aborted operation cannot reopen while its target can still
-    /// validate. Each identity's sequence is compared only against the same
-    /// target set and participant era. Bounded by the configured player count
-    /// times [`TERMINAL_TARGET_HISTORY`].
-    terminal_targets: BTreeMap<u16, VecDeque<TerminalTargetWatermark>>,
+    /// Terminal sequence watermark per target handle.
+    ///
+    /// A target set is canonical (every handle of its endpoint), so one
+    /// identity per handle can validate at a time. Operations for other
+    /// targets cannot evict this entry; a new participant era or target
+    /// generation replaces it because the old prepare fails the normal
+    /// membership/generation validation. Bounded by the player count.
+    terminal_targets: BTreeMap<u16, TerminalTargetWatermark>,
     /// Recently rejected superseded prepares, bounded to one per player.
     rejected: VecDeque<RejectedDropOperation>,
     /// Targets of an uncertified attempt that a failed-closed session abandoned.
@@ -1884,9 +1879,9 @@ impl<T: Config> P2PSession<T> {
     /// Highest terminal sequence for `operation` on any of its targets.
     ///
     /// The lookup only matches the full operation identity: target set,
-    /// participant era, and target generation. Sequences are generation-local
-    /// per target set, so a terminal entry for `{4}` must not suppress a valid
-    /// `{3, 4}` operation that shares handle 4.
+    /// participant era, and target generation. A canonical target set has one
+    /// valid identity per generation, so a single entry per handle covers every
+    /// prepare that can still validate.
     fn coordinated_drop_terminal_sequence_for_targets(
         &self,
         operation: DropOperationId,
@@ -1898,14 +1893,11 @@ impl<T: Config> P2PSession<T> {
                 self.coordinated_drop
                     .terminal_targets
                     .get(&target.handle)
-                    .and_then(|history| {
-                        history.iter().rev().find_map(|watermark| {
-                            (watermark.target_set_digest == operation.target_set_digest
-                                && watermark.participant_set_digest
-                                    == operation.participant_set_digest
-                                && watermark.generation == target.generation)
-                                .then_some(watermark.sequence)
-                        })
+                    .and_then(|watermark| {
+                        (watermark.target_set_digest == operation.target_set_digest
+                            && watermark.participant_set_digest == operation.participant_set_digest
+                            && watermark.generation == target.generation)
+                            .then_some(watermark.sequence)
                     })
             })
             .max()
@@ -1913,8 +1905,9 @@ impl<T: Config> P2PSession<T> {
 
     /// Records a terminal operation's sequence for every target handle.
     ///
-    /// Each handle retains a small identity history; the total is bounded by
-    /// the configured player count times [`TERMINAL_TARGET_HISTORY`].
+    /// One entry per valid handle, bounded by the configured player count. A
+    /// matching identity keeps the highest sequence; a new participant era or
+    /// target generation replaces the entry (old prepares fail validation).
     fn coordinated_drop_record_terminal_targets(
         &mut self,
         operation: DropOperationId,
@@ -1924,34 +1917,34 @@ impl<T: Config> P2PSession<T> {
             if target.handle as usize >= self.num_players {
                 continue;
             }
-            let history = self
-                .coordinated_drop
-                .terminal_targets
-                .entry(target.handle)
-                .or_default();
-            let existing = history.iter().position(|watermark| {
-                watermark.target_set_digest == operation.target_set_digest
-                    && watermark.participant_set_digest == operation.participant_set_digest
-                    && watermark.generation == target.generation
-            });
-            if let Some(index) = existing {
-                if let Some(mut watermark) = history.remove(index) {
-                    watermark.sequence = watermark.sequence.max(operation.sequence);
-                    history.push_back(watermark);
-                }
-                continue;
-            }
-            // alloc-bound: every valid handle keeps at most
-            // `TERMINAL_TARGET_HISTORY` identity entries, and there are at most
-            // `num_players` handles.
-            history.push_back(TerminalTargetWatermark {
+            let candidate = TerminalTargetWatermark {
                 target_set_digest: operation.target_set_digest,
                 participant_set_digest: operation.participant_set_digest,
                 generation: target.generation,
                 sequence: operation.sequence,
-            });
-            while history.len() > TERMINAL_TARGET_HISTORY {
-                history.pop_front();
+            };
+            match self
+                .coordinated_drop
+                .terminal_targets
+                .get_mut(&target.handle)
+            {
+                Some(existing) => {
+                    if existing.target_set_digest == candidate.target_set_digest
+                        && existing.participant_set_digest == candidate.participant_set_digest
+                        && existing.generation == candidate.generation
+                    {
+                        existing.sequence = existing.sequence.max(candidate.sequence);
+                    } else {
+                        *existing = candidate;
+                    }
+                },
+                None => {
+                    // alloc-bound: at most one entry per valid handle, and there
+                    // are at most `num_players` handles.
+                    self.coordinated_drop
+                        .terminal_targets
+                        .insert(target.handle, candidate);
+                },
             }
         }
     }
@@ -2782,6 +2775,22 @@ impl<T: Config> P2PSession<T> {
                 Some(PlayerType::Remote(addr)) if addr == target_addr
             )
         }) {
+            return false;
+        }
+        // The target set is canonical: every remote handle of the target
+        // endpoint. A subset would create a second sequence space for one
+        // handle, and `begin_coordinated_drop` never produces one.
+        let canonical_targets = self
+            .player_reg
+            .handles_by_address_iter(target_addr)
+            .filter(|handle| {
+                matches!(
+                    self.player_reg.handles.get(handle),
+                    Some(PlayerType::Remote(_))
+                )
+            })
+            .count();
+        if prepare.targets.len() != canonical_targets {
             return false;
         }
         // The participant set is the agreed membership epoch minus the target
@@ -19334,27 +19343,6 @@ mod tests {
             None,
             "another target handle must not inherit the watermark"
         );
-
-        session.coordinated_drop_record_terminal_targets(
-            DropOperationId {
-                sequence: 9,
-                ..base
-            },
-            &targets,
-        );
-        session.coordinated_drop_record_terminal_targets(
-            DropOperationId {
-                sequence: 4,
-                ..base
-            },
-            &targets,
-        );
-        assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(base, &targets),
-            Some(9),
-            "the same era must keep the highest terminal sequence"
-        );
-
         let other_target_set = DropOperationId {
             target_set_digest: 0xDDDD,
             ..base
@@ -19375,53 +19363,36 @@ mod tests {
             "a different target set must not share the per-target sequence space"
         );
 
-        session.coordinated_drop_record_terminal_targets(other_era, &targets);
-        assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(other_era, &targets),
-            Some(3),
-            "a new era must keep its own watermark"
+        session.coordinated_drop_record_terminal_targets(
+            DropOperationId {
+                sequence: 9,
+                ..base
+            },
+            &targets,
+        );
+        session.coordinated_drop_record_terminal_targets(
+            DropOperationId {
+                sequence: 4,
+                ..base
+            },
+            &targets,
         );
         assert_eq!(
             session.coordinated_drop_terminal_sequence_for_targets(base, &targets),
             Some(9),
-            "a new era must not overwrite the old era's history"
+            "the same identity must keep the highest terminal sequence"
         );
 
-        let third = DropOperationId {
-            target_set_digest: 0xEEEE,
-            sequence: 5,
-            ..base
-        };
-        let fourth = DropOperationId {
-            target_set_digest: 0xFFFF,
-            participant_set_digest: 0xDDDD,
-            sequence: 6,
-            ..base
-        };
-        session.coordinated_drop_record_terminal_targets(third, &targets);
-        session.coordinated_drop_record_terminal_targets(fourth, &targets);
-        for (operation, expected) in [(base, 9), (other_era, 3), (third, 5), (fourth, 6)] {
-            assert_eq!(
-                session.coordinated_drop_terminal_sequence_for_targets(operation, &targets),
-                Some(expected),
-                "a full history must retain every retained identity"
-            );
-        }
-        let fifth = DropOperationId {
-            target_set_digest: 0x1111,
-            participant_set_digest: 0x2222,
-            sequence: 7,
-            ..base
-        };
-        session.coordinated_drop_record_terminal_targets(fifth, &targets);
+        session.coordinated_drop_record_terminal_targets(other_era, &targets);
         assert_eq!(
-            session.coordinated_drop_terminal_sequence_for_targets(fifth, &targets),
-            Some(7)
+            session.coordinated_drop_terminal_sequence_for_targets(other_era, &targets),
+            Some(3),
+            "a new era must install its own watermark"
         );
         assert_eq!(
             session.coordinated_drop_terminal_sequence_for_targets(base, &targets),
             None,
-            "a fifth identity must evict the oldest handle history entry"
+            "a replaced era cannot validate and must not inherit the watermark"
         );
 
         let invalid = vec![DropTarget {
@@ -19434,16 +19405,48 @@ mod tests {
             "invalid handles must not grow the watermark journal"
         );
         assert!(
-            session
-                .coordinated_drop
-                .terminal_targets
-                .get(&4)
-                .is_some_and(|history| history.len() == TERMINAL_TARGET_HISTORY),
-            "each target handle's history must stay exactly at its bound"
-        );
-        assert!(
             session.coordinated_drop.terminal_targets.len() <= session.num_players,
             "the terminal watermark journal must stay bounded by the player count"
+        );
+    }
+
+    #[test]
+    fn non_canonical_target_subset_does_not_match_membership() {
+        let session = create_multi_handle_remote_session();
+        let full = DropPrepare {
+            operation: DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence: 1,
+                target_set_digest: 0,
+                participant_set_digest: 0,
+            },
+            targets: vec![
+                DropTarget {
+                    handle: 1,
+                    generation: 0,
+                },
+                DropTarget {
+                    handle: 2,
+                    generation: 0,
+                },
+            ],
+            participants: vec![0],
+        };
+        assert!(
+            session.coordinated_drop_prepare_matches_current_membership(&full),
+            "the full endpoint target set is canonical"
+        );
+        let subset = DropPrepare {
+            targets: vec![DropTarget {
+                handle: 1,
+                generation: 0,
+            }],
+            ..full
+        };
+        assert!(
+            !session.coordinated_drop_prepare_matches_current_membership(&subset),
+            "a subset of one endpoint's handles must not validate"
         );
     }
 
