@@ -1403,10 +1403,10 @@ impl<T: Config> P2PSession<T> {
     /// quorum in time; it never changes the participant set. The certified
     /// exclusion is a shared fact: it travels in the hot-join snapshot and is
     /// cleared by the lifecycle commit on every peer. The roster and reserved
-    /// flags are part of the agreed configuration on every peer. A
-    /// never-joined reserved slot is omitted because it cannot report; a
-    /// reserved slot whose serve or reactivation is in flight is included
-    /// because it is about to become a participant.
+    /// flags are part of the agreed configuration on every peer. A reserved
+    /// slot is omitted until the join or reactivation commit activates it;
+    /// local in-flight state is never consulted, so one peer observing a
+    /// serve cannot derive a different quorum from another.
     fn coordinated_drop_membership_epoch(&self) -> Vec<u16> {
         // alloc-bound: at most one entry per configured player slot.
         let mut epoch = Vec::new();
@@ -1425,19 +1425,14 @@ impl<T: Config> P2PSession<T> {
         // voters that can never report and make quorum unreachable (PR #508
         // review).
         for endpoint in self.player_reg.remotes.values() {
-            // A never-joined reserved slot is not a voter: it cannot report,
-            // and including it would make every removal quorum unreachable
-            // until a joiner fills the slot. An in-flight serve/reactivation
-            // is included so its operation sees the participant that is about
-            // to activate.
+            // A reserved slot is not a voter until the join/reactivation
+            // commit activates it. This is a configuration fact on every peer,
+            // not a local in-flight view: including a slot merely because one
+            // peer already observed a serve would let peers derive different
+            // quorums for the same operation.
             #[cfg(feature = "hot-join")]
             {
-                let reserved = self.hot_join.endpoint_is_reserved(endpoint);
-                let join_in_flight = endpoint
-                    .handles()
-                    .iter()
-                    .any(|handle| self.coordinated_drop_slot_join_in_flight(*handle));
-                if reserved && !join_in_flight {
+                if self.hot_join.endpoint_is_reserved(endpoint) {
                     continue;
                 }
             }

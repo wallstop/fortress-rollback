@@ -86,9 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pre-existing:** two requesters in a split view can no longer commit different cuts for one
   coordinated graceful-removal target. The participant set is the agreed membership epoch minus
   the targets, independent of local endpoint reachability, and its digest is bound into the
-  operation identity. A never-joined reserved hot-join slot is not a voter in that epoch; a slot
-  whose serve or reactivation is in flight is included, so a removal before a reserved slot is
-  filled no longer waits on a participant that cannot report. Pinned by the deterministic
+  operation identity. A reserved hot-join slot is not a voter in that epoch until its join or
+  reactivation commit activates it, so a removal before the slot is filled no longer waits on a
+  participant that cannot report, and local in-flight state cannot split the quorum. Pinned by the
+  deterministic
   split-view CAP row, the `CoordinatorSplitView.tla` model (two disjoint groups; the local-view
   configuration is a manual demo-fail), participant-derivation unit guards, and the
   browser/Emscripten certified-dropped snapshot probes.
