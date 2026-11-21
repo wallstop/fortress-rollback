@@ -1,62 +1,8 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795219675462,
+  "lastUpdate": 1795236555892,
   "repoUrl": "https://github.com/Ambiguous-Interactive/fortress-rollback",
   "entries": {
     "Fortress Rollback Benchmarks": [
-      {
-        "commit": {
-          "author": {
-            "email": "wallstop@wallstopstudios.com",
-            "name": "Eli Pinkerton",
-            "username": "wallstop"
-          },
-          "committer": {
-            "email": "noreply@github.com",
-            "name": "GitHub",
-            "username": "web-flow"
-          },
-          "distinct": true,
-          "id": "b9ce93840086253f65a0123a8ac1bbea66899ed2",
-          "message": "test(simulation): cut the residual violation-site census (P2) (#417)\n\n## Description\n\nExercise the remaining reachable defensive `report_violation!` guards\nbehind the exact violation-site census, completing stage 2 of the\nfleet-search violation-coverage item. Local exact observations move from\n**202/284 to 243/284 exercised** (82 -> 41 unexercised). Test-only\nchange; no production behavior changed.\n\nThe 41 residual sites are classified in #416:\n\n- 19 allocation/encode/writer fallbacks with no fault-injection hook.\n- 14 unreachable-by-construction postconditions / duplicate guards\n(deletion needs maintainer-approved baseline regeneration).\n- 8 reachable defensive fallbacks needing targeted fault injection\n(snapshot capture serialization, replay recorder failure, endpoint\nre-arm, propagated/timed-out disconnect application).\n\n`PLAN.md` now hands the residual classification to #416 and keeps the\ncalendar-bound seven-window ratchet item.\n\n## Type of Change\n\n- [x] 🧪 Test (adding or updating tests)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](../docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective or my feature\nworks\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] I have updated the documentation accordingly (`PLAN.md` only; no\nuser-facing docs or changelog entry for test-only work)\n- [ ] I have added an entry to `CHANGELOG.md` for user-facing changes\n(not applicable: test-only)\n- [ ] I have updated relevant examples in the `examples/` directory (not\napplicable)\n- [x] My changes generate no new compiler warnings\n\n## Testing\n\n**Tests added/modified:**\n\n- `src/sync_layer/mod.rs`: unaddressable `save_current_state` frame\nfallback; reactivated-slot `synchronized_inputs` pre-activation bound.\n- `src/input_queue/mod.rs`: gap-fill missing replication source;\n`reset_to_frame` delayed-frame underflow.\n- `src/sessions/p2p_spectator_session.rs`: missing host connect-status\nrow; canonical commit missing input slot/status.\n- `src/sessions/p2p_session.rs`: missing synchronized inputs;\nout-of-window hot-join activation; staged 2-peer and N-peer serve\nfailure paths; N-peer abort-before-capture; joiner backfill guards;\nremote disconnect snapshot fallbacks; staged survivor pending\nreactivation; constructor guards; queued coordinated-drop guard;\ntruncated spectator batch; 2-peer joiner apply failure; N-peer buffered\njoiner coordinator loss/apply failure.\n- `src/network/protocol/mod.rs`: armed failing `Config::Input`\nserializer for the `enqueue_replicated_input` serialization fallback.\n\n**Manual testing performed:**\n\n- `cargo +1.100.0 fmt --check` (CI-matching toolchain): clean.\n- `cargo +1.100.0 clippy --workspace --all-targets --features\ntokio,json,hot-join,violation-census -- -D warnings`: clean.\n- `cargo +1.100.0 clippy --workspace --all-targets -- -D warnings`:\nclean.\n- `cargo +1.100.0 nextest run --profile ci --features\ntokio,json,hot-join,violation-census`: 3467 passed, 76 skipped.\n- `cargo +1.100.0 nextest run`: 3141 passed, 75 skipped.\n- Exact census: 284 baseline, 243 exercised, 41 unexercised.\n- `python3 scripts/ci/agent-preflight.py --auto-fix`: all checks passed.\n\n## Related Issues\n\n- Relates to #416\n- Relates to #403",
-          "timestamp": "2026-11-14T10:37:01-08:00",
-          "tree_id": "8f629670cbf2ea972ec98d6ecf806dfbb3b5f699",
-          "url": "https://github.com/wallstop/fortress-rollback/commit/b9ce93840086253f65a0123a8ac1bbea66899ed2"
-        },
-        "date": 1794681920271,
-        "tool": "cargo",
-        "benches": [
-          {
-            "name": "Message serialization/round_trip_input_msg",
-            "value": 60563,
-            "range": "± 1946",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_serialize",
-            "value": 31944,
-            "range": "± 396",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_deserialize",
-            "value": 1862,
-            "range": "± 111",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "Message serialization/input_encode_into_buffer",
-            "value": 1555,
-            "range": "± 90",
-            "unit": "ns/iter"
-          },
-          {
-            "name": "SyncLayer/256_frame_save_advance",
-            "value": 2866,
-            "range": "± 282",
-            "unit": "ns/iter"
-          }
-        ]
-      },
       {
         "commit": {
           "author": {
@@ -2699,6 +2645,60 @@ window.BENCHMARK_DATA = {
             "name": "SyncLayer/256_frame_save_advance",
             "value": 7942,
             "range": "± 130",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wallstop@wallstopstudios.com",
+            "name": "Eli Pinkerton",
+            "username": "wallstop"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0819ad574bcb7a67811994bdf29ccdd1f7ce9585",
+          "message": "fix: keep evicted terminal coordinated-drop operations closed (#514)\n\n## Description\n\nCloses #512.\n\n`coordinated_drop_close_operation` kept terminal operations in a\n`closed` deque bounded to `num_players`. Once an aborted or superseded\noperation was evicted, a delayed `Prepare` could still pass\n`coordinated_drop_validate_prepare` when the target was connected, its\ngeneration unchanged, and the membership epoch unchanged. With no active\nattempt, the endpoint installed a new `Inventory` and broadcast a\n`Report`; peers that still remembered the operation as closed did not\nanswer, the reopened attempt hit its deadline, and\n`coordinated_drop_fail_closed` took a healthy session into the\ndisconnect fail-closed state.\n\n`DropOperationId.sequence` is generation-local per target set\n(`max(target generation) + 1`), not a coordinator-global counter, so the\nguard keys on the full operation identity.\n\n### Fix\n\n- Require a canonical target set (every remote handle of the target\nendpoint) and a canonical operation coordinator (the first participant).\nThis rejects non-canonical subsets and forged authority, and means only\none identity per target handle/generation can validate at a time.\n- Record it from every terminal close and from the supersede/reject\npath.\n- Keep a per-target-handle history of **exact** terminal identities\n`(target_set_digest, participant_set_digest, coordinator_generation,\ntarget_generation, sequence)`, bounded to `2 * num_players` per handle.\nExact matching is required: a lower sequence can still be a live\nhigher-priority attempt, and a rejoined coordinator starts a new\ngeneration. A different live sequence is left to the operation\ncomparator. A replay older than the bounded window is tracked in #516\nfor a protocol-level terminal epoch.\n- Skip exact terminal identities and closed-journal identities one step\nat a time in `begin_coordinated_drop`; a terminal identity at a large or\nhostile sequence does not move the retry floor, so it cannot exhaust the\nsequence.\n- Share the operation-identity tuple helper with `closed_commit_cuts`;\nthe target journal is bounded to one entry per player handle.\n- Fold the behavior into the existing coordinated-drop artifact\nchangelog entry (unreleased code rule).\n\n### Red/green\n\nNew regression\n`evicted_terminal_prepare_does_not_reopen_and_retry_advances`:\n\n```text\npanicked at src/sessions/p2p_session.rs:19012:9:\nan evicted terminal prepare must not reopen an inventory attempt\ntest result: FAILED. 0 passed; 1 failed\n```\n\nAfter the fix the same test passes. Additional regressions cover the\nrejected-journal eviction replay, a hostile large terminal identity, a\nclosed identity above the terminal one, a rejoined coordinator\ngeneration, and exact-identity/bound scoping.\n\n### Known limitation\n\nThe exact-identity history is bounded to `2 * num_players` entries per\ntarget\nhandle by the repository's bounded-allocation policy. An exact replay\nolder\nthan that window can still reopen; closing that requires a\nprotocol-level\nterminal epoch (issue #516). The changelog and the code-side bound note\nstate\nthis explicitly. Canonical target-set/coordinator validation limits\nwhich\nidentities can be valid, and the exact-match guard keeps a different\nlive\nsequence admissible.\n\n## Type of Change\n\n- [x] 🐛 Bug fix (non-breaking change that fixes an issue)\n\n## Checklist\n\n### Required\n\n- [x] I have read the [CONTRIBUTING guide](docs/contributing.md)\n- [x] I have followed the **zero-panic policy**\n- [x] I have added tests that prove my fix is effective\n- [x] I have run `cargo fmt && cargo clippy --workspace --all-targets\n--features tokio,json,hot-join` with no warnings\n- [x] I have run `cargo nextest run` and all tests pass\n\n### If Applicable\n\n- [x] CHANGELOG entry folded into the existing unreleased\ncoordinated-drop entry\n- [x] My changes generate no new compiler warnings\n- [ ] Documentation updated (internal protocol dedup; no public API\nchange)\n\n## Testing\n\n**Tests added/modified:**\n\n- `evicted_terminal_prepare_does_not_reopen_and_retry_advances`\n- `evicted_rejected_prepare_still_cannot_reopen`\n- `large_terminal_identity_does_not_block_a_new_retry`\n- `rejoined_coordinator_generation_is_not_blocked_by_terminal_history`\n- `terminal_watermark_matches_exact_identity_and_is_bounded`\n- `retry_steps_once_past_a_closed_identity_after_the_terminal_watermark`\n- `evicted_terminal_prepare_does_not_reopen_and_retry_advances`\n- `evicted_rejected_prepare_still_cannot_reopen`\n- `retry_steps_once_past_a_closed_identity_after_the_terminal_watermark`\n- `non_canonical_target_subset_does_not_match_membership`\n- `forged_operation_coordinator_is_rejected`\n\n**Manual testing performed:**\n\n| Check | Result |\n| --- | --- |\n| Full workspace (`tokio,json,hot-join,violation-census`) | **3,700\npassed, 77 skipped, 48.1s** |\n| Scoped aarch64 QEMU (exact CI command) | **2,953 passed, 503 skipped,\n179.7s** |\n| Scoped i686 (exact CI command) | **2,951 passed, 503 skipped, 12.6s**\n|\n| `cargo clippy --workspace --all-targets --features tokio,json,hot-join\n-- -D warnings` | clean |\n| `cargo test --doc` | 160 passed, 51 ignored |\n| `agent-preflight.py --full --auto-fix` | all checks pass |\n| Targeted mutation of the changed helpers | record helper 14 mutants\n(12 caught, 2 unviable); exact-match/admission set **0 missed** after\nthe duplicate-identity regression |\n\nReview follow-ups: the initial per-identity journal could evict an\noperation; the final guard is an exact per-handle identity history.\nLater rounds found target-set sequence mixing, a rejoined coordinator\ngeneration, a hostile large terminal sequence, and a prefix rule that\nrejected live lower sequences; all are fixed by exact matching,\ncoordinator-generation identity, canonical target/coordinator\nvalidation, and no sequence floor. The bounded-window residual is\ntracked in #516.\n\n## Related Issues\n\n- Fixes #512\n- Relates to #431 (original review finding) and #510 (CAP trade-off\ntriage).",
+          "timestamp": "2026-11-21T04:35:52Z",
+          "tree_id": "ea3d0f0791afaf24204c9f566afa86b418b78fcc",
+          "url": "https://github.com/Ambiguous-Interactive/fortress-rollback/commit/0819ad574bcb7a67811994bdf29ccdd1f7ce9585"
+        },
+        "date": 1795236554405,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "Message serialization/round_trip_input_msg",
+            "value": 62575,
+            "range": "± 1342",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_serialize",
+            "value": 31219,
+            "range": "± 374",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_deserialize",
+            "value": 1863,
+            "range": "± 111",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "Message serialization/input_encode_into_buffer",
+            "value": 1556,
+            "range": "± 79",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "SyncLayer/256_frame_save_advance",
+            "value": 3136,
+            "range": "± 187",
             "unit": "ns/iter"
           }
         ]
