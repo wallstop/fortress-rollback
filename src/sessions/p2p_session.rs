@@ -411,6 +411,21 @@ struct UnseenCommitEvidence {
     sources: std::collections::BTreeSet<u16>,
 }
 
+/// One exact terminal operation identity retained for a target handle.
+///
+/// Sequences are generation-local per target set and a lower sequence can
+/// still be a live higher-priority attempt, so only an exact identity match is
+/// treated as a replay. The coordinator generation participates so a rejoined
+/// coordinator is not blocked by its predecessor's terminal history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TerminalTargetWatermark {
+    target_set_digest: u64,
+    participant_set_digest: u64,
+    coordinator_generation: u16,
+    generation: u16,
+    sequence: u32,
+}
+
 #[derive(Debug)]
 struct CoordinatedDropState<A> {
     active: Option<CoordinatedDropAttempt<A>>,
@@ -438,6 +453,13 @@ struct CoordinatedDropState<A> {
     /// observed disconnect status is not authoritative membership).
     certified_dropped: std::collections::BTreeSet<PlayerHandle>,
     closed: VecDeque<DropOperationId>,
+    /// Exact terminal operation identities per target handle.
+    ///
+    /// A target's history survives operations for other targets. The exact
+    /// identity includes the coordinator generation and sequence, so a rejoined
+    /// coordinator and a concurrent lower sequence are not blocked. Bounded by
+    /// two entries per player per handle.
+    terminal_targets: BTreeMap<u16, VecDeque<TerminalTargetWatermark>>,
     /// Recently rejected superseded prepares, bounded to one per player.
     rejected: VecDeque<RejectedDropOperation>,
     /// Targets of an uncertified attempt that a failed-closed session abandoned.
@@ -478,6 +500,7 @@ impl<A> Default for CoordinatedDropState<A> {
             membership_generations: BTreeMap::new(),
             certified_dropped: std::collections::BTreeSet::new(),
             closed: VecDeque::new(),
+            terminal_targets: BTreeMap::new(),
             rejected: VecDeque::new(),
             halted_targets: std::collections::BTreeSet::new(),
             retiring: BTreeMap::new(),
@@ -1798,6 +1821,17 @@ impl<T: Config> P2PSession<T> {
         });
     }
 
+    /// Identity shared by every artifact of one operation, independent of its
+    /// sequence. Used by the terminal-history and closed-cut watermarks.
+    fn coordinated_drop_operation_identity(operation: DropOperationId) -> (u16, u16, u64, u64) {
+        (
+            operation.coordinator,
+            operation.coordinator_generation,
+            operation.target_set_digest,
+            operation.participant_set_digest,
+        )
+    }
+
     fn coordinated_drop_operation_cmp(
         left: DropOperationId,
         right: DropOperationId,
@@ -1845,6 +1879,86 @@ impl<T: Config> P2PSession<T> {
                 .any(|deferred| deferred.prepare.operation == operation)
     }
 
+    /// Whether `operation` exactly matches a retained terminal identity on any
+    /// of its targets.
+    ///
+    /// Exact matching (including sequence and coordinator generation) is
+    /// required: a lower sequence can still be a live higher-priority attempt,
+    /// and a rejoined coordinator starts a new generation that must not be
+    /// suppressed by its predecessor's history.
+    fn coordinated_drop_operation_is_terminal(
+        &self,
+        operation: DropOperationId,
+        targets: &[DropTarget],
+    ) -> bool {
+        targets.iter().any(|target| {
+            self.coordinated_drop
+                .terminal_targets
+                .get(&target.handle)
+                .is_some_and(|history| {
+                    history.iter().any(|watermark| {
+                        watermark.target_set_digest == operation.target_set_digest
+                            && watermark.participant_set_digest == operation.participant_set_digest
+                            && watermark.coordinator_generation == operation.coordinator_generation
+                            && watermark.generation == target.generation
+                            && watermark.sequence == operation.sequence
+                    })
+                })
+        })
+    }
+
+    /// Records a terminal operation's exact identity for every target handle.
+    ///
+    /// Each handle retains the most recent `2 * num_players` exact identities,
+    /// so the total is bounded by the roster squared. Exact matching keeps a
+    /// lower live sequence and a new coordinator generation admissible.
+    fn coordinated_drop_record_terminal_targets(
+        &mut self,
+        operation: DropOperationId,
+        targets: &[DropTarget],
+    ) {
+        for target in targets {
+            if target.handle as usize >= self.num_players {
+                continue;
+            }
+            let history = self
+                .coordinated_drop
+                .terminal_targets
+                .entry(target.handle)
+                .or_default();
+            let existing = history.iter().position(|watermark| {
+                watermark.target_set_digest == operation.target_set_digest
+                    && watermark.participant_set_digest == operation.participant_set_digest
+                    && watermark.coordinator_generation == operation.coordinator_generation
+                    && watermark.generation == target.generation
+                    && watermark.sequence == operation.sequence
+            });
+            if let Some(index) = existing {
+                if let Some(watermark) = history.remove(index) {
+                    history.push_back(watermark);
+                }
+                continue;
+            }
+            // alloc-bound: every valid handle keeps at most
+            // `2 * num_players` identities, and there are at most
+            // `num_players` handles.
+            history.push_back(TerminalTargetWatermark {
+                target_set_digest: operation.target_set_digest,
+                participant_set_digest: operation.participant_set_digest,
+                coordinator_generation: operation.coordinator_generation,
+                generation: target.generation,
+                sequence: operation.sequence,
+            });
+            // Bounded by policy: a replay older than this window needs a
+            // protocol-level terminal epoch (#516). Exact matching above keeps
+            // a different live sequence admissible.
+            let bound = self.num_players.saturating_mul(2).max(1);
+            while history.len() > bound {
+                history.pop_front();
+            }
+        }
+    }
+
     /// Records a terminal coordinated-drop operation so replayed control
     /// messages for it are ignored. The history is bounded to one entry per
     /// player: the supersede/abort paths are peer-driven and may run every
@@ -1888,6 +2002,7 @@ impl<T: Config> P2PSession<T> {
         while self.coordinated_drop.rejected.len() >= self.num_players.max(1) {
             self.coordinated_drop.rejected.pop_front();
         }
+        self.coordinated_drop_record_terminal_targets(operation, &copied);
         self.coordinated_drop
             .rejected
             .push_back(RejectedDropOperation {
@@ -2483,7 +2598,9 @@ impl<T: Config> P2PSession<T> {
         // the old attempt (a `Superseded` abort, an old inventory report) would
         // otherwise be indistinguishable from the retry's. Advance the
         // coordinator-local sequence past every recently closed identity so the
-        // retry opens a genuinely fresh attempt.
+        // retry opens a genuinely fresh attempt. The per-target terminal
+        // watermark also covers identities that have already left the bounded
+        // `closed` journal (issue #512).
         let operation = loop {
             let candidate = DropOperationId {
                 coordinator,
@@ -2492,11 +2609,12 @@ impl<T: Config> P2PSession<T> {
                 target_set_digest,
                 participant_set_digest,
             };
-            if !self
-                .coordinated_drop
-                .closed
-                .iter()
-                .any(|closed| *closed == candidate)
+            if !self.coordinated_drop_operation_is_terminal(candidate, &targets)
+                && !self
+                    .coordinated_drop
+                    .closed
+                    .iter()
+                    .any(|closed| *closed == candidate)
             {
                 break candidate;
             }
@@ -2619,6 +2737,7 @@ impl<T: Config> P2PSession<T> {
                 &attempt.targets,
             );
         }
+        self.coordinated_drop_record_terminal_targets(attempt.operation, &attempt.targets);
         self.coordinated_drop_close_operation(attempt.operation);
         self.enter_fail_closed_disconnect_state_at(attempt.held_at);
         report_violation!(
@@ -2662,6 +2781,22 @@ impl<T: Config> P2PSession<T> {
         }) {
             return false;
         }
+        // The target set is canonical: every remote handle of the target
+        // endpoint. A subset would create a second sequence space for one
+        // handle, and `begin_coordinated_drop` never produces one.
+        let canonical_targets = self
+            .player_reg
+            .handles_by_address_iter(target_addr)
+            .filter(|handle| {
+                matches!(
+                    self.player_reg.handles.get(handle),
+                    Some(PlayerType::Remote(_))
+                )
+            })
+            .count();
+        if prepare.targets.len() != canonical_targets {
+            return false;
+        }
         // The participant set is the agreed membership epoch minus the target
         // handles. It deliberately ignores which endpoints look reachable right
         // now: a split view must not shrink the quorum denominator (issue #504).
@@ -2689,6 +2824,12 @@ impl<T: Config> P2PSession<T> {
                 .windows(2)
                 .any(|pair| matches!(pair, [left, right] if left >= right))
         {
+            return false;
+        }
+        // The operation's coordinator identity is the canonical first
+        // participant. A forged handle must not open a second authority for the
+        // same participant set.
+        if prepare.participants.first().copied() != Some(prepare.operation.coordinator) {
             return false;
         }
         // A prepare is a survivor-quorum certificate. Accepting a participant
@@ -2741,6 +2882,13 @@ impl<T: Config> P2PSession<T> {
             .iter()
             .any(|closed| *closed == prepare.operation)
         {
+            return Ok(());
+        }
+        // The per-operation journal is bounded; the per-target history
+        // outlives it so an exact replay of an evicted aborted or superseded
+        // operation cannot reopen an Inventory attempt (issue #512). A
+        // different (including lower) sequence is left to the comparator.
+        if self.coordinated_drop_operation_is_terminal(prepare.operation, &prepare.targets) {
             return Ok(());
         }
         if source == Some(prepare.operation.coordinator) {
@@ -2933,6 +3081,10 @@ impl<T: Config> P2PSession<T> {
                     .queued
                     .insert(PlayerHandle::new(usize::from(target.handle)));
             }
+            self.coordinated_drop_record_terminal_targets(
+                superseded.operation,
+                &superseded.targets,
+            );
             self.coordinated_drop_close_operation(superseded.operation);
         }
 
@@ -4169,12 +4321,7 @@ impl<T: Config> P2PSession<T> {
 
     /// Records the highest cut applied for one operation identity.
     fn coordinated_drop_record_closed_cut(&mut self, commit: &DropCommit) {
-        let key = (
-            commit.operation.coordinator,
-            commit.operation.coordinator_generation,
-            commit.operation.target_set_digest,
-            commit.operation.participant_set_digest,
-        );
+        let key = Self::coordinated_drop_operation_identity(commit.operation);
         if let Some((_, cut)) = self
             .coordinated_drop
             .closed_commit_cuts
@@ -4470,6 +4617,7 @@ impl<T: Config> P2PSession<T> {
                         .queued
                         .insert(PlayerHandle::new(usize::from(target.handle)));
                 }
+                self.coordinated_drop_record_terminal_targets(attempt.operation, &attempt.targets);
                 self.coordinated_drop_close_operation(attempt.operation);
             }
         } else {
@@ -4854,6 +5002,7 @@ impl<T: Config> P2PSession<T> {
                         self.coordinated_drop.queued.insert(handle);
                     }
                 }
+                self.coordinated_drop_record_terminal_targets(prepare.operation, &prepare.targets);
                 self.coordinated_drop_close_operation(prepare.operation);
                 continue;
             }
@@ -18955,6 +19104,440 @@ mod tests {
         assert!(
             session.coordinated_drop_validate_prepare(&prepare),
             "the bound participant digest must be accepted"
+        );
+    }
+
+    #[test]
+    fn forged_operation_coordinator_is_rejected() {
+        let session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let mut prepare = DropPrepare {
+            operation: DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence: 1,
+                target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(
+                    &targets,
+                ),
+                participant_set_digest:
+                    P2PSession::<TestConfig>::coordinated_drop_participant_digest(&participants),
+            },
+            targets,
+            participants,
+        };
+        assert!(
+            session.coordinated_drop_validate_prepare(&prepare),
+            "the canonical coordinator fixture must validate"
+        );
+        prepare.operation.coordinator = 1;
+        assert!(
+            !session.coordinated_drop_validate_prepare(&prepare),
+            "an operation coordinator that is not the first participant must be rejected"
+        );
+    }
+
+    #[test]
+    fn rejoined_coordinator_generation_is_not_blocked_by_terminal_history() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let target_digest = P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets);
+        let participant_digest =
+            P2PSession::<TestConfig>::coordinated_drop_participant_digest(&participants);
+        let old = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: target_digest,
+            participant_set_digest: participant_digest,
+        };
+        session.coordinated_drop_record_terminal_targets(old, &targets);
+
+        let rejoined = DropOperationId {
+            coordinator_generation: 1,
+            ..old
+        };
+        session
+            .coordinated_drop_accept_prepare(
+                DropPrepare {
+                    operation: rejoined,
+                    targets,
+                    participants,
+                },
+                Some(0),
+            )
+            .expect("a rejoined coordinator generation is a fresh authority era");
+        assert_eq!(
+            session
+                .coordinated_drop
+                .active
+                .as_ref()
+                .map(|active| active.operation),
+            Some(rejoined),
+            "a new coordinator generation must not be blocked by its predecessor"
+        );
+    }
+
+    #[test]
+    fn evicted_terminal_prepare_does_not_reopen_and_retry_advances() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let operation = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 1,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &participants,
+            ),
+        };
+        let prepare = DropPrepare {
+            operation,
+            targets,
+            participants,
+        };
+        assert!(
+            session.coordinated_drop_validate_prepare(&prepare),
+            "fixture must be a valid prepare"
+        );
+
+        session.coordinated_drop_record_terminal_targets(operation, &prepare.targets);
+        session.coordinated_drop_close_operation(operation);
+        // Evict the operation from the per-operation journal with enough newer
+        // terminal operations for another target set.
+        for sequence in 2..=6 {
+            session.coordinated_drop_close_operation(DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence,
+                target_set_digest: 0xDEAD_BEEF,
+                participant_set_digest: 0xFEED_FACE,
+            });
+        }
+        assert!(
+            !session
+                .coordinated_drop
+                .closed
+                .iter()
+                .any(|closed| *closed == operation),
+            "fixture must evict the terminal operation from the bounded journal"
+        );
+
+        session
+            .coordinated_drop_accept_prepare(prepare, Some(0))
+            .expect("an evicted terminal prepare is a peer artifact");
+        assert!(
+            session.coordinated_drop.active.is_none(),
+            "an evicted terminal prepare must not reopen an inventory attempt"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
+
+        // A genuine retry for the same target set must advance past the
+        // terminal watermark instead of being rejected by it.
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("retry");
+        let retry = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("retry must open an attempt")
+            .operation;
+        assert!(
+            retry.sequence > operation.sequence,
+            "retry must advance past the terminal watermark: {retry:?}"
+        );
+    }
+
+    #[test]
+    fn evicted_rejected_prepare_still_cannot_reopen() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let target_digest = P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets);
+        let participant_digest =
+            P2PSession::<TestConfig>::coordinated_drop_participant_digest(&participants);
+        let operation = |generation| DropOperationId {
+            coordinator: 0,
+            coordinator_generation: generation,
+            sequence: 1,
+            target_set_digest: target_digest,
+            participant_set_digest: participant_digest,
+        };
+        let first = operation(0);
+        session.coordinated_drop_note_rejected(first, &targets);
+        // Distinct coordinator generations evict the first identity from the
+        // bounded rejected journal.
+        for generation in 1..=u16::try_from(session.num_players).expect("roster fits u16") {
+            session.coordinated_drop_note_rejected(operation(generation), &targets);
+        }
+        assert!(
+            !session
+                .coordinated_drop
+                .rejected
+                .iter()
+                .any(|rejected| rejected.operation == first),
+            "fixture must evict the identity from the rejected journal"
+        );
+
+        session
+            .coordinated_drop_accept_prepare(
+                DropPrepare {
+                    operation: first,
+                    targets,
+                    participants,
+                },
+                Some(0),
+            )
+            .expect("an evicted rejected prepare is a peer artifact");
+        assert!(
+            session.coordinated_drop.active.is_none(),
+            "an evicted rejected prepare must not reopen an inventory attempt"
+        );
+        assert_eq!(session.current_state(), SessionState::Running);
+    }
+
+    #[test]
+    fn retry_steps_once_past_a_closed_identity_after_the_terminal_watermark() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let target_digest = P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets);
+        let participant_digest =
+            P2PSession::<TestConfig>::coordinated_drop_participant_digest(&participants);
+        let operation = |sequence| DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence,
+            target_set_digest: target_digest,
+            participant_set_digest: participant_digest,
+        };
+        session.coordinated_drop_record_terminal_targets(operation(1), &targets);
+        session.coordinated_drop_close_operation(operation(2));
+
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("retry");
+        let retry = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("retry must open an attempt")
+            .operation;
+        assert_eq!(
+            retry.sequence, 3,
+            "a closed-journal collision above the watermark takes one step, not a rewind"
+        );
+    }
+
+    #[test]
+    fn large_terminal_identity_does_not_block_a_new_retry() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let participants = vec![0, 1, 2, 3];
+        let terminal = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: u32::MAX,
+            target_set_digest: P2PSession::<TestConfig>::coordinated_drop_target_digest(&targets),
+            participant_set_digest: P2PSession::<TestConfig>::coordinated_drop_participant_digest(
+                &participants,
+            ),
+        };
+        session.coordinated_drop_record_terminal_targets(terminal, &targets);
+
+        session
+            .begin_coordinated_drop(PlayerHandle::new(4))
+            .expect("retry");
+        let retry = session
+            .coordinated_drop
+            .active
+            .as_ref()
+            .expect("retry must open an attempt")
+            .operation;
+        assert_eq!(
+            retry.sequence, 1,
+            "an unrelated terminal identity must not exhaust the retry sequence"
+        );
+    }
+
+    #[test]
+    fn terminal_watermark_matches_exact_identity_and_is_bounded() {
+        let mut session = five_player_majority_session(PlayerHandle::new(0));
+        let targets = vec![DropTarget {
+            handle: 4,
+            generation: 0,
+        }];
+        let base = DropOperationId {
+            coordinator: 0,
+            coordinator_generation: 0,
+            sequence: 3,
+            target_set_digest: 0xAAAA,
+            participant_set_digest: 0xBBBB,
+        };
+        session.coordinated_drop_record_terminal_targets(base, &targets);
+        assert!(session.coordinated_drop_operation_is_terminal(base, &targets));
+        let initial_len = session
+            .coordinated_drop
+            .terminal_targets
+            .get(&4)
+            .map(VecDeque::len);
+        session.coordinated_drop_record_terminal_targets(base, &targets);
+        assert_eq!(
+            session
+                .coordinated_drop
+                .terminal_targets
+                .get(&4)
+                .map(VecDeque::len),
+            initial_len,
+            "a duplicate exact identity must not grow the history"
+        );
+        assert!(session.coordinated_drop_operation_is_terminal(base, &targets));
+
+        let other_era = DropOperationId {
+            participant_set_digest: 0xCCCC,
+            ..base
+        };
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(other_era, &targets),
+            "a different participant era must not inherit the terminal identity"
+        );
+        let other_target = vec![DropTarget {
+            handle: 3,
+            generation: 0,
+        }];
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(base, &other_target),
+            "another target handle must not inherit the terminal identity"
+        );
+        let other_target_set = DropOperationId {
+            target_set_digest: 0xDDDD,
+            ..base
+        };
+        let two_handles = vec![
+            DropTarget {
+                handle: 3,
+                generation: 0,
+            },
+            DropTarget {
+                handle: 4,
+                generation: 0,
+            },
+        ];
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(other_target_set, &two_handles),
+            "a different target set must not inherit the terminal identity"
+        );
+        let other_sequence = DropOperationId {
+            sequence: 4,
+            ..base
+        };
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(other_sequence, &targets),
+            "a different live sequence must not be treated as a replay"
+        );
+        let other_coordinator_generation = DropOperationId {
+            coordinator_generation: 1,
+            ..base
+        };
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(other_coordinator_generation, &targets),
+            "a rejoined coordinator generation must not be blocked"
+        );
+
+        let bound = session.num_players.saturating_mul(2).max(1);
+        for sequence in 10..10_u32.saturating_add(u32::try_from(bound).unwrap_or(u32::MAX)) {
+            session.coordinated_drop_record_terminal_targets(
+                DropOperationId { sequence, ..base },
+                &targets,
+            );
+        }
+        assert_eq!(
+            session
+                .coordinated_drop
+                .terminal_targets
+                .get(&4)
+                .map(VecDeque::len),
+            Some(bound),
+            "each target handle's exact-identity history must stay bounded"
+        );
+        assert!(
+            !session.coordinated_drop_operation_is_terminal(base, &targets),
+            "the oldest identity is evicted once the handle history is full"
+        );
+
+        let invalid = vec![DropTarget {
+            handle: 99,
+            generation: 0,
+        }];
+        session.coordinated_drop_record_terminal_targets(base, &invalid);
+        assert!(
+            !session.coordinated_drop.terminal_targets.contains_key(&99),
+            "invalid handles must not grow the terminal history"
+        );
+        assert!(
+            session.coordinated_drop.terminal_targets.len() <= session.num_players,
+            "the terminal history must stay bounded by the player count"
+        );
+    }
+
+    #[test]
+    fn non_canonical_target_subset_does_not_match_membership() {
+        let session = create_multi_handle_remote_session();
+        let full = DropPrepare {
+            operation: DropOperationId {
+                coordinator: 0,
+                coordinator_generation: 0,
+                sequence: 1,
+                target_set_digest: 0,
+                participant_set_digest: 0,
+            },
+            targets: vec![
+                DropTarget {
+                    handle: 1,
+                    generation: 0,
+                },
+                DropTarget {
+                    handle: 2,
+                    generation: 0,
+                },
+            ],
+            participants: vec![0],
+        };
+        assert!(
+            session.coordinated_drop_prepare_matches_current_membership(&full),
+            "the full endpoint target set is canonical"
+        );
+        let subset = DropPrepare {
+            targets: vec![DropTarget {
+                handle: 1,
+                generation: 0,
+            }],
+            ..full
+        };
+        assert!(
+            !session.coordinated_drop_prepare_matches_current_membership(&subset),
+            "a subset of one endpoint's handles must not validate"
         );
     }
 
